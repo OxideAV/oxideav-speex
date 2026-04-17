@@ -1,5 +1,5 @@
-//! Top-level Speex encoder — wraps the narrowband + wideband CELP
-//! analysis loops behind the [`oxideav_codec::Encoder`] trait.
+//! Top-level Speex encoder — wraps the NB, WB, and UWB CELP analysis
+//! loops behind the [`oxideav_codec::Encoder`] trait.
 //!
 //! Supported:
 //!   * **8 kHz narrowband** — sub-mode 3 (8 kbps) and sub-mode 5
@@ -13,16 +13,21 @@
 //!     * Sub-mode 3 (~9.6 kbps) stochastic split-VQ → 492 bits/frame.
 //!       **This is the default** — better 4–8 kHz fidelity than
 //!       folding at the cost of ~8 kbps.
+//!   * **32 kHz ultra-wideband** — WB (NB mode 5 + WB sub-mode 3 by
+//!     default) plus a UWB extension layer. Two UWB layers are
+//!     available, selected via `bit_rate`:
+//!     * `bit_rate ≤ 25_000` selects the null UWB layer (WB output
+//!       QMF-upsampled to 32 kHz, 1 bit of UWB overhead — 493
+//!       bits/frame total at WB-3 = ~24.65 kbps).
+//!     * `bit_rate > 25_000` or `None` selects the folding UWB layer
+//!       (36 bits of UWB overhead — 528 bits/frame total at WB-3 =
+//!       ~26.4 kbps).
 //!
 //! Callers can override the WB sub-mode via the
 //! [`CodecParameters::bit_rate`] field when constructing the encoder:
 //!   * `bit_rate ≤ 20_000` selects WB sub-mode 1 (folding, 16.6 kbps).
 //!   * `bit_rate >= 20_001` selects WB sub-mode 3 (stochastic, 24.6 kbps).
 //!   * `None` ≡ WB sub-mode 3 (default).
-//!
-//! Ultra-wideband (32 kHz) still returns `Error::Unsupported` from the
-//! factory — that path would stack a second SB-CELP layer on top of
-//! the wideband encoder and is out of scope here.
 //!
 //! The produced packets embed an 80-byte Speex header as `extradata`
 //! describing the chosen mode; one encoded codec-frame per container
@@ -39,6 +44,8 @@ use crate::bitwriter::BitWriter;
 use crate::header::{SPEEX_HEADER_SIZE, SPEEX_SIGNATURE};
 use crate::nb_decoder::NB_FRAME_SIZE;
 use crate::nb_encoder::{nb_submode_for_rate, NbEncoder};
+use crate::uwb_decoder::UWB_FULL_FRAME_SIZE;
+use crate::uwb_encoder::UwbEncoder;
 use crate::wb_decoder::WB_FULL_FRAME_SIZE;
 use crate::wb_encoder::WbEncoder;
 
@@ -64,10 +71,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     match sample_rate {
         8_000 => make_nb(params),
         16_000 => make_wb(params),
+        32_000 => make_uwb(params),
         other => Err(Error::unsupported(format!(
             "Speex encoder: sample rate {other} Hz not supported \
-             — use 8000 (narrowband) or 16000 (wideband). \
-             32000 (ultra-wideband) encode is not yet implemented"
+             — use 8000 (narrowband), 16000 (wideband), or 32000 (ultra-wideband)"
         ))),
     }
 }
@@ -147,10 +154,50 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }))
 }
 
+/// Pick a UWB sub-mode (0 = null layer, 1 = folding) based on
+/// `bit_rate`. Defaults to folding when unspecified.
+fn uwb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
+    match bit_rate {
+        Some(r) if r <= 25_000 => 0,
+        _ => 1,
+    }
+}
+
+fn make_uwb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+    let submode = uwb_submode_for_rate(params.bit_rate);
+    let uwb = UwbEncoder::with_submode(submode)?;
+
+    let mut output = params.clone();
+    output.media_type = MediaType::Audio;
+    output.sample_format = Some(SampleFormat::S16);
+    output.channels = Some(1);
+    output.sample_rate = Some(32_000);
+    output.codec_id = params.codec_id.clone();
+    output.bit_rate = Some(match submode {
+        0 => 24_650,
+        _ => 26_400,
+    });
+    if output.extradata.is_empty() {
+        output.extradata = build_speex_header(SpeexBandMode::Uwb, 5);
+    }
+
+    Ok(Box::new(SpeexEncoder {
+        output_params: output,
+        time_base: TimeBase::new(1, 32_000),
+        band: BandState::Uwb(Box::new(uwb)),
+        frame_size: UWB_FULL_FRAME_SIZE,
+        pcm_queue: Vec::new(),
+        pending: VecDeque::new(),
+        frame_index: 0,
+        eof: false,
+    }))
+}
+
 #[derive(Clone, Copy)]
 enum SpeexBandMode {
     Nb,
     Wb,
+    Uwb,
 }
 
 /// Build a minimal 80-byte Speex-in-Ogg header describing the stream
@@ -170,6 +217,11 @@ fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
         // decoder uses it for Ogg timing; actual bit-count is driven
         // by the stream).
         SpeexBandMode::Wb => (16_000u32, 1u32, 16_600i32, WB_FULL_FRAME_SIZE as u32),
+        // Ultra-wideband: stacks on top of the WB encoder. Rate /
+        // frame-size mirror `sb_uwb_mode`'s defaults. The bitrate
+        // field is informational; the stream itself carries the real
+        // bits-per-frame count.
+        SpeexBandMode::Uwb => (32_000u32, 2u32, 26_400i32, UWB_FULL_FRAME_SIZE as u32),
     };
     let mut h = vec![0u8; SPEEX_HEADER_SIZE];
     h[0..8].copy_from_slice(SPEEX_SIGNATURE);
@@ -192,6 +244,7 @@ fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
 enum BandState {
     Nb(Box<NbEncoder>),
     Wb(Box<WbEncoder>),
+    Uwb(Box<UwbEncoder>),
 }
 
 struct SpeexEncoder {
@@ -248,6 +301,7 @@ impl SpeexEncoder {
         match &self.band {
             BandState::Nb(_) => 8_000,
             BandState::Wb(_) => 16_000,
+            BandState::Uwb(_) => 32_000,
         }
     }
 
@@ -289,10 +343,11 @@ impl SpeexEncoder {
             let pts = Some(self.frame_index as i64 * self.frame_size as i64);
             self.frame_index += 1;
 
-            let mut bw = BitWriter::with_capacity(48);
+            let mut bw = BitWriter::with_capacity(96);
             match &mut self.band {
                 BandState::Nb(nb) => nb.encode_frame(&pcm, &mut bw)?,
                 BandState::Wb(wb) => wb.encode_frame(&pcm, &mut bw)?,
+                BandState::Uwb(uwb) => uwb.encode_frame(&pcm, &mut bw)?,
             }
             // NB mode 5 packs 300 bits into 38 bytes (4-bit zero pad).
             // WB NB-mode-5 + WB-mode-1 packs 336 bits into 42 bytes
@@ -362,16 +417,13 @@ mod tests {
     }
 
     #[test]
-    fn encoder_factory_rejects_uwb() {
+    fn encoder_factory_accepts_uwb_mono_s16() {
         let mut params = CodecParameters::audio(CodecId::new(crate::CODEC_ID_STR));
         params.sample_rate = Some(32_000);
         params.channels = Some(1);
         params.sample_format = Some(SampleFormat::S16);
-        let err = match make_encoder(&params) {
-            Ok(_) => panic!("expected make_encoder to fail on UWB params"),
-            Err(e) => e,
-        };
-        assert!(matches!(err, Error::Unsupported(_)));
+        let enc = make_encoder(&params).expect("factory accepts UWB mono S16");
+        assert_eq!(enc.output_params().sample_rate, Some(32_000));
     }
 
     #[test]
