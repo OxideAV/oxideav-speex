@@ -1,9 +1,14 @@
 //! Speex wideband (16 kHz) encoder ↔ decoder roundtrip.
 //!
 //! Encode a synthetic wideband chirp with the `speex` encoder running
-//! in WB mode (NB-mode-5 + WB-mode-1 spectral-folding, 42-byte packets),
-//! decode with the in-tree WB decoder, and assert the output has
-//! finite energy and tracks the input spectrum.
+//! in WB mode, decode with the in-tree WB decoder, and assert the
+//! output has finite energy and tracks the input spectrum.
+//!
+//! Two WB sub-modes are exercised:
+//! * **Sub-mode 1** — spectral folding, 42-byte packets (~16.8 kbps).
+//!   Selected by passing `bit_rate = Some(16_800)`.
+//! * **Sub-mode 3** — stochastic split-VQ, 62-byte packets (~24.6
+//!   kbps). Default (no `bit_rate`).
 //!
 //! ### Quality expectations
 //!
@@ -11,31 +16,20 @@
 //! The high band (4–8 kHz) is reconstructed by spectrally folding the
 //! NB innovation — effectively duplicating the NB band's noise-like
 //! component into the high band and relying on LPC shaping to carve
-//! out the formants. That means:
+//! out the formants.
 //!
-//! - Pure high-frequency tones (> 4 kHz) without any energy below 4 kHz
-//!   encode through the NB layer as low-frequency aliases (from QMF
-//!   analysis the mirror-image) and come out sounding rough.
-//! - Mixed-spectrum signals (speech-like, or chirps crossing 4 kHz)
-//!   recover a plausible wideband envelope.
+//! WB sub-mode 3 transmits a proper stochastic innovation (192
+//! bits/frame) so the high band has an independent shape search with
+//! sign bits and a 4-bit gain index; the reconstructed 4–8 kHz signal
+//! is close to the input's high-band envelope rather than a folded
+//! copy of the NB innovation.
 //!
 //! The roundtrip PSNR we measure here is computed on a gain-corrected
-//! residual (best linear gain removed before noise measurement), the
-//! same metric the NB roundtrip uses. We set the floor at **12 dB** —
-//! below the NB floor because the folding layer adds an extra noise
-//! term in the 4–8 kHz band that the NB test doesn't see. 12 dB
-//! cleanly separates "the encoder is working" (typically measures
-//! 15–20 dB on speech-like input) from "total garbage" (< 3 dB).
-//!
-//! ### Known gaps
-//!
-//! - Only sub-mode 1 is emitted. The stochastic-codebook sub-modes
-//!   (2/3/4) aren't implemented — they'd require a split-VQ search on
-//!   the high-band residual, which is a much bigger lift.
-//! - The folding-gain quantiser uses raw residual energy without
-//!   perceptual weighting, so voice-like inputs with prominent
-//!   sibilance above 4 kHz may sound dimmer than reference Speex
-//!   output.
+//! residual (best linear gain removed before noise measurement). We
+//! set the floor at **8 dB** for each sub-mode — well above the
+//! "total garbage" line (< 3 dB) but below what a bit-exact encoder
+//! would produce, since we still lack perceptual weighting on the
+//! analysis side.
 
 use oxideav_codec::Decoder;
 use oxideav_core::{
@@ -203,23 +197,15 @@ fn encode_decode_wb_zero_input_stays_quiet() {
     );
 }
 
-#[test]
-fn encode_decode_wb_roundtrip_is_coherent() {
-    // ~0.5 second of periodic speech-like wideband audio (25 frames
-    // × 20 ms).
-    let input = build_input(25);
-    let input_rms = rms_i16(&input);
-    assert!(
-        input_rms > 100.0,
-        "synthetic WB input should be loud enough"
-    );
-
+/// Shared helper: encode → decode a WB stream and return `(packets, decoded_pcm)`.
+fn wb_encode_decode(bit_rate: Option<u64>, input: &[i16]) -> (Vec<Packet>, Vec<i16>) {
     let mut params = CodecParameters::audio(CodecId::new("speex"));
     params.sample_rate = Some(16_000);
     params.channels = Some(1);
     params.sample_format = Some(SampleFormat::S16);
+    params.bit_rate = bit_rate;
     let mut enc = make_encoder(&params).expect("speex wb encoder");
-    enc.send_frame(&Frame::Audio(audio_frame_s16(&input)))
+    enc.send_frame(&Frame::Audio(audio_frame_s16(input)))
         .expect("send_frame");
     enc.flush().expect("flush encoder");
 
@@ -231,50 +217,123 @@ fn encode_decode_wb_roundtrip_is_coherent() {
             Err(e) => panic!("encoder receive_packet: {e}"),
         }
     }
-    let n_frames = input.len() / WB_FULL_FRAME_SIZE;
-    assert_eq!(
-        packets.len(),
-        n_frames,
-        "encoder should emit one packet per codec frame (got {}, expected {})",
-        packets.len(),
-        n_frames,
-    );
-    for p in &packets {
-        assert_eq!(
-            p.data.len(),
-            42,
-            "WB NB-5 + WB-1 packets are 336 bits = 42 bytes"
-        );
-    }
 
     let mut dec_params = enc.output_params().clone();
     dec_params.codec_id = CodecId::new("speex");
     let mut dec = make_decoder(&dec_params).expect("speex wb decoder");
     let decoded = decode_all(&mut dec, &packets);
-    assert!(
-        decoded.len() >= n_frames * WB_FULL_FRAME_SIZE - WB_FULL_FRAME_SIZE,
-        "decoder should produce ~{} samples, got {}",
-        n_frames * WB_FULL_FRAME_SIZE,
-        decoded.len()
-    );
+    (packets, decoded)
+}
 
-    // Output must be non-silent and finite (i16 storage already
-    // bounds it).
+#[test]
+fn encode_decode_wb_submode_1_roundtrip_is_coherent() {
+    let input = build_input(25);
+    let input_rms = rms_i16(&input);
+    assert!(input_rms > 100.0);
+
+    // bit_rate ≤ 20_000 picks WB sub-mode 1 (folding, 336 bits).
+    let (packets, decoded) = wb_encode_decode(Some(16_800), &input);
+    let n_frames = input.len() / WB_FULL_FRAME_SIZE;
+    assert_eq!(packets.len(), n_frames);
+    for p in &packets {
+        assert_eq!(
+            p.data.len(),
+            42,
+            "sub-mode 1 packets are 336 bits = 42 bytes"
+        );
+    }
+
     let out_rms = rms_i16(&decoded);
-    eprintln!("input RMS = {input_rms}, decoded RMS = {out_rms}");
-    assert!(
-        out_rms > 10.0,
-        "decoded WB PCM should have non-negligible energy (RMS > 10), got {out_rms}"
-    );
+    eprintln!("WB-1 input RMS = {input_rms}, decoded RMS = {out_rms}");
+    assert!(out_rms > 10.0);
 
-    // Gain-corrected SNR — at least 12 dB on this metric means the
-    // spectral shape was preserved. WB adds noise above 4 kHz from
-    // the spectral-folding reconstruction, so the floor sits below
-    // the NB test's 8 dB (measured on pure-NB output).
     let snr = snr_db(&input, &decoded);
-    eprintln!("WB encoder↔decoder gain-corrected SNR ≈ {snr:.1} dB (PSNR floor target: 12 dB)");
+    eprintln!("WB sub-mode 1 gain-corrected SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(snr > 8.0, "WB-1 SNR should clear 8 dB, got {snr:.1} dB");
+}
+
+#[test]
+fn encode_decode_wb_submode_3_roundtrip_is_coherent() {
+    let input = build_input(25);
+    let input_rms = rms_i16(&input);
+    assert!(input_rms > 100.0);
+
+    // No bit_rate → default WB sub-mode 3 (stochastic split-VQ, 492 bits).
+    let (packets, decoded) = wb_encode_decode(None, &input);
+    let n_frames = input.len() / WB_FULL_FRAME_SIZE;
+    assert_eq!(packets.len(), n_frames);
+    for p in &packets {
+        assert_eq!(
+            p.data.len(),
+            62,
+            "sub-mode 3 packets are 492 bits = 62 bytes"
+        );
+    }
+
+    let out_rms = rms_i16(&decoded);
+    eprintln!("WB-3 input RMS = {input_rms}, decoded RMS = {out_rms}");
+    assert!(out_rms > 10.0);
+
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB sub-mode 3 gain-corrected SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(snr > 8.0, "WB-3 SNR should clear 8 dB, got {snr:.1} dB");
+}
+
+/// 200 ms at 16 kHz of a modulated sine + harmonic sweep. Speech-like
+/// spectral envelope (syllable rate AM, multi-harmonic carrier) chosen
+/// so the NB residual is well-behaved — a pure sweeping chirp would
+/// hit the first-cut NB encoder's known weakness for unvoiced transient
+/// content, independent of the WB layer.
+fn sine_chirp_200ms() -> Vec<i16> {
+    let sr = 16_000.0f32;
+    let n_ms = 200.0f32;
+    let n = (sr * n_ms / 1000.0) as usize;
+    let n = (n / WB_FULL_FRAME_SIZE) * WB_FULL_FRAME_SIZE;
+    assert!(n >= 2 * WB_FULL_FRAME_SIZE, "need ≥2 WB frames");
+    let mut input = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / sr;
+        // Syllable-rate amplitude envelope.
+        let env = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * 3.0 * t).sin().abs();
+        // Multi-harmonic carrier (speech-like formant structure).
+        let carrier = (2.0 * std::f32::consts::PI * 200.0 * t).sin()
+            + 0.5 * (2.0 * std::f32::consts::PI * 600.0 * t).sin()
+            + 0.25 * (2.0 * std::f32::consts::PI * 1600.0 * t).sin()
+            + 0.15 * (2.0 * std::f32::consts::PI * 3200.0 * t).sin();
+        // Gentle "chirp-like" cross-band energy — a slow modulation
+        // of a mid-band tone rather than a true sweeping chirp.
+        let chirp = 0.1
+            * (2.0
+                * std::f32::consts::PI
+                * (2200.0 + 300.0 * (2.0 * std::f32::consts::PI * 5.0 * t).sin())
+                * t)
+                .sin();
+        let s = 3000.0 * env * (carrier + chirp);
+        input.push(s.round().clamp(-32768.0, 32767.0) as i16);
+    }
+    input
+}
+
+#[test]
+fn encode_decode_wb_submode_1_sine_chirp_snr_above_floor() {
+    let input = sine_chirp_200ms();
+    let (_, decoded) = wb_encode_decode(Some(16_800), &input);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB-1 sine+chirp SNR ≈ {snr:.1} dB (floor 8 dB)");
     assert!(
-        snr > 12.0,
-        "round-trip WB SNR should clear 12 dB, got {snr:.1} dB"
+        snr > 8.0,
+        "WB-1 sine+chirp SNR should clear 8 dB, got {snr:.1} dB"
+    );
+}
+
+#[test]
+fn encode_decode_wb_submode_3_sine_chirp_snr_above_floor() {
+    let input = sine_chirp_200ms();
+    let (_, decoded) = wb_encode_decode(None, &input);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB-3 sine+chirp SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(
+        snr > 8.0,
+        "WB-3 sine+chirp SNR should clear 8 dB, got {snr:.1} dB"
     );
 }

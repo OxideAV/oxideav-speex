@@ -1,35 +1,42 @@
-//! Speex wideband (sub-band CELP) encoder — float path, sub-mode 1 only.
+//! Speex wideband (sub-band CELP) encoder — float path.
 //!
 //! Mirrors the high-band analysis pipeline from `libspeex/sb_celp.c`'s
 //! `sb_encode`. A wideband frame is the concatenation of a full
 //! narrowband (0–4 kHz) encode and a high-band (4–8 kHz) extension
-//! layer, separated in time by a 2-band QMF analysis. We emit the
-//! lowest-rate SB-CELP layer — **sub-mode 1**, 36-bit spectral-folding
-//! extension (~1.8 kbit/s on top of the 15 kbit/s NB).
+//! layer, separated in time by a 2-band QMF analysis.
+//!
+//! ### Supported WB sub-modes
+//!
+//! - **Sub-mode 1** — 36-bit spectral-folding extension. The high-band
+//!   excitation is recovered at the decoder by alternating-sign scaling
+//!   of the NB innovation; the encoder only transmits LSPs + a 5-bit
+//!   folding gain per sub-frame.
+//! - **Sub-mode 3** — 192-bit stochastic extension. The high-band
+//!   excitation is a split-VQ innovation (5 sub-vectors × 8 samples,
+//!   7-bit shape + 1-bit sign) plus a 4-bit gain index per sub-frame,
+//!   giving ~9.6 kbit/s on top of NB mode 5 (24.6 kbit/s total).
+//!
+//! Sub-modes 2 and 4 are accepted by the table driver in
+//! [`crate::wb_submodes`] but not implemented in this encoder — see
+//! [`WbEncoder::with_submode`] for the supported set.
+//!
+//! ### Default
+//!
+//! `WbEncoder::new()` picks sub-mode 3 — the best-quality mode this
+//! encoder can produce. Use `with_submode(1)` to fall back to the
+//! low-rate folding layer when bitrate matters more than bandwidth
+//! fidelity.
 //!
 //! Bitstream layout produced here (matching [`crate::wb_decoder`]):
 //!
 //! ```text
 //!   +---- NB frame (300 bits, NB sub-mode 5) -----+
 //!   | 1 bit  wideband-bit = 1                     |
-//!   | 3 bit  WB sub-mode id = 1                   |
+//!   | 3 bit  WB sub-mode id                       |
 //!   | 12 bit high-band LSP VQ (2×6)               |
-//!   | 5 bit  folding gain  } per sub-frame        |
-//!   | 5 bit  folding gain  }      ×4 = 20 bits    |
-//!   | 5 bit  folding gain  }                      |
-//!   | 5 bit  folding gain  }                      |
+//!   | ... per-sub-frame innovation/gain ...       |
 //!   +---------------------------------------------+
-//!   Total WB extension = 36 bits — matches `WB_SUBMODE_1.bits_per_frame`.
 //! ```
-//!
-//! Sub-mode 1 is chosen as the pragmatic minimum for this first-cut
-//! encoder: it doesn't need a stochastic codebook search on the high
-//! band, only a per-sub-frame gain that's matched against a simple
-//! exp-law scalar quantiser. The reconstructed high band is obtained
-//! by spectral folding of the narrowband innovation — the same path
-//! the decoder exercises in `WbInnov::Folding`. The resulting
-//! wideband quality is modest (roughly 2 kHz of usable extension
-//! above the NB band), but the roundtrip is valid and stable.
 //!
 //! ### Pipeline (per 320-sample wideband frame)
 //!
@@ -43,41 +50,48 @@
 //! 4. **LSP quantisation** — two-stage 6+6 bit VQ against
 //!    `HIGH_LSP_CDBK` + `HIGH_LSP_CDBK2`. Same tables the decoder
 //!    reads.
-//! 5. **Per-sub-frame folding gain** — compare the high-band LPC
-//!    residual RMS with what spectral-folding of the NB innovation
-//!    produces, and pick the 5-bit `q` that minimises the ratio.
-//!
-//! ### Known gaps
-//!
-//! - Sub-modes 2/3/4 (stochastic codebook) are not implemented — they
-//!   require a split-VQ search on the high-band residual, which the
-//!   folding path sidesteps.
-//! - No rate-control / VAD — every frame is encoded as the full
-//!   NB-mode-5 + WB-mode-1 bundle (332 bits, ~16.6 kbit/s).
-//! - No perceptual weighting — the gain quantiser uses raw residual
-//!   energy, which is a looser fit than libspeex's weighted path
-//!   but adequate for the folding layer's modest dynamic range.
+//! 5. **Per-sub-frame innovation**:
+//!    * Sub-mode 1: pick a 5-bit folding gain by matching NB-innovation
+//!      RMS against the high-band LPC residual RMS.
+//!    * Sub-mode 3: pick a 4-bit gain (`GC_QUANT_BOUND` scalar) and a
+//!      5-subvector split codebook with 1-bit sign + 7-bit shape per
+//!      subvector, searched against the high-band residual target.
 
 use oxideav_core::{Error, Result};
 
 use crate::bitwriter::BitWriter;
+use crate::hexc_tables::HEXC_TABLE;
 use crate::lsp::{bw_lpc, lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
 use crate::nb_encoder::NbEncoder;
 use crate::qmf::{H0_PROTOTYPE, QMF_ORDER};
 use crate::wb_decoder::{
-    FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER,
+    FOLDING_GAIN, GC_QUANT_BOUND, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER,
     WB_NB_SUBFRAMES, WB_SUBFRAME_SIZE,
 };
 
-/// The only WB sub-mode this encoder can emit.
-pub const SUPPORTED_WB_SUBMODE: u32 = 1;
+/// Default WB sub-mode selected by [`WbEncoder::new`] — best-quality
+/// stochastic extension this encoder supports.
+pub const DEFAULT_WB_SUBMODE: u32 = 3;
+
+/// Sub-mode 3 split-CB layout: 5 sub-vectors × 8 samples, 7-bit shape,
+/// 1-bit sign. Matches `SPLIT_CB_HIGH` in `wb_submodes.rs`.
+const SM3_SUBVECT_SIZE: usize = 8;
+const SM3_NB_SUBVECT: usize = 5;
+const SM3_SHAPE_BITS: u32 = 7;
+const SM3_SHAPE_ENTRIES: usize = 1 << SM3_SHAPE_BITS; // 128
+
+/// Gain-index scaling factor used by the decoder's SB-CELP stochastic
+/// branch (`sb_celp.c`: `gc = 0.87360 * gc_quant_bound[qgc]`).
+const GC_QUANT_SCALE: f32 = 0.87360;
 
 /// Wideband encoder state. Holds the sub-encoder for the NB (low-band)
 /// path, the QMF analysis memory for the two branches, and the
 /// previous frame's quantised high-band LSPs for sub-frame
 /// interpolation.
 pub struct WbEncoder {
+    /// Which WB sub-mode this encoder emits (1 or 3).
+    submode: u32,
     /// NB CELP encoder for the 0–4 kHz band.
     nb: NbEncoder,
     /// QMF analysis memory (low-pass branch).
@@ -98,23 +112,67 @@ impl Default for WbEncoder {
 }
 
 impl WbEncoder {
+    /// Construct a WB encoder using the default sub-mode
+    /// ([`DEFAULT_WB_SUBMODE`], currently sub-mode 3). For a concrete
+    /// sub-mode pick, use [`WbEncoder::with_submode`].
     pub fn new() -> Self {
+        Self::with_submode(DEFAULT_WB_SUBMODE).expect("default submode is supported")
+    }
+
+    /// Construct a WB encoder for a specific sub-mode.
+    ///
+    /// Supported: **1** (folding) and **3** (stochastic split-CB).
+    /// Returns `Error::Unsupported` for any other submode id
+    /// (incl. sub-modes 2 and 4 which are defined by the reference
+    /// but not implemented here).
+    pub fn with_submode(submode: u32) -> Result<Self> {
+        match submode {
+            1 | 3 => {}
+            other => {
+                return Err(Error::unsupported(format!(
+                    "Speex WB encoder: sub-mode {other} is not implemented. \
+                     Use 1 (spectral-folding, 36 bits) or 3 (stochastic \
+                     split-VQ, 192 bits). Sub-modes 2/4 are defined by the \
+                     reference but have no encoder here."
+                )));
+            }
+        }
         let mut old_qlsp_high = [0.0f32; WB_LPC_ORDER];
         for i in 0..WB_LPC_ORDER {
             old_qlsp_high[i] =
                 std::f32::consts::PI * (i as f32 + 1.0) / (WB_LPC_ORDER as f32 + 1.0);
         }
-        Self {
+        Ok(Self {
+            submode,
             nb: NbEncoder::new(),
             qmf_mem_lo: [0.0; QMF_ORDER],
             qmf_mem_hi: [0.0; QMF_ORDER],
             old_qlsp_high,
             first: true,
+        })
+    }
+
+    /// The WB sub-mode this encoder was constructed for.
+    pub fn submode(&self) -> u32 {
+        self.submode
+    }
+
+    /// Total number of bits this encoder writes per wideband frame,
+    /// NB prefix + WB extension (excludes any Ogg/container overhead).
+    /// Matches the bit count the decoder will consume.
+    pub fn bits_per_frame(&self) -> u32 {
+        // NB mode 5 = 300 bits; WB extension adds 36 (sub-mode 1) or
+        // 192 (sub-mode 3). Both include the 4-bit wideband-bit +
+        // submode-selector prefix.
+        300 + match self.submode {
+            1 => 36,
+            3 => 192,
+            _ => unreachable!("submode validated in with_submode"),
         }
     }
 
     /// Encode one 320-sample wideband frame (int16-range f32). Appends
-    /// the 336-bit payload (300 NB + 36 WB-extension) to the writer.
+    /// the NB + WB-extension payload to the writer.
     pub fn encode_frame(&mut self, pcm: &[f32], bw: &mut BitWriter) -> Result<()> {
         if pcm.len() != WB_FULL_FRAME_SIZE {
             return Err(Error::invalid(format!(
@@ -140,9 +198,9 @@ impl WbEncoder {
         // ---- 2. NB encode on the low band -----------------------------
         self.nb.encode_frame(&low_band, bw)?;
 
-        // ---- 3. WB layer header: wideband-bit=1, submode=1 ------------
+        // ---- 3. WB layer header: wideband-bit=1, submode=N ------------
         bw.write_bits(1, 1);
-        bw.write_bits(SUPPORTED_WB_SUBMODE, 3);
+        bw.write_bits(self.submode, 3);
 
         // ---- 4. High-band LPC analysis --------------------------------
         let windowed = hamming_window_wb(&high_band);
@@ -183,20 +241,10 @@ impl WbEncoder {
             self.old_qlsp_high = qlsp;
         }
 
-        // ---- 7. Per-sub-frame folding gain quantisation ---------------
-        //
-        // Reference reconstruction (see `WbInnov::Folding`):
-        //   exc[i]   = +FG * low_innov[i]   * g
-        //   exc[i+1] = -FG * low_innov[i+1] * g     (for even i)
-        //   g        = exp(0.125·(q−10)) / filter_ratio
-        //
-        // Our goal is to pick `q ∈ 0..32` so that the resulting high
-        // band's synthesis reconstructs the input high band's envelope.
-        // We compare the (interpolated) high-band LPC residual energy
-        // against the NB innovation's folding energy, both on a per
-        // sub-frame basis.
+        // ---- 7. Per-sub-frame innovation -----------------------------
         let nb_innov = *self.nb.innov();
         let nb_pi_gain = *self.nb.pi_gain();
+        let nb_exc_rms = *self.nb.exc_rms();
         let mut interp_qlsp = [0.0f32; WB_LPC_ORDER];
         let mut ak = [0.0f32; WB_LPC_ORDER];
         for sub in 0..WB_NB_SUBFRAMES {
@@ -224,27 +272,79 @@ impl WbEncoder {
             let rl = nb_pi_gain[sub];
             let filter_ratio = (rl + 0.01) / (rh + 0.01);
 
-            // LPC-residual energy of the high band for this sub-frame.
-            // `hb_sub` = high-band PCM for sub-frame `sub` (40 samples).
+            // LPC-residual of the high band for this sub-frame — this
+            // is the target excitation the decoder's synthesis filter
+            // would need to produce the observed PCM sub-frame.
             let hb_sub = &high_band[off..off + WB_SUBFRAME_SIZE];
             let mut residual = [0.0f32; WB_SUBFRAME_SIZE];
             fir_filter_stateless(hb_sub, &ak, &mut residual, WB_LPC_ORDER);
             let hb_res_rms = rms(&residual);
 
-            // Folding-source energy — what the decoder would produce at
-            // unit `g`. That's just the NB innovation's RMS within this
-            // sub-frame, scaled by FOLDING_GAIN.
-            let folding_rms = FOLDING_GAIN * rms(&nb_innov[off..off + WB_SUBFRAME_SIZE]);
+            match self.submode {
+                1 => {
+                    // Sub-mode 1 (spectral folding) — pick a 5-bit `q`
+                    // such that
+                    //   g_target = hb_res_rms / (FG · nb_innov_rms)  * filter_ratio
+                    //   q        = round(10 + 8·ln(g_target))
+                    // The decoder does `g = exp((q-10)/8) / filter_ratio`
+                    // and then `exc[i] = ±FG · g · nb_innov[i]` (sign
+                    // alternates). Matching RMS is a good first
+                    // approximation.
+                    let folding_rms = FOLDING_GAIN * rms(&nb_innov[off..off + WB_SUBFRAME_SIZE]);
+                    let eps = 1e-6f32;
+                    let g_target = (hb_res_rms / folding_rms.max(eps)) * filter_ratio.max(eps);
+                    let q_f = 10.0 + 8.0 * g_target.max(eps).ln();
+                    let q = q_f.round().clamp(0.0, 31.0) as u32;
+                    bw.write_bits(q, 5);
+                }
+                3 => {
+                    // Sub-mode 3 (stochastic split-CB, 7-bit shape, 1-bit
+                    // sign, 5 subvects × 8 samples, 4-bit gain).
+                    //
+                    // Decoder reconstruction:
+                    //   qgc   = 4-bit gain index
+                    //   el    = NB sub-frame exc RMS
+                    //   gc    = 0.87360 * GC_QUANT_BOUND[qgc]
+                    //   scale = gc * el / filter_ratio
+                    //   exc[j] = scale * Σ_i sign_i * 0.03125 * SHAPE[idx_i][j]
+                    //
+                    // Encoder inversion: pick qgc so `scale` puts the
+                    // codebook output's natural amplitude near the
+                    // residual target. Then search the codebook at that
+                    // scale.
+                    let eps = 1e-6f32;
+                    let el = nb_exc_rms[sub];
+                    // Target `gc` = residual_rms * filter_ratio / el.
+                    // Decoder multiplies by 0.87360, so the quantised
+                    // boundary we want is `target / 0.87360`.
+                    let gc_target = (hb_res_rms * filter_ratio.max(eps)) / el.max(eps);
+                    let qgc_target = gc_target / GC_QUANT_SCALE;
+                    let qgc = nearest_gc_index(qgc_target);
+                    bw.write_bits(qgc as u32, 4);
 
-            // Solve for the g that makes these match. Invert:
-            //   g_target = hb_res_rms / folding_rms            (unit-less)
-            //   g_target *= filter_ratio  (decoder divides by filter_ratio)
-            //   q        = 10 + 8·ln(g_target)
-            let eps = 1e-6f32;
-            let g_target = (hb_res_rms / folding_rms.max(eps)) * filter_ratio.max(eps);
-            let q_f = 10.0 + 8.0 * g_target.max(eps).ln();
-            let q = q_f.round().clamp(0.0, 31.0) as u32;
-            bw.write_bits(q, 5);
+                    let gc = GC_QUANT_SCALE * GC_QUANT_BOUND[qgc];
+                    let scale = gc * el / filter_ratio.max(eps);
+
+                    // Build the search target in the *excitation* domain
+                    // (what the decoder will multiply by `scale` to
+                    // reconstruct). We want to pick shape+sign indices
+                    // such that Σ sign · 0.03125 · cb ≈ residual / scale.
+                    // The codebook is stored at 1/32 scale (`0.03125`),
+                    // so the normalised target is
+                    //   t[j] = residual[j] / scale
+                    let inv_scale = if scale.abs() > eps { 1.0 / scale } else { 0.0 };
+                    let mut target = [0.0f32; WB_SUBFRAME_SIZE];
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        target[j] = residual[j] * inv_scale;
+                    }
+                    let indices = search_split_cb_sm3(&target);
+                    for (shape_idx, sign_bit) in indices {
+                        bw.write_bits(sign_bit, 1);
+                        bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
+                    }
+                }
+                _ => unreachable!("submode validated in with_submode"),
+            }
         }
 
         // ---- 8. Save state -------------------------------------------
@@ -252,6 +352,69 @@ impl WbEncoder {
         self.first = false;
         Ok(())
     }
+}
+
+// =====================================================================
+// Sub-mode 3 helpers: GC quantiser + split-CB search
+// =====================================================================
+
+/// Nearest-neighbour search on the 16-entry `GC_QUANT_BOUND` table. The
+/// decoder will pick exactly this index and scale by `GC_QUANT_SCALE`
+/// to get the final gain.
+fn nearest_gc_index(target: f32) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_err = f32::INFINITY;
+    for (i, &bound) in GC_QUANT_BOUND.iter().enumerate() {
+        let d = (target - bound).abs();
+        if d < best_err {
+            best_err = d;
+            best_idx = i;
+        }
+    }
+    best_idx
+}
+
+/// Search sub-mode 3's split codebook (`HEXC_TABLE`, 128×8, have_sign=true)
+/// against a normalised target `t[0..40]`. Each of the 5 sub-vectors
+/// picks the `(shape, sign)` that best matches its 8-sample slice.
+///
+/// Returns `[(shape_idx, sign_bit); 5]` in sub-vector order — exactly
+/// what [`crate::wb_decoder::split_cb_shape_sign_unquant`] will read.
+fn search_split_cb_sm3(target: &[f32; WB_SUBFRAME_SIZE]) -> [(usize, u32); SM3_NB_SUBVECT] {
+    let mut out = [(0usize, 0u32); SM3_NB_SUBVECT];
+    for sv in 0..SM3_NB_SUBVECT {
+        let off = sv * SM3_SUBVECT_SIZE;
+        let mut best_shape = 0usize;
+        let mut best_sign = 0u32;
+        let mut best_err = f32::INFINITY;
+        for shape in 0..SM3_SHAPE_ENTRIES {
+            let base = shape * SM3_SUBVECT_SIZE;
+            // Try both signs: sign=0 → +1, sign=1 → -1. Compare MSE
+            // against the target sub-vector slice.
+            let mut err_pos = 0.0f32;
+            let mut err_neg = 0.0f32;
+            for j in 0..SM3_SUBVECT_SIZE {
+                let cb = (HEXC_TABLE[base + j] as f32) * 0.03125;
+                let t = target[off + j];
+                let d_pos = t - cb;
+                let d_neg = t + cb;
+                err_pos += d_pos * d_pos;
+                err_neg += d_neg * d_neg;
+            }
+            if err_pos < best_err {
+                best_err = err_pos;
+                best_shape = shape;
+                best_sign = 0;
+            }
+            if err_neg < best_err {
+                best_err = err_neg;
+                best_shape = shape;
+                best_sign = 1;
+            }
+        }
+        out[sv] = (best_shape, best_sign);
+    }
+    out
 }
 
 // =====================================================================
@@ -398,8 +561,8 @@ fn levinson_durbin(r: &[f32]) -> [f32; WB_LPC_ORDER] {
 
 /// Stateless FIR analysis filter — computes the LPC residual of `x`
 /// given zero memory. (We don't need to carry state across sub-frames
-/// here because the folding-gain search only cares about each
-/// sub-frame's envelope energy, not the inter-sub-frame continuity.)
+/// here because the gain search only cares about each sub-frame's
+/// envelope energy, not the inter-sub-frame continuity.)
 fn fir_filter_stateless(x: &[f32], a: &[f32], y: &mut [f32], order: usize) {
     let n = x.len();
     debug_assert!(y.len() >= n);
@@ -651,9 +814,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_frame_writes_336_bits() {
+    fn encode_frame_submode_1_writes_336_bits() {
         // 300 NB bits + 36 WB-extension bits = 336 bits per frame.
-        let mut enc = WbEncoder::new();
+        let mut enc = WbEncoder::with_submode(1).unwrap();
         let mut bw = BitWriter::new();
         let mut pcm = [0.0f32; WB_FULL_FRAME_SIZE];
         for i in 0..WB_FULL_FRAME_SIZE {
@@ -662,6 +825,37 @@ mod tests {
         }
         enc.encode_frame(&pcm, &mut bw).unwrap();
         assert_eq!(bw.bit_position(), 336);
+        assert_eq!(enc.bits_per_frame(), 336);
+    }
+
+    #[test]
+    fn encode_frame_submode_3_writes_492_bits() {
+        // 300 NB bits + 192 WB-extension bits = 492 bits per frame.
+        let mut enc = WbEncoder::with_submode(3).unwrap();
+        let mut bw = BitWriter::new();
+        let mut pcm = [0.0f32; WB_FULL_FRAME_SIZE];
+        for i in 0..WB_FULL_FRAME_SIZE {
+            let t = i as f32;
+            pcm[i] = 4000.0 * (t * 0.1).sin() + 2000.0 * (t * 0.35).cos();
+        }
+        enc.encode_frame(&pcm, &mut bw).unwrap();
+        assert_eq!(bw.bit_position(), 492);
+        assert_eq!(enc.bits_per_frame(), 492);
+    }
+
+    #[test]
+    fn default_submode_is_three() {
+        let enc = WbEncoder::new();
+        assert_eq!(enc.submode(), DEFAULT_WB_SUBMODE);
+        assert_eq!(enc.submode(), 3);
+    }
+
+    #[test]
+    fn unsupported_submodes_report_unsupported() {
+        for bad in [0, 2, 4, 5, 6, 7, 8] {
+            let err = WbEncoder::with_submode(bad);
+            assert!(err.is_err(), "submode {bad} should not be supported");
+        }
     }
 
     #[test]
@@ -674,5 +868,17 @@ mod tests {
         for i in 1..WB_LPC_ORDER {
             assert!(qlsp[i] > qlsp[i - 1], "qlsp must stay sorted");
         }
+    }
+
+    #[test]
+    fn gc_index_roundtrip_picks_nearest() {
+        // For each bound, the quantiser should pick that index exactly.
+        for (i, &b) in GC_QUANT_BOUND.iter().enumerate() {
+            assert_eq!(nearest_gc_index(b), i);
+        }
+        // Midway between adjacent bounds should pick one of the two.
+        let mid = 0.5 * (GC_QUANT_BOUND[0] + GC_QUANT_BOUND[1]);
+        let idx = nearest_gc_index(mid);
+        assert!(idx == 0 || idx == 1);
     }
 }

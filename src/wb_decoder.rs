@@ -63,8 +63,10 @@ pub const LSP_MARGIN_HIGH: f32 = 0.05;
 pub const FOLDING_GAIN: f32 = 0.9;
 
 /// Stochastic gain quantization boundaries for SB-CELP (float path) —
-/// mirrors `gc_quant_bound[16]` in `sb_celp.c`.
-const GC_QUANT_BOUND: [f32; 16] = [
+/// mirrors `gc_quant_bound[16]` in `sb_celp.c`. Exposed to the
+/// wideband encoder so its stochastic sub-modes can invert the same
+/// quantiser the decoder uses.
+pub(crate) const GC_QUANT_BOUND: [f32; 16] = [
     0.97979, 1.28384, 1.68223, 2.20426, 2.88829, 3.78458, 4.95900, 6.49787, 8.51428, 11.15642,
     14.61846, 19.15484, 25.09895, 32.88761, 43.09325, 56.46588,
 ];

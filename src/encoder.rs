@@ -3,9 +3,18 @@
 //!
 //! Supported:
 //!   * **8 kHz narrowband** — sub-mode 5 (15 kbps) NB encode.
-//!   * **16 kHz wideband** — sub-mode 1 (~1.8 kbps) WB extension
-//!     layered on top of NB mode 5. Total rate ≈ 16.6 kbps at 20 ms
-//!     frames (336 bits/frame = 42 bytes).
+//!   * **16 kHz wideband** — NB mode 5 + one of the following WB
+//!     extension layers:
+//!     * Sub-mode 1 (~1.8 kbps) spectral folding → 336 bits/frame.
+//!     * Sub-mode 3 (~9.6 kbps) stochastic split-VQ → 492 bits/frame.
+//!       **This is the default** — better 4–8 kHz fidelity than
+//!       folding at the cost of ~8 kbps.
+//!
+//! Callers can override the WB sub-mode via the [`CodecParameters::bit_rate`]
+//! field when constructing the encoder:
+//!   * `bit_rate ≤ 20_000` selects sub-mode 1 (folding, 16.6 kbps).
+//!   * `bit_rate >= 20_001` selects sub-mode 3 (stochastic, 24.6 kbps).
+//!   * `None` ≡ sub-mode 3 (default).
 //!
 //! Ultra-wideband (32 kHz) still returns `Error::Unsupported` from the
 //! factory — that path would stack a second SB-CELP layer on top of
@@ -90,13 +99,32 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }))
 }
 
+/// Pick a WB sub-mode id (1 or 3) based on `bit_rate`. Returns the
+/// default (3) when `bit_rate` is `None`.
+fn wb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
+    match bit_rate {
+        Some(r) if r <= 20_000 => 1,
+        _ => 3,
+    }
+}
+
 fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+    let submode = wb_submode_for_rate(params.bit_rate);
+    let wb = WbEncoder::with_submode(submode)?;
+
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
     output.channels = Some(1);
     output.sample_rate = Some(16_000);
     output.codec_id = params.codec_id.clone();
+    // Reflect the actual encoded bit rate back on the output params so
+    // a downstream muxer sees an accurate rate.
+    output.bit_rate = Some(match submode {
+        1 => 16_800,
+        3 => 24_600,
+        _ => 16_000,
+    });
     if output.extradata.is_empty() {
         output.extradata = build_speex_header(SpeexBandMode::Wb);
     }
@@ -104,7 +132,7 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     Ok(Box::new(SpeexEncoder {
         output_params: output,
         time_base: TimeBase::new(1, 16_000),
-        band: BandState::Wb(Box::default()),
+        band: BandState::Wb(Box::new(wb)),
         frame_size: WB_FULL_FRAME_SIZE,
         pcm_queue: Vec::new(),
         pending: VecDeque::new(),
@@ -384,13 +412,12 @@ mod tests {
         assert_eq!(total_samples, 4 * NB_FRAME_SIZE);
     }
 
-    #[test]
-    fn wb_encoder_produces_336bit_packets() {
-        // WB = 300 NB + 36 WB-extension bits = 336 bits = 42 bytes.
+    fn run_wb_encoder(bit_rate: Option<u64>, expected_bytes: usize) {
         let mut params = CodecParameters::audio(CodecId::new(crate::CODEC_ID_STR));
         params.sample_rate = Some(16_000);
         params.channels = Some(1);
         params.sample_format = Some(SampleFormat::S16);
+        params.bit_rate = bit_rate;
         let mut enc = make_encoder(&params).unwrap();
         let n = 4 * WB_FULL_FRAME_SIZE;
         let mut samples = Vec::with_capacity(n);
@@ -418,7 +445,12 @@ mod tests {
         loop {
             match enc.receive_packet() {
                 Ok(p) => {
-                    assert_eq!(p.data.len(), 42, "336-bit WB packet = 42 bytes");
+                    assert_eq!(
+                        p.data.len(),
+                        expected_bytes,
+                        "WB packet size mismatch (bit_rate={:?})",
+                        bit_rate
+                    );
                     count += 1;
                 }
                 Err(Error::NeedMore) | Err(Error::Eof) => break,
@@ -426,5 +458,23 @@ mod tests {
             }
         }
         assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn wb_encoder_submode_1_produces_42byte_packets() {
+        // 300 NB + 36 WB = 336 bits = 42 bytes.
+        run_wb_encoder(Some(16_800), 42);
+    }
+
+    #[test]
+    fn wb_encoder_submode_3_default_produces_62byte_packets() {
+        // Default (no bit_rate specified) selects submode 3:
+        // 300 NB + 192 WB = 492 bits → 62 bytes after the 4-bit pad.
+        run_wb_encoder(None, 62);
+    }
+
+    #[test]
+    fn wb_encoder_submode_3_explicit_high_rate_still_62_bytes() {
+        run_wb_encoder(Some(24_600), 62);
     }
 }

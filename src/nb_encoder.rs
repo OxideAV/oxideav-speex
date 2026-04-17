@@ -106,6 +106,11 @@ pub struct NbEncoder {
     /// the wideband encoder can balance the high-band gain against the
     /// low-band filter envelope (see [`NbEncoder::pi_gain`]).
     pi_gain: [f32; NB_NB_SUBFRAMES],
+    /// Per-subframe RMS of the combined excitation (adaptive + fixed,
+    /// matching what the decoder writes back into `exc_rms`). Used by
+    /// the wideband stochastic sub-modes as the `el` scalar in the
+    /// high-band gain quantiser.
+    exc_rms_sub: [f32; NB_NB_SUBFRAMES],
     /// Per-sample innovation (fixed-codebook contribution) of the most
     /// recently encoded frame — not scaled by the adaptive excitation.
     /// Mirrors what the decoder stores in its `innov` buffer.
@@ -133,6 +138,7 @@ impl NbEncoder {
             mem_analysis: [0.0; NB_ORDER],
             mem_sp_sim: [0.0; NB_ORDER],
             pi_gain: [0.0; NB_NB_SUBFRAMES],
+            exc_rms_sub: [0.0; NB_NB_SUBFRAMES],
             innov: [0.0; NB_FRAME_SIZE],
             first: true,
         }
@@ -151,6 +157,15 @@ impl NbEncoder {
     /// wideband spectral-folding path.
     pub fn innov(&self) -> &[f32; NB_FRAME_SIZE] {
         &self.innov
+    }
+
+    /// Per-subframe combined-excitation RMS (read-only view). Populated
+    /// by `encode_frame`; meaningful only after at least one call.
+    /// Used by the wideband stochastic sub-modes as the `el` scalar in
+    /// the high-band stochastic gain quantiser, so the encoder sees the
+    /// same scaling the decoder will apply.
+    pub fn exc_rms(&self) -> &[f32; NB_NB_SUBFRAMES] {
+        &self.exc_rms_sub
     }
 
     /// Symbolic delay (in samples) between calling `encode_frame(pcm)`
@@ -410,12 +425,14 @@ impl NbEncoder {
 
             // Record per-sub-frame state for the wideband encoder. It
             // reads `pi_gain` to balance the high-band folding gain
-            // against the low-band filter envelope, and `innov` (the
+            // against the low-band filter envelope, `innov` (the
             // fixed-codebook excitation, not scaled by the adaptive
-            // component) to drive the spectral-folding path with the
-            // same signal the decoder will reconstruct.
+            // component) to drive the spectral-folding path, and
+            // `exc_rms_sub` to seed the high-band stochastic gain
+            // quantiser with the same signal the decoder will see.
             self.pi_gain[sub] = pi_gain_of_nb(ak_sub);
             self.innov[offset_in_frame..offset_in_frame + NB_SUBFRAME_SIZE].copy_from_slice(&innov);
+            self.exc_rms_sub[sub] = rms(&self.exc_buf[exc_idx..exc_idx + NB_SUBFRAME_SIZE]);
 
             // Update the simulated synthesis-filter state so the next
             // sub-frame's ZIR reflects what the decoder's `mem_sp`
