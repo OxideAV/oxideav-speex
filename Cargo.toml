@@ -1,22 +1,22 @@
 [package]
 name = "oxideav-speex"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+version = "0.0.3"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-speex"
+authors = ["Mark Karpeles"]
 description = "Pure-Rust Speex (CELP speech codec) — header parser + bit reader + scaffold"
 
 readme = "README.md"
-homepage.workspace = true
+homepage = "https://github.com/OxideAV/oxideav-speex"
 keywords = ["multimedia", "audio", "speex", "voice", "codec"]
 categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
-oxideav-core = { workspace = true }
-oxideav-codec = { workspace = true }
+oxideav-core = "0.0"
+oxideav-codec = "0.0"
 
 [dev-dependencies]
-oxideav-ogg = { workspace = true }
-oxideav-container = { workspace = true }
+oxideav-ogg = "0.0"
+oxideav-container = "0.0"
