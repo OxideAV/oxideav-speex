@@ -1,11 +1,11 @@
 //! Top-level Speex decoder — wires the NB CELP synthesis loop and the
-//! WB sub-band CELP extension into the [`oxideav_codec::Decoder`] trait.
+//! WB / UWB sub-band CELP extensions into the [`oxideav_codec::Decoder`]
+//! trait.
 //!
 //! Extracts the 80-byte Speex header from `CodecParameters::extradata`
 //! (which the Ogg demuxer fills with the first Speex packet) and
 //! validates it. NB streams produce `S16` mono audio frames at 8 kHz;
-//! WB streams produce 16 kHz. UWB streams still return
-//! `Error::Unsupported` (see [`crate::wb_decoder`] for the gap notes).
+//! WB streams produce 16 kHz; UWB streams produce 32 kHz.
 //!
 //! Speex-in-Ogg packs `frames_per_packet` (default 1) codec frames into
 //! one Ogg packet. The decoder loops over the bitstream until the
@@ -19,6 +19,7 @@ use oxideav_core::{
 use crate::bitreader::BitReader;
 use crate::header::{SpeexHeader, SpeexMode};
 use crate::nb_decoder::{NbDecoder, NB_FRAME_SIZE};
+use crate::uwb_decoder::{UwbDecoder, UWB_FULL_FRAME_SIZE};
 use crate::wb_decoder::{WbDecoder, WB_FULL_FRAME_SIZE};
 
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
@@ -45,11 +46,10 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
             params.codec_id.clone(),
             header,
         ))),
-        SpeexMode::UltraWideband => Err(Error::unsupported(
-            "Speex decoder: ultra-wideband (32 kHz) decoder not yet implemented \
-             — requires a second SB-CELP layer on top of the wideband decoder \
-             and a stacked QMF synthesis (see libspeex/sb_celp.c sb_uwb_mode)",
-        )),
+        SpeexMode::UltraWideband => Ok(Box::new(UwbDecoderImpl::new(
+            params.codec_id.clone(),
+            header,
+        ))),
     }
 }
 
@@ -304,6 +304,130 @@ impl Decoder for WbDecoderImpl {
     }
 }
 
+// =====================================================================
+// Ultra-wideband (32 kHz) decoder driver — stacks a second SB-CELP
+// layer on top of the WB decoder. Output is `S16` 32 kHz mono.
+// =====================================================================
+
+struct UwbDecoderImpl {
+    codec_id: CodecId,
+    uwb: UwbDecoder,
+    header: SpeexHeader,
+    time_base: TimeBase,
+    pending: Option<Packet>,
+    eof: bool,
+}
+
+impl UwbDecoderImpl {
+    fn new(codec_id: CodecId, header: SpeexHeader) -> Self {
+        let rate = if header.rate > 0 { header.rate } else { 32_000 };
+        let time_base = TimeBase::new(1, rate as i64);
+        Self {
+            codec_id,
+            uwb: UwbDecoder::new(),
+            header,
+            time_base,
+            pending: None,
+            eof: false,
+        }
+    }
+
+    fn decode_packet(&mut self, pkt: &Packet) -> Result<Frame> {
+        let mut br = BitReader::new(&pkt.data);
+        let frames_per_packet = self.header.frames_per_packet.max(1) as usize;
+        let channels = self.header.nb_channels.max(1) as usize;
+
+        if channels != 1 {
+            return Err(Error::unsupported(
+                "Speex decoder: stereo (intensity-stereo side channel) not yet implemented \
+                 — see libspeex/stereo.c",
+            ));
+        }
+
+        let mut pcm = Vec::with_capacity(UWB_FULL_FRAME_SIZE * frames_per_packet);
+        let mut produced = 0usize;
+        for _ in 0..frames_per_packet {
+            let mut frame_buf = [0.0f32; UWB_FULL_FRAME_SIZE];
+            match self.uwb.decode_frame(&mut br, &mut frame_buf) {
+                Ok(()) => {
+                    pcm.extend_from_slice(&frame_buf);
+                    produced += UWB_FULL_FRAME_SIZE;
+                }
+                Err(Error::Eof) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        if produced == 0 {
+            return Err(Error::invalid(
+                "Speex decoder: no frames decoded from UWB packet",
+            ));
+        }
+
+        let mut bytes = Vec::with_capacity(produced * 2);
+        for v in &pcm[..produced] {
+            let i = v.round().clamp(-32768.0, 32767.0) as i16;
+            bytes.extend_from_slice(&i.to_le_bytes());
+        }
+
+        Ok(Frame::Audio(AudioFrame {
+            format: SampleFormat::S16,
+            channels: channels as u16,
+            sample_rate: if self.header.rate > 0 {
+                self.header.rate
+            } else {
+                32_000
+            },
+            samples: produced as u32,
+            pts: pkt.pts,
+            time_base: self.time_base,
+            data: vec![bytes],
+        }))
+    }
+}
+
+impl Decoder for UwbDecoderImpl {
+    fn codec_id(&self) -> &CodecId {
+        &self.codec_id
+    }
+
+    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
+        if self.pending.is_some() {
+            return Err(Error::other(
+                "Speex decoder: receive_frame must be called before sending another packet",
+            ));
+        }
+        self.pending = Some(packet.clone());
+        Ok(())
+    }
+
+    fn receive_frame(&mut self) -> Result<Frame> {
+        let Some(pkt) = self.pending.take() else {
+            return if self.eof {
+                Err(Error::Eof)
+            } else {
+                Err(Error::NeedMore)
+            };
+        };
+        self.decode_packet(&pkt)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.eof = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        // UWB carries a WB sub-decoder (which itself holds an NB
+        // sub-decoder), plus the UWB-layer LSP/LPC synthesis memory,
+        // plus a second-stage QMF memory. Rebuilding the UwbDecoder
+        // zeroes every carry-over filter memory in the stack.
+        self.uwb = UwbDecoder::new();
+        self.pending = None;
+        self.eof = false;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,9 +487,10 @@ mod tests {
     }
 
     #[test]
-    fn uwb_header_returns_unsupported() {
+    fn uwb_header_yields_decoder() {
         let mut params = CodecParameters::audio(CodecId::new("speex"));
         params.extradata = good_extradata(2, 32000);
-        assert!(matches!(expect_err(&params), Error::Unsupported(_)));
+        let dec = make_decoder(&params).expect("UWB make_decoder");
+        assert_eq!(dec.codec_id().as_str(), "speex");
     }
 }

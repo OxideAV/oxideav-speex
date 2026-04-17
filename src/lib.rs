@@ -11,12 +11,13 @@
 //!     — WB sub-modes 1..=4, QMF synthesis bank, high-band LSP & LPC
 //!     synthesis, stochastic codebook + spectral-folding excitation.
 //!     See [`wb_decoder`] and [`qmf`].
-//!   * Ultra-wideband (32 kHz) is **not yet** implemented; UWB streams
-//!     return `Error::Unsupported`. UWB layers a second SB-CELP stage
-//!     on top of the WB decoder (the "low band" of the UWB layer is
-//!     the WB decoder's full output), and the driver would have to
-//!     stack two QMF syntheses — a substantial extension beyond the
-//!     WB work done here.
+//!   * Ultra-wideband (32 kHz) SB-CELP decoder — stacks a second
+//!     8th-order LPC + spectral-folding layer on top of the wideband
+//!     decoder and runs a second QMF synthesis stage to produce 32
+//!     kHz mono output. Matches `sb_uwb_mode` in `libspeex/modes.c`.
+//!     Only sub-mode 1 (folding, 36 bits of UWB overhead) is defined
+//!     by the reference; stochastic UWB sub-modes do not exist. See
+//!     [`uwb_decoder`].
 //!
 //! Tables (LSP, gain, fixed codebooks) are transcribed from the
 //! BSD-licensed Xiph reference (`libspeex/{lsp_tables_nb,gain_table,
@@ -50,6 +51,8 @@ pub mod nb_decoder;
 pub mod nb_encoder;
 pub mod qmf;
 pub mod submodes;
+pub mod uwb_decoder;
+pub mod uwb_encoder;
 pub mod wb_decoder;
 pub mod wb_encoder;
 pub mod wb_submodes;

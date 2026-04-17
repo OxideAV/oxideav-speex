@@ -333,9 +333,13 @@ fn decode_wb_5khz_tone_exercises_high_band() {
 }
 
 #[test]
-fn uwb_decoder_returns_unsupported() {
-    // UWB (32 kHz) would require stacking a second SB-CELP layer on top
-    // of the WB layer — still TODO. Verify the factory rejects cleanly.
+fn decode_uwb_1000_tone_is_audible() {
+    // UWB (32 kHz) decode stacks a second SB-CELP layer on top of the
+    // WB decoder. A 1 kHz tone is safely inside the WB low band so it
+    // should reproduce regardless of what the UWB folding extension
+    // contributes — what this test proves is that the decoder reaches
+    // the end of a real libspeex-produced UWB bitstream without
+    // panicking or going silent.
     let path = "/tmp/speex_uwb.spx";
     if !ensure_ref(
         path,
@@ -343,7 +347,7 @@ fn uwb_decoder_returns_unsupported() {
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=1000:duration=0.5",
+            "sine=frequency=1000:duration=1",
             "-ar",
             "32000",
             "-ac",
@@ -357,22 +361,31 @@ fn uwb_decoder_returns_unsupported() {
         eprintln!("skipping: ffmpeg/libspeex (UWB) unavailable");
         return;
     }
-    let f = File::open(path).expect("open uwb fixture");
-    let bf: Box<dyn ReadSeek> = Box::new(BufReader::new(f));
-    let demux = oxideav_ogg::demux::open(bf).expect("ogg open");
-    let stream = &demux.streams()[0];
-    match make_decoder(&stream.params) {
-        Ok(_) => {
-            eprintln!("UWB decoder landed — update this test if that's intended");
-        }
-        Err(Error::Unsupported(msg)) => {
-            assert!(
-                msg.to_lowercase().contains("ultra")
-                    || msg.to_lowercase().contains("uwb")
-                    || msg.to_lowercase().contains("32 khz"),
-                "UWB rejection should mention the mode, got: {msg}"
-            );
-        }
-        Err(e) => panic!("UWB factory should return Unsupported, got {e}"),
-    }
+    let (pcm, sr) = decode_to_f32(path);
+    assert_eq!(sr, 32_000, "UWB sample rate");
+    assert!(
+        pcm.len() >= 4 * 640,
+        "expected >= 4 UWB frames, got {} samples",
+        pcm.len()
+    );
+
+    // Discard 300 ms of warm-up — QMF + two-layer LPC synthesis
+    // cold-starts take longer than at NB/WB.
+    let warmup = (sr as usize) * 3 / 10;
+    let warm = &pcm[warmup..];
+    let r = rms(warm);
+    eprintln!("UWB decode RMS = {r}");
+    assert!(
+        r > 0.01,
+        "decoded UWB PCM should be audible (RMS > 0.01), got {r}"
+    );
+
+    let on = goertzel(warm, sr, 1000.0);
+    let off = off_target_power(warm, sr, 1000.0, 300.0);
+    let ratio = on / off.max(1e-9);
+    eprintln!("UWB 1 kHz Goertzel ratio = {ratio:.2} (on={on}, off={off})");
+    assert!(
+        ratio > 2.0,
+        "1 kHz tone should dominate (ratio > 2x), got {ratio}"
+    );
 }

@@ -85,6 +85,12 @@ pub struct WbDecoder {
     /// QMF synthesis memory for the high-band branch.
     g1_mem: [f32; QMF_ORDER],
     first: bool,
+    /// High-band excitation accumulated across the 4 sub-frames of the
+    /// last decoded wideband frame — 160 samples at 8 kHz decimated
+    /// rate. Serves as the "innovation save" input for the UWB layer's
+    /// spectral-folding excitation (see `libspeex/sb_celp.c`:
+    /// `SPEEX_SET_INNOVATION_SAVE`).
+    hb_innov: [f32; WB_FRAME_SIZE],
 }
 
 impl Default for WbDecoder {
@@ -110,7 +116,22 @@ impl WbDecoder {
             g0_mem: [0.0; QMF_ORDER],
             g1_mem: [0.0; QMF_ORDER],
             first: true,
+            hb_innov: [0.0; WB_FRAME_SIZE],
         }
+    }
+
+    /// High-band excitation of the last decoded wideband frame, 160
+    /// samples at the 8 kHz decimated rate. The UWB layer folds this
+    /// into its own high band when its sub-mode is 1 (folding).
+    pub fn hb_innov(&self) -> &[f32; WB_FRAME_SIZE] {
+        &self.hb_innov
+    }
+
+    /// Borrow the inner narrowband decoder (read-only) — used by the
+    /// UWB layer to pull the 4-subframe `pi_gain` array when it needs to
+    /// balance its own high-band excitation against the WB envelope.
+    pub fn nb(&self) -> &NbDecoder {
+        &self.nb
     }
 
     /// Decode one wideband Speex frame. Writes `WB_FULL_FRAME_SIZE`
@@ -178,6 +199,9 @@ impl WbDecoder {
             );
             out.copy_from_slice(&full);
             self.first = true;
+            // Null high-band excitation — the UWB folding layer will
+            // see zeros if it stacks on top of a null-submode WB frame.
+            self.hb_innov = [0.0; WB_FRAME_SIZE];
             return Ok(());
         };
 
@@ -303,6 +327,12 @@ impl WbDecoder {
                 WB_LPC_ORDER,
                 &mut self.mem_sp,
             );
+
+            // Save this sub-frame's excitation into the frame-wide
+            // hb_innov buffer before we move it into `prev_exc` for the
+            // next iteration — UWB folding (if layered on top of this
+            // WB decoder) reads the full 4-subframe slab.
+            self.hb_innov[offset..offset + WB_SUBFRAME_SIZE].copy_from_slice(&exc);
 
             // Store current excitation / LPC for the next sub-frame.
             self.prev_exc.copy_from_slice(&exc);
