@@ -1,18 +1,22 @@
-//! Narrowband Speex CELP encoder (float-mode, mode-5 only).
+//! Narrowband Speex CELP encoder (float-mode).
 //!
-//! This is a first-cut encoder. It produces a valid mode-5 bitstream
-//! (exactly 300 bits per 20 ms frame, parseable by the companion
-//! [`crate::nb_decoder::NbDecoder`]) whose decoded output preserves
-//! the input's spectral shape. Absolute level is approximate — the
-//! encoder carries a consistent multiplicative gain error because it
-//! lacks full perceptual-weighting + rate control. See the roundtrip
-//! test in `tests/encode_nb.rs` for the quality floor the encoder
-//! aims for (gain-corrected SNR > 8 dB).
+//! This is a first-cut encoder. It produces a valid Speex NB bitstream
+//! (parseable by the companion [`crate::nb_decoder::NbDecoder`]) whose
+//! decoded output preserves the input's spectral shape. Absolute level
+//! is approximate — the encoder carries a consistent multiplicative
+//! gain error because it lacks full perceptual-weighting + rate
+//! control. See the roundtrip tests in `tests/encode_nb.rs` for the
+//! quality floor each supported mode aims for.
 //!
-//! Supported mode:
-//!   * **Sub-mode 5** (15 kbps): 30-bit NB LSP VQ, 7-bit pitch / 7-bit
-//!     pitch-gain per sub-frame, 3-bit sub-frame innovation gain,
-//!     48-bit split-CB innovation (8×6 bits, `EXC_5_64_TABLE`).
+//! Supported modes:
+//!   * **Sub-mode 3** (8 kbps, 160 bits / 20 ms frame): 18-bit LBR LSP
+//!     VQ (3-stage), 7-bit pitch / 5-bit LBR pitch-gain per sub-frame,
+//!     1-bit sub-frame innovation gain, 20-bit split-CB innovation
+//!     (4×5 bits, `EXC_10_32_TABLE`).
+//!   * **Sub-mode 5** (15 kbps, 300 bits / 20 ms frame): 30-bit NB LSP
+//!     VQ (5-stage), 7-bit pitch / 7-bit pitch-gain per sub-frame,
+//!     3-bit sub-frame innovation gain, 48-bit split-CB innovation
+//!     (8×6 bits, `EXC_5_64_TABLE`).
 //!
 //! All other sub-modes return `Error::Unsupported` at construction
 //! time.
@@ -51,7 +55,7 @@
 use oxideav_core::{Error, Result};
 
 use crate::bitwriter::BitWriter;
-use crate::gain_tables::GAIN_CDBK_NB;
+use crate::gain_tables::{GAIN_CDBK_LBR, GAIN_CDBK_NB};
 use crate::lsp::{lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_nb::{CDBK_NB, CDBK_NB_HIGH1, CDBK_NB_HIGH2, CDBK_NB_LOW1, CDBK_NB_LOW2};
 use crate::nb_decoder::{
@@ -61,7 +65,7 @@ use crate::nb_decoder::{
 // keep the decoder module surface untouched.
 const LSP_MARGIN: f32 = 0.002;
 
-use crate::exc_tables::EXC_5_64_TABLE;
+use crate::exc_tables::{EXC_10_32_TABLE, EXC_5_64_TABLE};
 
 /// Excitation history length — must match the decoder's layout so the
 /// LTP search sees the same past-excitation frame shape as the decoder
@@ -75,12 +79,39 @@ const EXC_GAIN_QUANT_SCAL3: [f32; 8] = [
     0.061130, 0.163546, 0.310413, 0.428220, 0.555887, 0.719055, 0.938694, 1.326874,
 ];
 
-/// The only mode this encoder can emit.
+/// Mode-3 (and other LBR modes) 1-bit sub-frame innovation gain
+/// quantizer — mirrors `EXC_GAIN_QUANT_SCAL1` in `nb_decoder.rs`.
+const EXC_GAIN_QUANT_SCAL1: [f32; 2] = [0.70469, 1.05127];
+
+/// Default sub-mode picked by [`NbEncoder::new`] — preserved as the
+/// legacy 15 kbps path so the wideband encoder (which builds a bare
+/// `NbEncoder`) keeps its existing behaviour.
 pub const SUPPORTED_SUBMODE: u32 = 5;
 
-/// Mode-5 encoder state — held across frames so the LTP search and LPC
+/// Select an NB sub-mode id from a target bit-rate in bit/s. Matches
+/// the same interpretation the encoder factory uses when the caller
+/// passes `CodecParameters::bit_rate`. Values close to a supported
+/// mode's nominal rate snap to that mode; `None` selects the default
+/// (mode 5, 15 kbps).
+pub fn nb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
+    match bit_rate {
+        None => 5,
+        // 8 kbps band — mode 3. Covers anything in the 6.5..=12 kbps
+        // range since modes 4 (11 kbps) and 2 (5.95 kbps) are not yet
+        // implemented in the encoder.
+        Some(r) if r <= 12_000 => 3,
+        // 15 kbps band — mode 5 (default). Anything above 12 kbps
+        // routes here; modes 6 + 7 are not yet implemented in the
+        // encoder.
+        _ => 5,
+    }
+}
+
+/// NB encoder state — held across frames so the LTP search and LPC
 /// interpolation can see the previous sub-frame's excitation and LSPs.
 pub struct NbEncoder {
+    /// Active sub-mode id (currently 3 or 5).
+    submode: u32,
     /// Quantized LSPs from the previous frame (for sub-frame
     /// interpolation on the encoder side — mirrors what the decoder
     /// will do).
@@ -126,12 +157,50 @@ impl Default for NbEncoder {
 }
 
 impl NbEncoder {
+    /// Construct a NB encoder for the legacy default sub-mode
+    /// ([`SUPPORTED_SUBMODE`], currently 5 / 15 kbps). This constructor
+    /// never fails and is used by the WB encoder path which depends on
+    /// the 300-bit mode-5 NB prefix.
     pub fn new() -> Self {
+        Self::with_submode(SUPPORTED_SUBMODE).expect("legacy default submode is always supported")
+    }
+
+    /// Construct a NB encoder for a specific sub-mode id.
+    ///
+    /// Supported: **3** (8 kbps LBR) and **5** (15 kbps). Any other
+    /// value returns [`Error::Unsupported`] — the remaining sub-modes
+    /// (1/2/4/6/7/8) are defined by the reference but have no encoder
+    /// implementation here yet.
+    pub fn with_submode(submode: u32) -> Result<Self> {
+        match submode {
+            3 | 5 => {}
+            other => {
+                return Err(Error::unsupported(format!(
+                    "Speex NB encoder: sub-mode {other} not implemented. \
+                     Use 3 (8 kbps, 160 bits/frame) or 5 (15 kbps, 300 bits/frame)."
+                )));
+            }
+        }
+        // The "neutral" initial LSP vector. This matches the decoder's
+        // `lsp_linear(i) = 0.25*(i+1)` so first-frame interpolation is
+        // aligned with what the decoder will compute. Note: the legacy
+        // mode-5 path below uses `π*(i+1)/(p+1)` as its VQ initial
+        // guess — slightly different from the decoder's linear
+        // reference — but since both stages (the offset applied during
+        // quantisation and the offset subtracted during dequantisation)
+        // use the same `lsp_linear_mode5` function, the round-trip
+        // error is self-cancelling inside the codebook search. We keep
+        // the mode-5 convention unchanged to avoid perturbing the
+        // existing 24-ish dB SNR.
         let mut old_qlsp = [0.0f32; NB_ORDER];
         for i in 0..NB_ORDER {
-            old_qlsp[i] = std::f32::consts::PI * (i as f32 + 1.0) / (NB_ORDER as f32 + 1.0);
+            old_qlsp[i] = match submode {
+                3 => 0.25 * (i as f32 + 1.0),
+                _ => std::f32::consts::PI * (i as f32 + 1.0) / (NB_ORDER as f32 + 1.0),
+            };
         }
-        Self {
+        Ok(Self {
+            submode,
             old_qlsp,
             interp_qlpc: [0.0; NB_ORDER],
             exc_buf: vec![0.0; EXC_BUF_LEN],
@@ -141,6 +210,21 @@ impl NbEncoder {
             exc_rms_sub: [0.0; NB_NB_SUBFRAMES],
             innov: [0.0; NB_FRAME_SIZE],
             first: true,
+        })
+    }
+
+    /// The sub-mode id this encoder emits.
+    pub fn submode(&self) -> u32 {
+        self.submode
+    }
+
+    /// Total number of bits this encoder writes per 20 ms frame
+    /// (including the wideband-bit + submode selector).
+    pub fn bits_per_frame(&self) -> u32 {
+        match self.submode {
+            3 => 160,
+            5 => 300,
+            _ => unreachable!("validated in with_submode"),
         }
     }
 
@@ -177,9 +261,10 @@ impl NbEncoder {
 
     /// Encode one 160-sample narrowband frame of **int16-range** float
     /// samples (i.e. typical amplitudes up to ±32768). Appends bits for
-    /// a single sub-mode-5 packet (300 bits; the packet is NOT
-    /// terminated with a `m=15` selector — the caller is expected to
-    /// either finish the writer immediately or chain more frames).
+    /// a single packet of the configured sub-mode (160 bits for mode 3,
+    /// 300 bits for mode 5). The packet is NOT terminated with a
+    /// `m=15` selector — the caller is expected to either finish the
+    /// writer immediately or chain more frames.
     pub fn encode_frame(&mut self, pcm: &[f32], bw: &mut BitWriter) -> Result<()> {
         if pcm.len() != NB_FRAME_SIZE {
             return Err(Error::invalid(format!(
@@ -231,8 +316,21 @@ impl NbEncoder {
             fallback
         });
 
-        // ---- 3. Quantise LSP (mode-5 = five-stage VQ, 30 bits) --------
-        let (qlsp, lsp_indices) = quantise_lsp_nb(&lsp);
+        // ---- 3. Quantise LSP — submode-specific VQ --------------------
+        // Mode 5: five-stage VQ, 30 bits, initial guess
+        //         `π*(i+1)/(p+1)` (legacy encoder convention).
+        // Mode 3: three-stage LBR VQ, 18 bits, initial guess
+        //         `0.25*(i+1)` (matches decoder's `lsp_linear(i)`).
+        let (qlsp, lsp_indices) = match self.submode {
+            3 => {
+                let (qlsp, idx) = quantise_lsp_lbr(&lsp);
+                (qlsp, LspIndices::Lbr(idx))
+            }
+            _ => {
+                let (qlsp, idx) = quantise_lsp_nb(&lsp);
+                (qlsp, LspIndices::Nb(idx))
+            }
+        };
 
         if self.first {
             self.old_qlsp = qlsp;
@@ -316,15 +414,31 @@ impl NbEncoder {
 
         // ---- 7. Write bitstream header fields ------------------------
         bw.write_bits(0, 1); // wideband flag = 0
-        bw.write_bits(SUPPORTED_SUBMODE, 4);
-        // LSP indices (5 × 6 bits)
-        for idx in lsp_indices {
-            bw.write_bits(idx as u32, 6);
+        bw.write_bits(self.submode, 4);
+        match lsp_indices {
+            LspIndices::Lbr(idx) => {
+                // 3 × 6-bit indices (18 bits total).
+                for v in idx {
+                    bw.write_bits(v as u32, 6);
+                }
+            }
+            LspIndices::Nb(idx) => {
+                // 5 × 6-bit indices (30 bits total).
+                for v in idx {
+                    bw.write_bits(v as u32, 6);
+                }
+            }
         }
-        // (no ol_pitch — mode 5 sets lbr_pitch = -1)
+        // (no ol_pitch — both modes set lbr_pitch = -1)
         bw.write_bits(qe, 5);
 
         // ---- 8. Per-sub-frame A-by-S loop -----------------------------
+        // Pick the sub-mode-dependent parameters up front so the loop
+        // body is free of branching.
+        let (pitch_bits, gain_bits, gain_cdbk, gain_cdbk_size) = match self.submode {
+            3 => (7u32, 5u32, &GAIN_CDBK_LBR[..], 32usize),
+            _ => (7u32, 7u32, &GAIN_CDBK_NB[..], 128usize),
+        };
         for sub in 0..NB_NB_SUBFRAMES {
             let offset_in_frame = NB_SUBFRAME_SIZE * sub;
             let exc_idx = EXC_HISTORY + offset_in_frame;
@@ -378,11 +492,18 @@ impl NbEncoder {
             let pitch_idx = (pitch - pit_min) as u32;
 
             // Three-tap gain codebook: evaluate each entry in the
-            // filtered domain.
-            let (gain_idx, ltp_exc, ltp_filtered) =
-                search_pitch_gain_filtered(&syn_target, &self.exc_buf, exc_idx, pitch, &h);
-            bw.write_bits(pitch_idx, 7);
-            bw.write_bits(gain_idx as u32, 7);
+            // filtered domain against the active per-submode codebook.
+            let (gain_idx, ltp_exc, ltp_filtered) = search_pitch_gain_filtered(
+                &syn_target,
+                &self.exc_buf,
+                exc_idx,
+                pitch,
+                &h,
+                gain_cdbk,
+                gain_cdbk_size,
+            );
+            bw.write_bits(pitch_idx, pitch_bits);
+            bw.write_bits(gain_idx as u32, gain_bits);
 
             // What's left for the innovation codebook to cover.
             let mut innov_syn_target = [0.0f32; NB_SUBFRAME_SIZE];
@@ -402,20 +523,44 @@ impl NbEncoder {
             } else {
                 0.0
             };
-            let (sub_gain_idx, sub_gain_val) = nearest_scalar(&EXC_GAIN_QUANT_SCAL3, target_ratio);
-            bw.write_bits(sub_gain_idx as u32, 3);
-            let ener = sub_gain_val * ol_gain;
+            let (sub_gain_val, ener) = match self.submode {
+                3 => {
+                    let (sub_gain_idx, sub_gain_val) =
+                        nearest_scalar(&EXC_GAIN_QUANT_SCAL1, target_ratio);
+                    bw.write_bits(sub_gain_idx as u32, 1);
+                    (sub_gain_val, sub_gain_val * ol_gain)
+                }
+                _ => {
+                    let (sub_gain_idx, sub_gain_val) =
+                        nearest_scalar(&EXC_GAIN_QUANT_SCAL3, target_ratio);
+                    bw.write_bits(sub_gain_idx as u32, 3);
+                    (sub_gain_val, sub_gain_val * ol_gain)
+                }
+            };
+            let _ = sub_gain_val;
 
             // Fixed codebook search in the filtered/synthesis domain.
-            let cb_indices = search_split_cb_filtered(&innov_syn_target, &h, ener);
-            for idx in cb_indices {
-                bw.write_bits(idx as u32, 6);
+            let mut innov = [0.0f32; NB_SUBFRAME_SIZE];
+            match self.submode {
+                3 => {
+                    // Mode 3: 4 sub-vectors × 10 samples, 5-bit shape.
+                    let indices = search_split_cb_10x32_filtered(&innov_syn_target, &h, ener);
+                    for idx in indices {
+                        bw.write_bits(idx as u32, 5);
+                    }
+                    expand_split_cb_10x32(&indices, &mut innov);
+                }
+                _ => {
+                    let indices = search_split_cb_5x64_filtered(&innov_syn_target, &h, ener);
+                    for idx in indices {
+                        bw.write_bits(idx as u32, 6);
+                    }
+                    expand_split_cb_5x64(&indices, &mut innov);
+                }
             }
 
             // Reconstruct this sub-frame's excitation — matches what
             // the decoder reconstructs from the bits we just wrote.
-            let mut innov = [0.0f32; NB_SUBFRAME_SIZE];
-            expand_split_cb(&cb_indices, &mut innov);
             for v in innov.iter_mut() {
                 *v *= ener;
             }
@@ -461,6 +606,16 @@ impl NbEncoder {
         }
         Ok(())
     }
+}
+
+/// Internal tag carrying the chosen LSP codebook indices so the main
+/// encoder can emit the correct number of bits without re-checking the
+/// sub-mode.
+enum LspIndices {
+    /// 3 × 6-bit LBR indices (mode 3, 4, etc.).
+    Lbr([usize; 3]),
+    /// 5 × 6-bit NB indices (mode 5, 6, 7).
+    Nb([usize; 5]),
 }
 
 // =====================================================================
@@ -802,6 +957,69 @@ fn quantise_lsp_nb(lsp: &[f32; NB_ORDER]) -> ([f32; NB_ORDER], [usize; 5]) {
     (qlsp, indices)
 }
 
+// =====================================================================
+// LSP quantisation (mode 3: three-stage LBR VQ, 18 bits)
+// =====================================================================
+
+/// Quantise a 10-LSP vector using the three-stage LBR VQ whose inverse
+/// is `lsp_unquant_lbr`. Returns the dequantised LSPs (matching exactly
+/// what the decoder will reconstruct) and the three 6-bit codebook
+/// indices in encoding order.
+///
+/// Mirrors the decoder exactly: the linear initial guess is
+/// `0.25*(i+1)` (`lsp_linear` in `lsp.rs`), and the per-stage scale
+/// factors are 1/256, 1/512, 1/512.
+fn quantise_lsp_lbr(lsp: &[f32; NB_ORDER]) -> ([f32; NB_ORDER], [usize; 3]) {
+    let mut indices = [0usize; 3];
+    // Stage 1 — 64-entry 10-D CB against the residual w.r.t. the
+    // linear guess, encoded at 1/256 scale.
+    let mut residual = [0.0f32; NB_ORDER];
+    for i in 0..NB_ORDER {
+        residual[i] = lsp[i] - 0.25 * (i as f32 + 1.0);
+    }
+    indices[0] = nearest_vector_scaled(&residual, 256.0, &CDBK_NB, 10, 64);
+    for i in 0..10 {
+        residual[i] -= (CDBK_NB[indices[0] * 10 + i] as f32) / 256.0;
+    }
+    // Stage 2 — LOW1 (64 × 5, 1/512) on LSP[0..5] only.
+    let mut low = [0.0f32; 5];
+    low.copy_from_slice(&residual[0..5]);
+    indices[1] = nearest_vector_scaled(&low, 512.0, &CDBK_NB_LOW1, 5, 64);
+    for i in 0..5 {
+        residual[i] -= (CDBK_NB_LOW1[indices[1] * 5 + i] as f32) / 512.0;
+    }
+    // Stage 3 — HIGH1 (64 × 5, 1/512) on LSP[5..10] only.
+    let mut hi = [0.0f32; 5];
+    hi.copy_from_slice(&residual[5..10]);
+    indices[2] = nearest_vector_scaled(&hi, 512.0, &CDBK_NB_HIGH1, 5, 64);
+
+    // Reconstruct exactly as the decoder would.
+    let mut qlsp = [0.0f32; NB_ORDER];
+    for i in 0..NB_ORDER {
+        qlsp[i] = 0.25 * (i as f32 + 1.0);
+    }
+    for i in 0..10 {
+        qlsp[i] += (CDBK_NB[indices[0] * 10 + i] as f32) / 256.0;
+    }
+    for i in 0..5 {
+        qlsp[i] += (CDBK_NB_LOW1[indices[1] * 5 + i] as f32) / 512.0;
+    }
+    for i in 0..5 {
+        qlsp[i + 5] += (CDBK_NB_HIGH1[indices[2] * 5 + i] as f32) / 512.0;
+    }
+
+    // Enforce stability: strictly increasing, bounded away from 0 and π.
+    let margin = LSP_MARGIN;
+    qlsp[0] = qlsp[0].max(margin);
+    for i in 1..NB_ORDER {
+        if qlsp[i] < qlsp[i - 1] + margin {
+            qlsp[i] = qlsp[i - 1] + margin;
+        }
+    }
+    qlsp[NB_ORDER - 1] = qlsp[NB_ORDER - 1].min(std::f32::consts::PI - margin);
+    (qlsp, indices)
+}
+
 /// MSE search over a `count`-entry codebook of `dim`-vectors stored as
 /// i8 with `scale` (so `cdbk[entry]` represents `cdbk[entry] / scale`).
 /// Returns the winning entry's index.
@@ -927,14 +1145,19 @@ fn search_pitch_lag_filtered(
 /// Three-tap pitch-gain quantization in the synthesis domain. Returns
 /// the gain index, the reconstructed LTP excitation (what the decoder
 /// will compute), and the filtered LTP contribution (= LTP_exc * h).
+/// The codebook entries are indexed as `gain_cdbk[idx*4 + k]` for
+/// `k=0,1,2` (the fourth byte is a boundary marker unused here), so
+/// both the 128-entry `GAIN_CDBK_NB` and the 32-entry `GAIN_CDBK_LBR`
+/// work as parameters.
 fn search_pitch_gain_filtered(
     target: &[f32; NB_SUBFRAME_SIZE],
     exc_buf: &[f32],
     exc_idx: usize,
     pitch: i32,
     h: &[f32],
+    gain_cdbk: &[i8],
+    gain_cdbk_size: usize,
 ) -> (usize, [f32; NB_SUBFRAME_SIZE], [f32; NB_SUBFRAME_SIZE]) {
-    let gain_cdbk_size = 128usize;
     // Build the three per-tap past-excitation signals y_i[j] (same
     // indexing as the decoder's pitch_unquant_3tap).
     let mut y = [[0.0f32; NB_SUBFRAME_SIZE]; 3];
@@ -968,9 +1191,9 @@ fn search_pitch_gain_filtered(
     let mut best_exc = [0.0f32; NB_SUBFRAME_SIZE];
     let mut best_filt = [0.0f32; NB_SUBFRAME_SIZE];
     for idx in 0..gain_cdbk_size {
-        let g0 = 0.015625 * GAIN_CDBK_NB[idx * 4] as f32 + 0.5;
-        let g1 = 0.015625 * GAIN_CDBK_NB[idx * 4 + 1] as f32 + 0.5;
-        let g2 = 0.015625 * GAIN_CDBK_NB[idx * 4 + 2] as f32 + 0.5;
+        let g0 = 0.015625 * gain_cdbk[idx * 4] as f32 + 0.5;
+        let g1 = 0.015625 * gain_cdbk[idx * 4 + 1] as f32 + 0.5;
+        let g2 = 0.015625 * gain_cdbk[idx * 4 + 2] as f32 + 0.5;
         let mut err = 0.0f32;
         let mut exc = [0.0f32; NB_SUBFRAME_SIZE];
         let mut filt = [0.0f32; NB_SUBFRAME_SIZE];
@@ -990,43 +1213,45 @@ fn search_pitch_gain_filtered(
     (best_idx, best_exc, best_filt)
 }
 
-/// Split-codebook search in the synthesis domain. Each sub-vector (5
-/// samples × 8 sub-vectors) is searched independently; the chosen cb
-/// entry is the one whose convolution with `h` best matches the
-/// sub-vector of the target.
+/// Generic split-codebook search in the synthesis domain. The
+/// sub-frame is partitioned into `nb_subvect` disjoint sub-vectors of
+/// `subvect_size` samples each; for each one we pick the `shape_cb`
+/// entry whose convolution with `h` best matches the remaining
+/// residual target. `ener` is multiplied into candidates before
+/// convolution so the search is scale-consistent with what the decoder
+/// reconstructs.
 ///
-/// `ener` is multiplied into the codebook entries before convolution
-/// so the search is scale-consistent with what the decoder will
-/// reconstruct.
-fn search_split_cb_filtered(
+/// Because sub-vectors are disjoint in position, each one's convolved
+/// response only affects output samples from that offset onward —
+/// independent per-sub-vector search is correct up to the impulse-
+/// response tail crossing into later sub-vectors. We accept that
+/// coupling as part of the first-cut approximation; proper A-by-S
+/// would search sub-vectors jointly.
+fn search_split_cb_generic<const MAX_SUBVECT: usize>(
     target: &[f32; NB_SUBFRAME_SIZE],
     h: &[f32],
     ener: f32,
-) -> [usize; NB_SUBVECT] {
-    // Build a full-subframe candidate excitation for each sub-vector
-    // starting offset, convolve with h, and pick the best entry per
-    // sub-vector. Because sub-vectors are disjoint in position, each
-    // one's convolution only affects output samples starting at that
-    // offset, so independent per-sub-vector search is correct up to
-    // the impulse-response tail crossing into later sub-vectors. We
-    // accept that coupling as part of the first-cut approximation —
-    // proper A-by-S would search sub-vectors jointly via impulse-
-    // response precomputation + backward substitution.
-    let mut indices = [0usize; NB_SUBVECT];
+    shape_cb: &[i8],
+    shape_entries: usize,
+    subvect_size: usize,
+    nb_subvect: usize,
+) -> [usize; MAX_SUBVECT] {
+    debug_assert!(nb_subvect <= MAX_SUBVECT);
+    debug_assert_eq!(subvect_size * nb_subvect, NB_SUBFRAME_SIZE);
+    let mut indices = [0usize; MAX_SUBVECT];
     let mut cur_target = *target;
-    for i in 0..NB_SUBVECT {
-        let off = i * SUBVECT_SIZE;
+    for i in 0..nb_subvect {
+        let off = i * subvect_size;
         let mut best_err = f32::INFINITY;
         let mut best = 0usize;
-        let mut best_exc = [0.0f32; SUBVECT_SIZE];
         let mut best_filt = [0.0f32; NB_SUBFRAME_SIZE];
-        for idx in 0..SHAPE_ENTRIES {
-            let base = idx * SUBVECT_SIZE;
+        for idx in 0..shape_entries {
+            let base = idx * subvect_size;
             // Build a full 40-sample candidate excitation that places
             // this codebook entry at offset `off`; other samples zero.
             let mut exc = [0.0f32; NB_SUBFRAME_SIZE];
-            for j in 0..SUBVECT_SIZE {
-                exc[off + j] = EXC_5_64_TABLE[base + j] as f32 * 0.03125 * ener;
+            for j in 0..subvect_size {
+                exc[off + j] = shape_cb[base + j] as f32 * 0.03125 * ener;
             }
             let mut filt = [0.0f32; NB_SUBFRAME_SIZE];
             convolve_lt(&exc, h, &mut filt);
@@ -1041,9 +1266,6 @@ fn search_split_cb_filtered(
             if err < best_err {
                 best_err = err;
                 best = idx;
-                for j in 0..SUBVECT_SIZE {
-                    best_exc[j] = EXC_5_64_TABLE[base + j] as f32 * 0.03125;
-                }
                 best_filt = filt;
             }
         }
@@ -1054,27 +1276,77 @@ fn search_split_cb_filtered(
         for j in off..NB_SUBFRAME_SIZE {
             cur_target[j] -= best_filt[j];
         }
-        let _ = best_exc;
     }
     indices
 }
 
 // =====================================================================
-// Fixed (split) codebook search — mode 5 uses EXC_5_64_TABLE
+// Fixed (split) codebook search — per-submode helpers
 // =====================================================================
 
-const SUBVECT_SIZE: usize = 5;
-const NB_SUBVECT: usize = 8;
-const SHAPE_BITS: usize = 6;
-const SHAPE_ENTRIES: usize = 1 << SHAPE_BITS; // 64
+/// Mode 5: 8 sub-vectors × 5 samples, 6-bit shape (`EXC_5_64_TABLE`).
+const MODE5_SUBVECT_SIZE: usize = 5;
+const MODE5_NB_SUBVECT: usize = 8;
+const MODE5_SHAPE_BITS: usize = 6;
+const MODE5_SHAPE_ENTRIES: usize = 1 << MODE5_SHAPE_BITS; // 64
 
-/// Inverse of `search_split_cb` — recomputes the normalised innovation
-/// the decoder will reconstruct from the chosen indices.
-fn expand_split_cb(indices: &[usize; NB_SUBVECT], out: &mut [f32; NB_SUBFRAME_SIZE]) {
-    for i in 0..NB_SUBVECT {
-        let base = indices[i] * SUBVECT_SIZE;
-        for j in 0..SUBVECT_SIZE {
-            out[i * SUBVECT_SIZE + j] = EXC_5_64_TABLE[base + j] as f32 * 0.03125;
+/// Mode 3: 4 sub-vectors × 10 samples, 5-bit shape
+/// (`EXC_10_32_TABLE` from `submodes::SPLIT_CB_NB_LBR`).
+const MODE3_SUBVECT_SIZE: usize = 10;
+const MODE3_NB_SUBVECT: usize = 4;
+const MODE3_SHAPE_BITS: usize = 5;
+const MODE3_SHAPE_ENTRIES: usize = 1 << MODE3_SHAPE_BITS; // 32
+
+fn search_split_cb_5x64_filtered(
+    target: &[f32; NB_SUBFRAME_SIZE],
+    h: &[f32],
+    ener: f32,
+) -> [usize; MODE5_NB_SUBVECT] {
+    search_split_cb_generic::<MODE5_NB_SUBVECT>(
+        target,
+        h,
+        ener,
+        &EXC_5_64_TABLE,
+        MODE5_SHAPE_ENTRIES,
+        MODE5_SUBVECT_SIZE,
+        MODE5_NB_SUBVECT,
+    )
+}
+
+fn search_split_cb_10x32_filtered(
+    target: &[f32; NB_SUBFRAME_SIZE],
+    h: &[f32],
+    ener: f32,
+) -> [usize; MODE3_NB_SUBVECT] {
+    search_split_cb_generic::<MODE3_NB_SUBVECT>(
+        target,
+        h,
+        ener,
+        &EXC_10_32_TABLE,
+        MODE3_SHAPE_ENTRIES,
+        MODE3_SUBVECT_SIZE,
+        MODE3_NB_SUBVECT,
+    )
+}
+
+/// Inverse of `search_split_cb_5x64_filtered` — recomputes the
+/// normalised innovation the decoder will reconstruct from the chosen
+/// indices.
+fn expand_split_cb_5x64(indices: &[usize; MODE5_NB_SUBVECT], out: &mut [f32; NB_SUBFRAME_SIZE]) {
+    for i in 0..MODE5_NB_SUBVECT {
+        let base = indices[i] * MODE5_SUBVECT_SIZE;
+        for j in 0..MODE5_SUBVECT_SIZE {
+            out[i * MODE5_SUBVECT_SIZE + j] = EXC_5_64_TABLE[base + j] as f32 * 0.03125;
+        }
+    }
+}
+
+/// Inverse of `search_split_cb_10x32_filtered` — mode-3 reconstruction.
+fn expand_split_cb_10x32(indices: &[usize; MODE3_NB_SUBVECT], out: &mut [f32; NB_SUBFRAME_SIZE]) {
+    for i in 0..MODE3_NB_SUBVECT {
+        let base = indices[i] * MODE3_SUBVECT_SIZE;
+        for j in 0..MODE3_SUBVECT_SIZE {
+            out[i * MODE3_SUBVECT_SIZE + j] = EXC_10_32_TABLE[base + j] as f32 * 0.03125;
         }
     }
 }
@@ -1187,5 +1459,37 @@ mod tests {
         }
         enc.encode_frame(&pcm, &mut bw).unwrap();
         assert_eq!(bw.bit_position(), 300, "mode 5 must emit exactly 300 bits");
+    }
+
+    #[test]
+    fn encode_frame_mode3_writes_exactly_160_bits() {
+        let mut enc = NbEncoder::with_submode(3).expect("mode 3 supported");
+        let mut bw = BitWriter::new();
+        let mut pcm = [0.0f32; NB_FRAME_SIZE];
+        for i in 0..NB_FRAME_SIZE {
+            let t = i as f32;
+            pcm[i] = 5000.0 * ((t * 0.2).sin() + 0.5 * (t * 0.05).sin() + 0.3 * (t * 0.7).cos());
+        }
+        enc.encode_frame(&pcm, &mut bw).unwrap();
+        assert_eq!(bw.bit_position(), 160, "mode 3 must emit exactly 160 bits");
+    }
+
+    #[test]
+    fn with_submode_rejects_unsupported() {
+        // Mode 1 and mode 7 are documented but unimplemented.
+        assert!(NbEncoder::with_submode(1).is_err());
+        assert!(NbEncoder::with_submode(7).is_err());
+    }
+
+    #[test]
+    fn quantise_lsp_lbr_round_trip_stable() {
+        let mut lsp = [0.0f32; NB_ORDER];
+        for i in 0..NB_ORDER {
+            lsp[i] = 0.25 * (i as f32 + 1.0);
+        }
+        let (qlsp, _) = quantise_lsp_lbr(&lsp);
+        for i in 1..NB_ORDER {
+            assert!(qlsp[i] > qlsp[i - 1], "LBR qLSP must be sorted");
+        }
     }
 }

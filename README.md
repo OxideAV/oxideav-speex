@@ -19,8 +19,21 @@ wrappers, no `*-sys` crates.
 
 ### Encoder
 
-- **Narrowband** (8 kHz) — **sub-mode 5** (15 kbps NB CELP). Other NB
-  sub-modes return `Error::Unsupported` from the factory.
+- **Narrowband** (8 kHz) — two NB CELP sub-modes are supported:
+
+  | NB sub-mode | Bits/frame | Nominal rate | LSP VQ | Pitch | Gain | Innovation CB |
+  |-------------|-----------:|-------------:|--------|-------|------|---------------|
+  | **3** | 160 | 8 kbps | LBR 3-stage, 18 bits | 7-bit lag + 5-bit LBR gain | 1-bit sub-frame scalar | 4×10 × 5-bit (`EXC_10_32_TABLE`) |
+  | **5** *(default)* | 300 | 15 kbps | NB 5-stage, 30 bits | 7-bit lag + 7-bit NB gain | 3-bit sub-frame scalar | 8×5 × 6-bit (`EXC_5_64_TABLE`) |
+
+  Select the NB sub-mode via `CodecParameters::bit_rate`:
+  - `bit_rate ≤ 12_000` → sub-mode 3 (8 kbps, 160 bits/frame).
+  - `bit_rate > 12_000` or `None` → sub-mode 5 (15 kbps, default).
+
+  NB sub-modes 1/2/4/6/7/8 are *not* implemented by the encoder and
+  return `Error::Unsupported` if explicitly constructed via
+  `NbEncoder::with_submode`.
+
 - **Wideband** (16 kHz) — NB mode 5 layered with one of two WB extensions:
   | WB sub-mode | Bits/frame | Total rate | Technique |
   |-------------|-----------:|-----------:|-----------|
@@ -28,7 +41,9 @@ wrappers, no `*-sys` crates.
   | **3** *(default)* | 492 | ~24.6 kbps | Stochastic split-VQ (5×8 × 7-bit shape + sign) + 4-bit gain |
 
   WB sub-modes 2 and 4 are *not* implemented by the encoder and return
-  `Error::Unsupported` if requested.
+  `Error::Unsupported` if requested. The WB encoder always uses NB mode
+  5 as its low-band — there is no direct way to combine it with NB
+  mode 3 yet.
 - Select the WB sub-mode via `CodecParameters::bit_rate`:
   - `bit_rate ≤ 20_000` → sub-mode 1 (folding).
   - `bit_rate > 20_000` or `None` → sub-mode 3 (stochastic, default).

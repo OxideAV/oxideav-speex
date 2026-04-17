@@ -2,7 +2,11 @@
 //! analysis loops behind the [`oxideav_codec::Encoder`] trait.
 //!
 //! Supported:
-//!   * **8 kHz narrowband** — sub-mode 5 (15 kbps) NB encode.
+//!   * **8 kHz narrowband** — sub-mode 3 (8 kbps) and sub-mode 5
+//!     (15 kbps) NB encode, selected via [`CodecParameters::bit_rate`]:
+//!     * `bit_rate ≤ 12_000` selects sub-mode 3 (160 bits/frame).
+//!     * `bit_rate > 12_000` or `None` selects sub-mode 5
+//!       (300 bits/frame, **default**).
 //!   * **16 kHz wideband** — NB mode 5 + one of the following WB
 //!     extension layers:
 //!     * Sub-mode 1 (~1.8 kbps) spectral folding → 336 bits/frame.
@@ -10,11 +14,11 @@
 //!       **This is the default** — better 4–8 kHz fidelity than
 //!       folding at the cost of ~8 kbps.
 //!
-//! Callers can override the WB sub-mode via the [`CodecParameters::bit_rate`]
-//! field when constructing the encoder:
-//!   * `bit_rate ≤ 20_000` selects sub-mode 1 (folding, 16.6 kbps).
-//!   * `bit_rate >= 20_001` selects sub-mode 3 (stochastic, 24.6 kbps).
-//!   * `None` ≡ sub-mode 3 (default).
+//! Callers can override the WB sub-mode via the
+//! [`CodecParameters::bit_rate`] field when constructing the encoder:
+//!   * `bit_rate ≤ 20_000` selects WB sub-mode 1 (folding, 16.6 kbps).
+//!   * `bit_rate >= 20_001` selects WB sub-mode 3 (stochastic, 24.6 kbps).
+//!   * `None` ≡ WB sub-mode 3 (default).
 //!
 //! Ultra-wideband (32 kHz) still returns `Error::Unsupported` from the
 //! factory — that path would stack a second SB-CELP layer on top of
@@ -34,7 +38,7 @@ use std::collections::VecDeque;
 use crate::bitwriter::BitWriter;
 use crate::header::{SPEEX_HEADER_SIZE, SPEEX_SIGNATURE};
 use crate::nb_decoder::NB_FRAME_SIZE;
-use crate::nb_encoder::{NbEncoder, SUPPORTED_SUBMODE};
+use crate::nb_encoder::{nb_submode_for_rate, NbEncoder};
 use crate::wb_decoder::WB_FULL_FRAME_SIZE;
 use crate::wb_encoder::WbEncoder;
 
@@ -69,13 +73,8 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 }
 
 fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
-    let submode = SUPPORTED_SUBMODE;
-    if submode != 5 {
-        return Err(Error::unsupported(format!(
-            "Speex encoder: NB sub-mode {submode} not implemented — only mode 5 \
-             (15 kbps NB) is currently supported"
-        )));
-    }
+    let submode = nb_submode_for_rate(params.bit_rate);
+    let nb = NbEncoder::with_submode(submode)?;
 
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
@@ -83,14 +82,21 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output.channels = Some(1);
     output.sample_rate = Some(8_000);
     output.codec_id = params.codec_id.clone();
+    // Reflect the actual encoded bit rate back on the output params so
+    // a downstream muxer sees an accurate rate.
+    output.bit_rate = Some(match submode {
+        3 => 8_000,
+        5 => 15_000,
+        _ => unreachable!("validated by NbEncoder::with_submode"),
+    });
     if output.extradata.is_empty() {
-        output.extradata = build_speex_header(SpeexBandMode::Nb);
+        output.extradata = build_speex_header(SpeexBandMode::Nb, submode);
     }
 
     Ok(Box::new(SpeexEncoder {
         output_params: output,
         time_base: TimeBase::new(1, 8_000),
-        band: BandState::Nb(Box::default()),
+        band: BandState::Nb(Box::new(nb)),
         frame_size: NB_FRAME_SIZE,
         pcm_queue: Vec::new(),
         pending: VecDeque::new(),
@@ -126,7 +132,7 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         _ => 16_000,
     });
     if output.extradata.is_empty() {
-        output.extradata = build_speex_header(SpeexBandMode::Wb);
+        output.extradata = build_speex_header(SpeexBandMode::Wb, 5);
     }
 
     Ok(Box::new(SpeexEncoder {
@@ -149,10 +155,17 @@ enum SpeexBandMode {
 
 /// Build a minimal 80-byte Speex-in-Ogg header describing the stream
 /// this encoder produces. For WB the header's mode is 1 and rate is
-/// 16 kHz; for NB it's mode 0 and rate 8 kHz.
-fn build_speex_header(mode: SpeexBandMode) -> Vec<u8> {
+/// 16 kHz; for NB it's mode 0 and rate 8 kHz. `nb_submode` is the NB
+/// CELP sub-mode id (3 or 5 — used to populate the advertised bitrate
+/// field; the band-mode id in the header is independent of the NB
+/// sub-mode).
+fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
+    let nb_bitrate = match nb_submode {
+        3 => 8_000i32,
+        _ => 15_000i32,
+    };
     let (rate, mode_id, bitrate, frame_size) = match mode {
-        SpeexBandMode::Nb => (8_000u32, 0u32, 15_000i32, NB_FRAME_SIZE as u32),
+        SpeexBandMode::Nb => (8_000u32, 0u32, nb_bitrate, NB_FRAME_SIZE as u32),
         // Wideband: header records the full-band frame size (the
         // decoder uses it for Ogg timing; actual bit-count is driven
         // by the stream).

@@ -233,9 +233,87 @@ fn encode_decode_roundtrip_is_coherent() {
     // uncorrelated with the input (total garbage) scores near 0 dB
     // here; near-silence scores −∞.
     let snr = snr_db(&input, &decoded);
-    eprintln!("encoder↔decoder gain-corrected SNR ≈ {snr:.1} dB");
+    eprintln!("encoder↔decoder (mode 5, 15 kbps) gain-corrected SNR ≈ {snr:.1} dB");
     assert!(
         snr > 8.0,
         "round-trip SNR should clear 8 dB, got {snr:.1} dB"
     );
+}
+
+/// Roundtrip a synthetic speech-like signal through the mode-3 (8 kbps)
+/// NB encoder and check we still recover an audio signal whose spectral
+/// shape correlates well with the input. The gain-corrected SNR floor
+/// is deliberately lower than the mode-5 test because the 160-bit frame
+/// budget gives the algebraic codebook fewer shapes to work with (and
+/// the 1-bit subframe gain is a pretty coarse scalar).
+#[test]
+fn encode_decode_mode3_roundtrip_is_coherent() {
+    let input = build_input(50);
+    let input_rms = rms_i16(&input);
+    assert!(input_rms > 100.0);
+
+    let mut params = CodecParameters::audio(CodecId::new("speex"));
+    params.sample_rate = Some(8_000);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    // Selects NB mode 3 via the factory's bit-rate branch.
+    params.bit_rate = Some(8_000);
+    let mut enc = make_encoder(&params).expect("speex encoder (mode 3)");
+    enc.send_frame(&Frame::Audio(audio_frame_s16(&input)))
+        .unwrap();
+    enc.flush().unwrap();
+    let mut packets = Vec::new();
+    loop {
+        match enc.receive_packet() {
+            Ok(p) => packets.push(p),
+            Err(Error::NeedMore) | Err(Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let n_frames = input.len() / NB_FRAME_SIZE;
+    assert_eq!(packets.len(), n_frames);
+    for p in &packets {
+        // 160 bits = 20 bytes exactly.
+        assert_eq!(p.data.len(), 20, "mode-3 packets are 160 bits = 20 bytes");
+    }
+
+    let mut dec_params = enc.output_params().clone();
+    dec_params.codec_id = CodecId::new("speex");
+    let mut dec = make_decoder(&dec_params).expect("speex decoder");
+    let decoded = decode_all(&mut dec, &packets);
+    let out_rms = rms_i16(&decoded);
+    eprintln!("mode 3: input RMS = {input_rms}, decoded RMS = {out_rms}");
+    assert!(out_rms > 10.0, "mode-3 decoded RMS too low: {out_rms}");
+
+    let snr = snr_db(&input, &decoded);
+    eprintln!("encoder↔decoder (mode 3, 8 kbps) gain-corrected SNR ≈ {snr:.1} dB");
+    assert!(snr > 6.0, "mode-3 round-trip SNR < 6 dB: {snr:.1} dB");
+}
+
+#[test]
+fn encode_decode_mode3_zero_input_stays_quiet() {
+    let input = vec![0i16; 20 * NB_FRAME_SIZE];
+    let mut params = CodecParameters::audio(CodecId::new("speex"));
+    params.sample_rate = Some(8_000);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    params.bit_rate = Some(8_000);
+    let mut enc = make_encoder(&params).expect("speex encoder (mode 3)");
+    enc.send_frame(&Frame::Audio(audio_frame_s16(&input)))
+        .unwrap();
+    enc.flush().unwrap();
+    let mut packets = Vec::new();
+    loop {
+        match enc.receive_packet() {
+            Ok(p) => packets.push(p),
+            Err(Error::NeedMore) | Err(Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let mut dec_params = enc.output_params().clone();
+    dec_params.codec_id = CodecId::new("speex");
+    let mut dec = make_decoder(&dec_params).expect("speex decoder");
+    let decoded = decode_all(&mut dec, &packets);
+    let out_rms = rms_i16(&decoded);
+    assert!(out_rms < 500.0, "mode-3 zero-input RMS {out_rms}");
 }
