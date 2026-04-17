@@ -1,8 +1,9 @@
-//! Speex (CELP speech codec) — narrowband decoder + Ogg integration.
+//! Speex (CELP speech codec) — pure-Rust decoder + encoder with Ogg
+//! integration.
 //!
 //! Implements:
 //!   * Bit-exact 80-byte Speex header parser (Speex-in-Ogg mapping).
-//!   * MSB-first bit reader matching `libspeex/bits.c`.
+//!   * MSB-first bit reader / writer matching `libspeex/bits.c`.
 //!   * Mode + sub-mode descriptors (NB 0..=8).
 //!   * Float-mode CELP decoder for narrowband (NB) streams covering
 //!     sub-modes 1..=7 (silence/vocoder, 5.95k, 8k, 11k, 15k, 18.2k,
@@ -18,6 +19,11 @@
 //!     Only sub-mode 1 (folding, 36 bits of UWB overhead) is defined
 //!     by the reference; stochastic UWB sub-modes do not exist. See
 //!     [`uwb_decoder`].
+//!   * NB encoder for sub-modes 3 (8 kbps) and 5 (15 kbps, default);
+//!     WB encoder for sub-modes 1 (folding) and 3 (stochastic
+//!     split-VQ, default); UWB encoder for the null layer and the
+//!     folding layer (default). See [`encoder`], [`nb_encoder`],
+//!     [`wb_encoder`], [`uwb_encoder`].
 //!
 //! Tables (LSP, gain, fixed codebooks) are transcribed from the
 //! BSD-licensed Xiph reference (`libspeex/{lsp_tables_nb,gain_table,

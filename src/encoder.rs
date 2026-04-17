@@ -49,9 +49,11 @@ use crate::uwb_encoder::UwbEncoder;
 use crate::wb_decoder::WB_FULL_FRAME_SIZE;
 use crate::wb_encoder::WbEncoder;
 
-/// Encoder factory. Accepts 8 kHz (NB) or 16 kHz (WB) mono S16
-/// parameter sets. Wideband automatically layers NB mode-5 below
-/// WB mode-1 (spectral folding). UWB is not yet supported.
+/// Encoder factory. Accepts 8 kHz (NB), 16 kHz (WB), or 32 kHz (UWB)
+/// mono S16 parameter sets. Wideband layers NB mode-5 below the chosen
+/// WB sub-mode (default mode-3 stochastic split-VQ). Ultra-wideband
+/// stacks the full WB pipeline under a null or folding UWB extension
+/// — see the module-level docs for the `bit_rate` → sub-mode mapping.
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let sample_rate = params.sample_rate.unwrap_or(8_000);
     let channels = params.channels.unwrap_or(1);

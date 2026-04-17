@@ -6,7 +6,7 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-speex"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust Speex (CELP speech codec) — header parser + bit reader + scaffold"
+description = "Pure-Rust Speex (CELP speech codec) — NB/WB/UWB decoder + encoder with Ogg integration"
 
 readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-speex"

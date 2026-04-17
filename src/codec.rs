@@ -1,9 +1,10 @@
 //! Speex codec registration.
 //!
-//! The decoder handles narrowband + wideband modes; the encoder is
-//! narrowband mode-5 only. Both sides share the `"speex"` codec id and
-//! register together via `register_both` so the registry knows to offer
-//! the same implementation block for decode and encode.
+//! Decoder and encoder both cover narrowband (8 kHz), wideband
+//! (16 kHz), and ultra-wideband (32 kHz) modes. Both sides share the
+//! `"speex"` codec id and register together via `register_both` so the
+//! registry knows to offer the same implementation block for decode
+//! and encode.
 
 use oxideav_codec::{CodecRegistry, Decoder, Encoder};
 use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, Result};
