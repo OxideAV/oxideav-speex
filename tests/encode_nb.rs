@@ -317,3 +317,116 @@ fn encode_decode_mode3_zero_input_stays_quiet() {
     let out_rms = rms_i16(&decoded);
     assert!(out_rms < 500.0, "mode-3 zero-input RMS {out_rms}");
 }
+
+/// Shared helper: encode 50 frames (≈1 s) of speech-like input through
+/// the factory for the requested `bit_rate`, decode the packets back,
+/// and return the decoded i16 buffer + the expected bytes-per-packet
+/// from the configured sub-mode.
+fn run_submode_roundtrip(bit_rate: Option<u64>, expected_bytes: usize) -> (Vec<i16>, Vec<i16>) {
+    let input = build_input(50);
+    let mut params = CodecParameters::audio(CodecId::new("speex"));
+    params.sample_rate = Some(8_000);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    params.bit_rate = bit_rate;
+    let mut enc = make_encoder(&params).expect("speex encoder");
+    enc.send_frame(&Frame::Audio(audio_frame_s16(&input)))
+        .unwrap();
+    enc.flush().unwrap();
+    let mut packets = Vec::new();
+    loop {
+        match enc.receive_packet() {
+            Ok(p) => packets.push(p),
+            Err(Error::NeedMore) | Err(Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    for (i, p) in packets.iter().enumerate() {
+        assert_eq!(
+            p.data.len(),
+            expected_bytes,
+            "packet {i} size mismatch for bit_rate {:?}",
+            bit_rate
+        );
+    }
+    let mut dec_params = enc.output_params().clone();
+    dec_params.codec_id = CodecId::new("speex");
+    let mut dec = make_decoder(&dec_params).expect("speex decoder");
+    let decoded = decode_all(&mut dec, &packets);
+    (input, decoded)
+}
+
+// The vocoder / very-low-bit-rate modes (1, 2, 8) use a PRNG-filled or
+// tiny 20-sample innovation codebook, which can't represent the
+// spectral fine structure of a voiced signal. Their SNR bar is
+// accordingly lower than the 3/4/5 modes — we only assert that the
+// decoder produced a non-silent, spectrally-coherent signal.
+
+#[test]
+fn encode_decode_mode1_vocoder_produces_audio() {
+    // Mode 1: 2.15 kbps comfort-noise vocoder — noise-codebook innovation,
+    // 43 bits / frame. 43 bits = 8 bytes (padded).
+    let (_, decoded) = run_submode_roundtrip(Some(2_150), 6);
+    let out_rms = rms_i16(&decoded);
+    eprintln!("mode 1 (2.15 kbps) decoded RMS = {out_rms:.1}");
+    assert!(
+        out_rms > 5.0 && out_rms < 32_000.0,
+        "mode-1 decoded RMS unexpectedly out of range: {out_rms}"
+    );
+}
+
+#[test]
+fn encode_decode_mode2_roundtrip() {
+    // Mode 2: 5.95 kbps. 119 bits / frame = 15 bytes (padded).
+    // Single 4-bit shape codebook × 4 sub-vectors × 10 samples each —
+    // the narrowest algebraic codebook in the NB ladder, only 16 shapes
+    // per 10-sample sub-vector. Quality is inherently lower than mode 3
+    // despite similar bit budgets because modes 3/4 have per-subframe
+    // gain bits and wider codebooks.
+    let (input, decoded) = run_submode_roundtrip(Some(5_950), 15);
+    let input_rms = rms_i16(&input);
+    let out_rms = rms_i16(&decoded);
+    eprintln!("mode 2 (5.95 kbps): in RMS={input_rms:.1}, out RMS={out_rms:.1}");
+    assert!(out_rms > 5.0);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("mode 2 SNR ≈ {snr:.1} dB");
+    assert!(snr > 2.0, "mode-2 SNR < 2 dB: {snr:.1}");
+}
+
+#[test]
+fn encode_decode_mode4_roundtrip() {
+    // Mode 4: 11 kbps. 220 bits / frame = 28 bytes (byte-aligned).
+    let (input, decoded) = run_submode_roundtrip(Some(11_000), 28);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("mode 4 (11 kbps) SNR ≈ {snr:.1} dB");
+    assert!(snr > 6.0, "mode-4 SNR < 6 dB: {snr:.1}");
+}
+
+#[test]
+fn encode_decode_mode6_roundtrip() {
+    // Mode 6: 18.2 kbps. 364 bits / frame = 46 bytes (padded).
+    let (input, decoded) = run_submode_roundtrip(Some(18_200), 46);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("mode 6 (18.2 kbps) SNR ≈ {snr:.1} dB");
+    assert!(snr > 8.0, "mode-6 SNR < 8 dB: {snr:.1}");
+}
+
+#[test]
+fn encode_decode_mode7_roundtrip() {
+    // Mode 7: 24.6 kbps. 492 bits / frame = 62 bytes (padded).
+    // Double-codebook innovation — the highest-quality NB mode.
+    let (input, decoded) = run_submode_roundtrip(Some(24_600), 62);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("mode 7 (24.6 kbps) SNR ≈ {snr:.1} dB");
+    assert!(snr > 8.0, "mode-7 SNR < 8 dB: {snr:.1}");
+}
+
+#[test]
+fn encode_decode_mode8_low_rate_roundtrip() {
+    // Mode 8: 3.95 kbps — vocoder + 20-sample algebraic innovation.
+    // 79 bits / frame = 10 bytes (padded).
+    let (_, decoded) = run_submode_roundtrip(Some(3_950), 10);
+    let out_rms = rms_i16(&decoded);
+    eprintln!("mode 8 (3.95 kbps) decoded RMS = {out_rms:.1}");
+    assert!(out_rms > 5.0 && out_rms < 32_000.0);
+}

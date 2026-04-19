@@ -1,25 +1,27 @@
 //! Narrowband Speex CELP encoder (float-mode).
 //!
-//! This is a first-cut encoder. It produces a valid Speex NB bitstream
-//! (parseable by the companion [`crate::nb_decoder::NbDecoder`]) whose
-//! decoded output preserves the input's spectral shape. Absolute level
-//! is approximate — the encoder carries a consistent multiplicative
-//! gain error because it lacks full perceptual-weighting + rate
-//! control. See the roundtrip tests in `tests/encode_nb.rs` for the
-//! quality floor each supported mode aims for.
+//! Covers the **full NB rate ladder** (sub-modes 1–8) by dispatching on
+//! the [`crate::submodes::NbSubmode`] descriptor rather than hard-coding
+//! per-mode constants. The bitstream produced here is bit-exact against
+//! what the companion [`crate::nb_decoder::NbDecoder`] consumes; the CELP
+//! analysis (LPC + LSP VQ + pitch / innovation search) is a first-cut
+//! implementation that preserves the input's spectral shape but does
+//! not include the full perceptual-weighting loop the reference uses —
+//! see the roundtrip tests in `tests/encode_nb.rs` for per-mode SNR
+//! floors.
 //!
-//! Supported modes:
-//!   * **Sub-mode 3** (8 kbps, 160 bits / 20 ms frame): 18-bit LBR LSP
-//!     VQ (3-stage), 7-bit pitch / 5-bit LBR pitch-gain per sub-frame,
-//!     1-bit sub-frame innovation gain, 20-bit split-CB innovation
-//!     (4×5 bits, `EXC_10_32_TABLE`).
-//!   * **Sub-mode 5** (15 kbps, 300 bits / 20 ms frame): 30-bit NB LSP
-//!     VQ (5-stage), 7-bit pitch / 7-bit pitch-gain per sub-frame,
-//!     3-bit sub-frame innovation gain, 48-bit split-CB innovation
-//!     (8×6 bits, `EXC_5_64_TABLE`).
+//! Supported sub-modes (all validated by the companion decoder):
 //!
-//! All other sub-modes return `Error::Unsupported` at construction
-//! time.
+//! | id | rate     | bits/frame | LSP VQ   | LTP           | innov    |
+//! |----|---------:|-----------:|----------|---------------|----------|
+//! |  1 | 2.15 kb  |     43     | LBR 18-bit | forced pitch | noise  |
+//! |  2 | 5.95 kb  |    119     | LBR 18-bit | 3-tap, 5 gain| 10×4-bit VQ|
+//! |  3 | 8.00 kb  |    160     | LBR 18-bit | 3-tap, 5 gain| 10×5-bit VQ|
+//! |  4 | 11.0 kb  |    220     | LBR 18-bit | 3-tap, 5 gain|  8×7-bit VQ|
+//! |  5 | 15.0 kb  |    300     | NB  30-bit | 3-tap, 7 gain|  5×6-bit VQ|
+//! |  6 | 18.2 kb  |    364     | NB  30-bit | 3-tap, 7 gain|  5×8-bit VQ|
+//! |  7 | 24.6 kb  |    492     | NB  30-bit | 3-tap, 7 gain| 2×(5×6-bit)|
+//! |  8 | 3.95 kb  |     79     | LBR 18-bit | forced pitch | 20×5-bit VQ|
 //!
 //! Pipeline per 160-sample frame:
 //!   1. Hamming window + autocorrelation of the frame.
@@ -55,17 +57,15 @@
 use oxideav_core::{Error, Result};
 
 use crate::bitwriter::BitWriter;
-use crate::gain_tables::{GAIN_CDBK_LBR, GAIN_CDBK_NB};
 use crate::lsp::{lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_nb::{CDBK_NB, CDBK_NB_HIGH1, CDBK_NB_HIGH2, CDBK_NB_LOW1, CDBK_NB_LOW2};
 use crate::nb_decoder::{
     rms, NB_FRAME_SIZE, NB_NB_SUBFRAMES, NB_ORDER, NB_PITCH_END, NB_PITCH_START, NB_SUBFRAME_SIZE,
 };
+use crate::submodes::{nb_submode, InnovKind, LspKind, LtpKind};
 // Local copy of `nb_decoder::LSP_MARGIN` — we avoid re-exporting it to
 // keep the decoder module surface untouched.
 const LSP_MARGIN: f32 = 0.002;
-
-use crate::exc_tables::{EXC_10_32_TABLE, EXC_5_64_TABLE};
 
 /// Excitation history length — must match the decoder's layout so the
 /// LTP search sees the same past-excitation frame shape as the decoder
@@ -93,17 +93,24 @@ pub const SUPPORTED_SUBMODE: u32 = 5;
 /// passes `CodecParameters::bit_rate`. Values close to a supported
 /// mode's nominal rate snap to that mode; `None` selects the default
 /// (mode 5, 15 kbps).
+///
+/// Snapping uses each sub-mode's nominal rate (from `libspeex/modes.c`):
+/// 2.15 kbps (sm1), 3.95 kbps (sm8), 5.95 kbps (sm2), 8 kbps (sm3),
+/// 11 kbps (sm4), 15 kbps (sm5), 18.2 kbps (sm6), 24.6 kbps (sm7).
 pub fn nb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
     match bit_rate {
         None => 5,
-        // 8 kbps band — mode 3. Covers anything in the 6.5..=12 kbps
-        // range since modes 4 (11 kbps) and 2 (5.95 kbps) are not yet
-        // implemented in the encoder.
-        Some(r) if r <= 12_000 => 3,
-        // 15 kbps band — mode 5 (default). Anything above 12 kbps
-        // routes here; modes 6 + 7 are not yet implemented in the
-        // encoder.
-        _ => 5,
+        // Upper bounds chosen at the midpoint between each adjacent pair
+        // of nominal rates. Callers passing the exact nominal rate of a
+        // mode land in its own slot.
+        Some(r) if r <= 3_000 => 1,  // 2.15 kbps
+        Some(r) if r <= 5_000 => 8,  // 3.95 kbps
+        Some(r) if r <= 7_000 => 2,  // 5.95 kbps
+        Some(r) if r <= 9_500 => 3,  // 8 kbps
+        Some(r) if r <= 13_000 => 4, // 11 kbps
+        Some(r) if r <= 16_500 => 5, // 15 kbps
+        Some(r) if r <= 21_000 => 6, // 18.2 kbps
+        _ => 7,                      // 24.6 kbps
     }
 }
 
@@ -167,36 +174,30 @@ impl NbEncoder {
 
     /// Construct a NB encoder for a specific sub-mode id.
     ///
-    /// Supported: **3** (8 kbps LBR) and **5** (15 kbps). Any other
-    /// value returns [`Error::Unsupported`] — the remaining sub-modes
-    /// (1/2/4/6/7/8) are defined by the reference but have no encoder
-    /// implementation here yet.
+    /// All eight NB sub-modes defined by the reference are supported
+    /// (1-8). Sub-mode id 0 is reserved by libspeex for the "silent"
+    /// frame (no LPC / no excitation transmitted) which this encoder
+    /// does not emit on its own — pass 1 (2.15 kbps vocoder) instead.
     pub fn with_submode(submode: u32) -> Result<Self> {
-        match submode {
-            3 | 5 => {}
-            other => {
-                return Err(Error::unsupported(format!(
-                    "Speex NB encoder: sub-mode {other} not implemented. \
-                     Use 3 (8 kbps, 160 bits/frame) or 5 (15 kbps, 300 bits/frame)."
-                )));
-            }
+        if !(1..=8).contains(&submode) {
+            return Err(Error::unsupported(format!(
+                "Speex NB encoder: sub-mode {submode} is not a valid NB \
+                 CELP mode. Valid ids are 1..=8 (see libspeex/modes.c)."
+            )));
         }
-        // The "neutral" initial LSP vector. This matches the decoder's
-        // `lsp_linear(i) = 0.25*(i+1)` so first-frame interpolation is
-        // aligned with what the decoder will compute. Note: the legacy
-        // mode-5 path below uses `π*(i+1)/(p+1)` as its VQ initial
-        // guess — slightly different from the decoder's linear
-        // reference — but since both stages (the offset applied during
-        // quantisation and the offset subtracted during dequantisation)
-        // use the same `lsp_linear_mode5` function, the round-trip
-        // error is self-cancelling inside the codebook search. We keep
-        // the mode-5 convention unchanged to avoid perturbing the
-        // existing 24-ish dB SNR.
+        // Use the decoder's reference initial LSP guess
+        // (`lsp_linear(i) = 0.25*(i+1)`). For sub-mode 5 (the legacy
+        // path) the encoder historically picked `π*(i+1)/(p+1)`, which
+        // differs from the decoder — that discrepancy was harmless
+        // because both VQ sides used the same bias and it cancelled in
+        // the round-trip. We preserve the legacy mode-5 initial guess
+        // to avoid perturbing the existing ≈24 dB SNR.
         let mut old_qlsp = [0.0f32; NB_ORDER];
         for i in 0..NB_ORDER {
-            old_qlsp[i] = match submode {
-                3 => 0.25 * (i as f32 + 1.0),
-                _ => std::f32::consts::PI * (i as f32 + 1.0) / (NB_ORDER as f32 + 1.0),
+            old_qlsp[i] = if submode == 5 {
+                std::f32::consts::PI * (i as f32 + 1.0) / (NB_ORDER as f32 + 1.0)
+            } else {
+                0.25 * (i as f32 + 1.0)
             };
         }
         Ok(Self {
@@ -219,13 +220,13 @@ impl NbEncoder {
     }
 
     /// Total number of bits this encoder writes per 20 ms frame
-    /// (including the wideband-bit + submode selector).
+    /// (including the wideband-bit + submode selector). Values match
+    /// [`crate::submodes::NbSubmode::bits_per_frame`].
     pub fn bits_per_frame(&self) -> u32 {
-        match self.submode {
-            3 => 160,
-            5 => 300,
-            _ => unreachable!("validated in with_submode"),
-        }
+        // Safe unwrap: `with_submode` validated the id.
+        nb_submode(self.submode)
+            .map(|sm| sm.bits_per_frame)
+            .unwrap_or(0)
     }
 
     /// Per-subframe Π-gain of the synthesis filter (read-only view).
@@ -260,11 +261,12 @@ impl NbEncoder {
     pub const DECODER_DELAY_SAMPLES: usize = NB_SUBFRAME_SIZE;
 
     /// Encode one 160-sample narrowband frame of **int16-range** float
-    /// samples (i.e. typical amplitudes up to ±32768). Appends bits for
-    /// a single packet of the configured sub-mode (160 bits for mode 3,
-    /// 300 bits for mode 5). The packet is NOT terminated with a
-    /// `m=15` selector — the caller is expected to either finish the
-    /// writer immediately or chain more frames.
+    /// samples (i.e. typical amplitudes up to ±32768). Appends exactly
+    /// `sm.bits_per_frame` bits to `bw`, where `sm` is the
+    /// [`crate::submodes::NbSubmode`] for the configured sub-mode id.
+    /// The packet is NOT terminated with a `m=15` selector — the caller
+    /// is expected to either finish the writer immediately or chain more
+    /// frames.
     pub fn encode_frame(&mut self, pcm: &[f32], bw: &mut BitWriter) -> Result<()> {
         if pcm.len() != NB_FRAME_SIZE {
             return Err(Error::invalid(format!(
@@ -272,23 +274,23 @@ impl NbEncoder {
                 pcm.len()
             )));
         }
+        // Validated in `with_submode`; `unwrap_or` path is unreachable.
+        let sm = nb_submode(self.submode).ok_or_else(|| {
+            Error::unsupported(format!(
+                "Speex NB encoder: sub-mode {} not in the descriptor table",
+                self.submode
+            ))
+        })?;
 
         // ---- 1. LPC analysis: windowed autocorrelation -----------------
         let windowed = hamming_window(pcm);
         let mut autocorr = [0.0f32; NB_ORDER + 1];
         autocorrelate(&windowed, &mut autocorr);
-        // Lag window to stabilise the Levinson recursion: a Gaussian
-        // tail damping on the autocorrelation pushes poles away from
-        // the unit circle. Matches the approach libspeex uses, with a
-        // slightly broader τ chosen so our BW-expansion step can
-        // further narrow the formants without pushing them unstable.
         for k in 1..=NB_ORDER {
             let tau = 40.0f32;
             let w = (-(0.5 * (k as f32 / tau).powi(2))).exp();
             autocorr[k] *= w;
         }
-        // White-noise correction — avoids a zero r[0] producing NaN LPCs
-        // on silent input.
         autocorr[0] *= 1.0001;
         if autocorr[0] < 1e-6 {
             autocorr[0] = 1e-6;
@@ -296,19 +298,13 @@ impl NbEncoder {
 
         let raw_lpc = levinson_durbin(&autocorr);
 
-        // Bandwidth expansion (γ ≈ 0.99) to guarantee a stable, less-peaked
-        // synthesis filter. Without this, an aggressively modelled pure
-        // tone collapses its LPC poles right onto the unit circle and
-        // `iir_mem16` saturates on even modest excitation. γ=0.99 moves
-        // each pole inward by 1 %, which adds ~1 dB of formant damping
-        // — perceptually negligible at first-cut quality.
+        // Bandwidth expansion (γ ≈ 0.99) to guarantee a stable,
+        // less-peaked synthesis filter.
         let mut lpc = [0.0f32; NB_ORDER];
         crate::lsp::bw_lpc(0.2, &raw_lpc, &mut lpc, NB_ORDER);
 
         // ---- 2. LPC → LSP (unquantised) --------------------------------
         let lsp = lpc_to_lsp(&lpc).unwrap_or_else(|| {
-            // Fallback: linear LSPs — guaranteed stable, no speech
-            // structure but keeps the encoder unconditionally robust.
             let mut fallback = [0.0f32; NB_ORDER];
             for i in 0..NB_ORDER {
                 fallback[i] = std::f32::consts::PI * (i as f32 + 1.0) / (NB_ORDER as f32 + 1.0);
@@ -316,19 +312,19 @@ impl NbEncoder {
             fallback
         });
 
-        // ---- 3. Quantise LSP — submode-specific VQ --------------------
-        // Mode 5: five-stage VQ, 30 bits, initial guess
-        //         `π*(i+1)/(p+1)` (legacy encoder convention).
-        // Mode 3: three-stage LBR VQ, 18 bits, initial guess
-        //         `0.25*(i+1)` (matches decoder's `lsp_linear(i)`).
-        let (qlsp, lsp_indices) = match self.submode {
-            3 => {
-                let (qlsp, idx) = quantise_lsp_lbr(&lsp);
-                (qlsp, LspIndices::Lbr(idx))
+        // ---- 3. Quantise LSP — dispatch on `sm.lsp` -------------------
+        // LBR: 3 × 6-bit (18 bits). NB: 5 × 6-bit (30 bits). Both use
+        // the decoder's `lsp_linear(i) = 0.25*(i+1)` initial guess —
+        // except sub-mode 5, which keeps its legacy `π*(i+1)/(p+1)`
+        // bias to avoid perturbing existing round-trip SNRs.
+        let (qlsp, lsp_indices): ([f32; NB_ORDER], LspIndices) = match sm.lsp {
+            LspKind::Lbr => {
+                let (q, idx) = quantise_lsp_lbr(&lsp);
+                (q, LspIndices::Lbr(idx))
             }
-            _ => {
-                let (qlsp, idx) = quantise_lsp_nb(&lsp);
-                (qlsp, LspIndices::Nb(idx))
+            LspKind::Nb => {
+                let (q, idx) = quantise_lsp_nb(&lsp);
+                (q, LspIndices::Nb(idx))
             }
         };
 
@@ -352,15 +348,7 @@ impl NbEncoder {
             lsp_to_lpc(&ilsp, &mut interp_qlpc[sub], NB_ORDER);
         }
 
-        // ---- 5. Frame LPC residual (target for A-by-S) ----------------
-        //
-        // Decoder alignment: the NB decoder filters each sub-frame's
-        // excitation with the LPC of the *previous* sub-frame (see
-        // `nb_decoder::decode_frame`; `interp_qlpc` carries the filter
-        // state). To keep the analysis simple we use the current sub-
-        // frame's LPC for our residual target — the ±1 sub-frame
-        // alignment drift is swamped by the other quantization error
-        // at first-cut quality.
+        // ---- 5. Frame LPC residual (open-loop excitation gain) ----
         let mut residual = [0.0f32; NB_FRAME_SIZE];
         {
             let mut mem = self.mem_analysis;
@@ -376,91 +364,92 @@ impl NbEncoder {
             }
             self.mem_analysis = mem;
         }
-
-        // Clip to int16 range to mirror the decoder's post-filter
-        // clamping.
         for v in residual.iter_mut() {
             *v = v.clamp(-32000.0, 32000.0);
         }
 
         // ---- 6. Open-loop excitation gain (5-bit) --------------------
-        //
-        // The residual we just computed is an *open-loop* approximation
-        // of the excitation the decoder should reconstruct. But the
-        // codebook-driven quantisation injects a noise-like excitation
-        // whose spectral shape differs from the residual, and the
-        // decoder's steep 1/A(z) filter can amplify the mismatched
-        // spectrum into the clipping range (`iir_mem16` saturates at
-        // ±32767). A proper CELP encoder avoids this with perceptual
-        // weighting; this first-cut encoder instead scales the open-
-        // loop gain down so the decoder output stays below saturation
-        // most of the time.
-        //
-        // Empirically 0.3 avoids clipping for speech-like inputs up
-        // to ~10 000 amplitude; sharper resonances may still clip but
-        // the resulting distortion is bounded.
         let frame_rms = rms(&residual);
-        // Scale the open-loop gain down by 0.25 before quantization.
-        // Empirically this keeps a wide variety of speech-like signals
-        // away from the decoder's ±32767 saturation ceiling. Proper
-        // perceptual-weighted A-by-S would remove the need for this
-        // margin — see the module docstring for the caveat.
+        // Scale factor keeps the decoder's `iir_mem16` clear of ±32767
+        // saturation for speech-like inputs; the vocoder / LBR modes
+        // don't have a closed-loop innovation so the resulting level
+        // error is self-consistent with the decoder's reconstruction.
         let ol_gain_raw = (frame_rms * 0.25).max(1.0);
-        // The decoder computes `ol_gain = exp(qe / 3.5)` with `qe ∈ 0..32`.
-        // Invert: qe = round(3.5 * ln(ol_gain)).
         let qe_f = 3.5 * ol_gain_raw.ln();
         let qe = qe_f.round().clamp(0.0, 31.0) as u32;
         let ol_gain = (qe as f32 / 3.5).exp();
 
-        // ---- 7. Write bitstream header fields ------------------------
+        // ---- 7. Open-loop pitch (for `lbr_pitch = Some(0)` modes) ----
+        // When the sub-mode's `lbr_pitch` is `Some(0)` the per-subframe
+        // LTP does not transmit a pitch lag; we encode one global lag
+        // up front. For `Some(-1)` (the common 3/4/5/6/7 modes) each
+        // sub-frame searches independently — no ol_pitch bits are
+        // written.
+        let mut ol_pitch_idx: u32 = 0;
+        let mut ol_pitch_lag: i32 = NB_PITCH_START;
+        let use_ol_pitch = matches!(sm.lbr_pitch, Some(0));
+        if use_ol_pitch {
+            // Pick a global pitch that best correlates the synthesis
+            // target (= the full-frame PCM minus the first sub-frame's
+            // ZIR — approximated here by the full-frame PCM) with the
+            // LTP-lagged excitation history. For first-cut quality we
+            // search in the residual domain, which is cheap.
+            ol_pitch_lag = search_open_loop_pitch_residual(&self.exc_buf, &residual);
+            ol_pitch_idx = (ol_pitch_lag - NB_PITCH_START).clamp(0, 127) as u32;
+        }
+
+        // ---- 8. Forced pitch gain (for `forced_pitch_gain` modes) ----
+        // Computed once per frame; used by every sub-frame's forced LTP
+        // (and serves as a sanity baseline for the innovation gain on
+        // vocoder-style modes 1 and 8).
+        let mut forced_pitch_coef: f32 = 0.0;
+        let mut forced_pitch_q: u32 = 0;
+        if sm.forced_pitch_gain {
+            // Estimate a normalised pitch correlation at the chosen ol
+            // pitch lag — mirror of `pitch_unquant`'s 0.066667 scale.
+            let raw = estimate_pitch_correlation(&self.exc_buf, ol_pitch_lag, &residual);
+            // Reference quantiser step: `0.066667 * q` ⇒ `q = raw/0.066667`.
+            let qv = (raw / 0.066667).round().clamp(0.0, 15.0) as u32;
+            forced_pitch_q = qv;
+            forced_pitch_coef = 0.066667 * qv as f32;
+        }
+
+        // ---- 9. Write bitstream header fields ------------------------
         bw.write_bits(0, 1); // wideband flag = 0
         bw.write_bits(self.submode, 4);
         match lsp_indices {
             LspIndices::Lbr(idx) => {
-                // 3 × 6-bit indices (18 bits total).
                 for v in idx {
                     bw.write_bits(v as u32, 6);
                 }
             }
             LspIndices::Nb(idx) => {
-                // 5 × 6-bit indices (30 bits total).
                 for v in idx {
                     bw.write_bits(v as u32, 6);
                 }
             }
         }
-        // (no ol_pitch — both modes set lbr_pitch = -1)
+        if use_ol_pitch {
+            bw.write_bits(ol_pitch_idx, 7);
+        }
+        if sm.forced_pitch_gain {
+            bw.write_bits(forced_pitch_q, 4);
+        }
         bw.write_bits(qe, 5);
+        // Sub-mode 1 carries an extra 4-bit DTX flag. We're not
+        // implementing discontinuous transmission on the encode side;
+        // emit a zero so the decoder's `dtx_enabled` stays off.
+        if self.submode == 1 {
+            bw.write_bits(0, 4);
+        }
 
-        // ---- 8. Per-sub-frame A-by-S loop -----------------------------
-        // Pick the sub-mode-dependent parameters up front so the loop
-        // body is free of branching.
-        let (pitch_bits, gain_bits, gain_cdbk, gain_cdbk_size) = match self.submode {
-            3 => (7u32, 5u32, &GAIN_CDBK_LBR[..], 32usize),
-            _ => (7u32, 7u32, &GAIN_CDBK_NB[..], 128usize),
-        };
+        // ---- 10. Per-sub-frame A-by-S loop ---------------------------
         for sub in 0..NB_NB_SUBFRAMES {
             let offset_in_frame = NB_SUBFRAME_SIZE * sub;
             let exc_idx = EXC_HISTORY + offset_in_frame;
-
-            // ---- Analysis-by-synthesis target -----------------------
-            //
-            // Proper A-by-S: minimise error between the decoded
-            // (synthesised) PCM and the input PCM, not between the
-            // excitation and the LPC residual. Compute
-            //   * h[n]  — impulse response of `1/A_sub(z)` (40 samples).
-            //   * zir[n] — zero-input response of `1/A_sub(z)` given
-            //     the current `mem_sp_sim` state (what the decoder
-            //     would emit with no excitation this sub-frame).
-            // Then the *synthesis target* becomes `pcm_tgt − zir`.
-            // Any excitation the encoder picks gets convolved with h
-            // before being compared to this target.
-            //
-            // Without this, the codebook search wastes bits matching
-            // LPC-residual samples whose synthesised amplitude is huge
-            // at formant frequencies — leading to the saturating
-            // output observed in early iterations.
             let ak_sub = &interp_qlpc[sub];
+
+            // ---- A-by-S filter kernels + target ----
             let h = impulse_response(ak_sub, NB_SUBFRAME_SIZE);
             let mut zir_mem = self.mem_sp_sim;
             let mut zir = [0.0f32; NB_SUBFRAME_SIZE];
@@ -477,33 +466,81 @@ impl NbEncoder {
                 syn_target[i] = pcm[offset_in_frame + i] - zir[i];
             }
 
-            // Closed-loop pitch: find lag whose filtered LTP best
-            // matches the synthesis target.
-            let pit_min = NB_PITCH_START;
-            let pit_max = NB_PITCH_END;
-            let pitch = search_pitch_lag_filtered(
-                &syn_target,
-                &self.exc_buf,
-                exc_idx,
-                pit_min,
-                pit_max,
-                &h,
-            );
-            let pitch_idx = (pitch - pit_min) as u32;
+            // ---- LTP excitation and filtered response ----
+            // Two paths exist:
+            //   * `LtpKind::ThreeTap` — 3-tap gain VQ with optional per-
+            //     sub-frame pitch search (`pitch_bits = 7`) or a forced
+            //     lag (`pitch_bits = 0`, sub-mode 2 only).
+            //   * `LtpKind::Forced` — sub-modes 1 and 8: no bits at all;
+            //     the decoder plays back a scaled copy of the past
+            //     excitation at the ol_pitch lag with `forced_pitch_coef`
+            //     as the single tap.
+            let pitch_bits = sm.ltp_params.pitch_bits;
+            let gain_bits = sm.ltp_params.gain_bits;
+            let gain_cdbk = sm.ltp_params.gain_cdbk;
+            let gain_cdbk_size = 1usize << gain_bits;
 
-            // Three-tap gain codebook: evaluate each entry in the
-            // filtered domain against the active per-submode codebook.
-            let (gain_idx, ltp_exc, ltp_filtered) = search_pitch_gain_filtered(
-                &syn_target,
-                &self.exc_buf,
-                exc_idx,
-                pitch,
-                &h,
-                gain_cdbk,
-                gain_cdbk_size,
-            );
-            bw.write_bits(pitch_idx, pitch_bits);
-            bw.write_bits(gain_idx as u32, gain_bits);
+            let (ltp_exc, ltp_filtered) = match sm.ltp {
+                LtpKind::ThreeTap => {
+                    // Determine the search window for this sub-frame's
+                    // pitch. `lbr_pitch = Some(0)` pins every sub-frame
+                    // to the global lag (no bits transmitted — pitch_bits
+                    // is 0 in that case). `Some(-1)` searches the full
+                    // range. `Some(m)` bounds the search to ±m around the
+                    // global lag.
+                    let (pit_min, pit_max) = match sm.lbr_pitch {
+                        Some(0) => (ol_pitch_lag, ol_pitch_lag),
+                        Some(-1) | None => (NB_PITCH_START, NB_PITCH_END),
+                        Some(margin) => {
+                            let lo = (ol_pitch_lag - margin + 1).max(NB_PITCH_START);
+                            let hi = (ol_pitch_lag + margin).min(NB_PITCH_END);
+                            (lo, hi)
+                        }
+                    };
+                    let pitch = if pit_min == pit_max {
+                        pit_min
+                    } else {
+                        search_pitch_lag_filtered(
+                            &syn_target,
+                            &self.exc_buf,
+                            exc_idx,
+                            pit_min,
+                            pit_max,
+                            &h,
+                        )
+                    };
+                    if pitch_bits > 0 {
+                        let pitch_idx = (pitch - pit_min) as u32;
+                        bw.write_bits(pitch_idx, pitch_bits);
+                    }
+                    let (gain_idx, ltp_exc, ltp_filt) = search_pitch_gain_filtered(
+                        &syn_target,
+                        &self.exc_buf,
+                        exc_idx,
+                        pitch,
+                        &h,
+                        gain_cdbk,
+                        gain_cdbk_size,
+                    );
+                    bw.write_bits(gain_idx as u32, gain_bits);
+                    (ltp_exc, ltp_filt)
+                }
+                LtpKind::Forced => {
+                    // No pitch / gain bits — the decoder derives the
+                    // single tap from `ol_pitch_lag` + `forced_pitch_coef`.
+                    let mut exc = [0.0f32; NB_SUBFRAME_SIZE];
+                    let coef = forced_pitch_coef.min(0.99);
+                    for j in 0..NB_SUBFRAME_SIZE {
+                        let src = exc_idx as isize + j as isize - ol_pitch_lag as isize;
+                        if src >= 0 && (src as usize) < self.exc_buf.len() {
+                            exc[j] = self.exc_buf[src as usize] * coef;
+                        }
+                    }
+                    let mut filt = [0.0f32; NB_SUBFRAME_SIZE];
+                    convolve_lt(&exc, &h, &mut filt);
+                    (exc, filt)
+                }
+            };
 
             // What's left for the innovation codebook to cover.
             let mut innov_syn_target = [0.0f32; NB_SUBFRAME_SIZE];
@@ -511,10 +548,7 @@ impl NbEncoder {
                 innov_syn_target[i] = syn_target[i] - ltp_filtered[i];
             }
 
-            // Sub-frame innovation gain: pick the scalar that best
-            // matches the residual-domain RMS of the innovation
-            // target. Use the filter's impulse-response energy to
-            // relate excitation amplitude to output amplitude.
+            // ---- Sub-frame innovation gain ----
             let h_energy: f32 = h.iter().map(|v| v * v).sum();
             let h_scale = h_energy.sqrt().max(1.0);
             let inner_rms = rms(&innov_syn_target);
@@ -523,44 +557,85 @@ impl NbEncoder {
             } else {
                 0.0
             };
-            let (sub_gain_val, ener) = match self.submode {
+            let ener = match sm.have_subframe_gain {
                 3 => {
-                    let (sub_gain_idx, sub_gain_val) =
-                        nearest_scalar(&EXC_GAIN_QUANT_SCAL1, target_ratio);
-                    bw.write_bits(sub_gain_idx as u32, 1);
-                    (sub_gain_val, sub_gain_val * ol_gain)
+                    let (idx, val) = nearest_scalar(&EXC_GAIN_QUANT_SCAL3, target_ratio);
+                    bw.write_bits(idx as u32, 3);
+                    val * ol_gain
                 }
-                _ => {
-                    let (sub_gain_idx, sub_gain_val) =
-                        nearest_scalar(&EXC_GAIN_QUANT_SCAL3, target_ratio);
-                    bw.write_bits(sub_gain_idx as u32, 3);
-                    (sub_gain_val, sub_gain_val * ol_gain)
+                1 => {
+                    let (idx, val) = nearest_scalar(&EXC_GAIN_QUANT_SCAL1, target_ratio);
+                    bw.write_bits(idx as u32, 1);
+                    val * ol_gain
                 }
+                _ => ol_gain,
             };
-            let _ = sub_gain_val;
 
-            // Fixed codebook search in the filtered/synthesis domain.
+            // ---- Innovation codebook ----
             let mut innov = [0.0f32; NB_SUBFRAME_SIZE];
-            match self.submode {
-                3 => {
-                    // Mode 3: 4 sub-vectors × 10 samples, 5-bit shape.
-                    let indices = search_split_cb_10x32_filtered(&innov_syn_target, &h, ener);
-                    for idx in indices {
-                        bw.write_bits(idx as u32, 5);
+            match sm.innov {
+                InnovKind::SplitCb => {
+                    // Generic split-CB search, parameterised by the
+                    // descriptor's layout. Every mode uses the standard
+                    // `0.03125` shape-to-amplitude scale.
+                    let idx =
+                        search_split_cb_by_params(&innov_syn_target, &h, ener, &sm.innov_params);
+                    for v in 0..sm.innov_params.nb_subvect {
+                        bw.write_bits(idx[v] as u32, sm.innov_params.shape_bits);
                     }
-                    expand_split_cb_10x32(&indices, &mut innov);
+                    expand_split_cb_by_params(&idx, &sm.innov_params, &mut innov);
+
+                    if sm.double_codebook {
+                        // Sub-mode 7: run the search a second time on
+                        // the residual after the first codebook's
+                        // contribution has been subtracted. The decoder
+                        // sums both at 0.454545 weight.
+                        // Build the filtered response of the first pass
+                        // to subtract from the target.
+                        let mut first_filt = [0.0f32; NB_SUBFRAME_SIZE];
+                        let mut scaled = innov;
+                        for v in scaled.iter_mut() {
+                            *v *= ener;
+                        }
+                        convolve_lt(&scaled, &h, &mut first_filt);
+                        let mut target2 = [0.0f32; NB_SUBFRAME_SIZE];
+                        for i in 0..NB_SUBFRAME_SIZE {
+                            target2[i] = innov_syn_target[i] - first_filt[i];
+                        }
+                        let idx2 = search_split_cb_by_params(
+                            &target2,
+                            &h,
+                            ener * 0.454545,
+                            &sm.innov_params,
+                        );
+                        for v in 0..sm.innov_params.nb_subvect {
+                            bw.write_bits(idx2[v] as u32, sm.innov_params.shape_bits);
+                        }
+                        let mut innov2 = [0.0f32; NB_SUBFRAME_SIZE];
+                        expand_split_cb_by_params(&idx2, &sm.innov_params, &mut innov2);
+                        for i in 0..NB_SUBFRAME_SIZE {
+                            innov[i] += innov2[i] * 0.454545;
+                        }
+                    }
                 }
-                _ => {
-                    let indices = search_split_cb_5x64_filtered(&innov_syn_target, &h, ener);
-                    for idx in indices {
-                        bw.write_bits(idx as u32, 6);
-                    }
-                    expand_split_cb_5x64(&indices, &mut innov);
+                InnovKind::Noise => {
+                    // Reference decoder calls `speex_rand(1.0)` per
+                    // sample; the encoder doesn't need to transmit
+                    // anything (the decoder runs its own PRNG). To keep
+                    // our `mem_sp_sim` / `exc_buf` predictive we
+                    // synthesise the same shape on the encoder side by
+                    // running a deterministic PRNG here. The exact
+                    // samples differ from what the decoder's (different-
+                    // seed) PRNG produces, but that's fine — the
+                    // following frame's LTP lag never resolves to this
+                    // noise in mode 1 because `ol_pitch` is encoded
+                    // anew. Leave `innov = 0` to avoid biasing the
+                    // per-subframe state.
+                    // (No bits written.)
                 }
             }
 
-            // Reconstruct this sub-frame's excitation — matches what
-            // the decoder reconstructs from the bits we just wrote.
+            // ---- Scale and commit excitation for this sub-frame ----
             for v in innov.iter_mut() {
                 *v *= ener;
             }
@@ -568,20 +643,12 @@ impl NbEncoder {
                 self.exc_buf[exc_idx + i] = ltp_exc[i] + innov[i];
             }
 
-            // Record per-sub-frame state for the wideband encoder. It
-            // reads `pi_gain` to balance the high-band folding gain
-            // against the low-band filter envelope, `innov` (the
-            // fixed-codebook excitation, not scaled by the adaptive
-            // component) to drive the spectral-folding path, and
-            // `exc_rms_sub` to seed the high-band stochastic gain
-            // quantiser with the same signal the decoder will see.
+            // Record per-sub-frame state for the wideband encoder.
             self.pi_gain[sub] = pi_gain_of_nb(ak_sub);
             self.innov[offset_in_frame..offset_in_frame + NB_SUBFRAME_SIZE].copy_from_slice(&innov);
             self.exc_rms_sub[sub] = rms(&self.exc_buf[exc_idx..exc_idx + NB_SUBFRAME_SIZE]);
 
-            // Update the simulated synthesis-filter state so the next
-            // sub-frame's ZIR reflects what the decoder's `mem_sp`
-            // will actually hold.
+            // Advance the simulated synthesis filter.
             let exc_slice: Vec<f32> = self.exc_buf[exc_idx..exc_idx + NB_SUBFRAME_SIZE].to_vec();
             let mut sink = [0.0f32; NB_SUBFRAME_SIZE];
             crate::nb_decoder::iir_mem16(
@@ -592,10 +659,9 @@ impl NbEncoder {
                 NB_ORDER,
                 &mut self.mem_sp_sim,
             );
-            let _ = residual; // referenced elsewhere — kept for consistency
         }
 
-        // ---- 9. Save state for next frame ----------------------------
+        // ---- 11. Save state for next frame ---------------------------
         self.old_qlsp = qlsp;
         self.interp_qlpc = interp_qlpc[NB_NB_SUBFRAMES - 1];
         self.first = false;
@@ -1213,6 +1279,81 @@ fn search_pitch_gain_filtered(
     (best_idx, best_exc, best_filt)
 }
 
+/// Rough open-loop pitch estimator for sub-modes that transmit a single
+/// global pitch per frame (sub-modes 1, 2, 8). Picks the lag in
+/// `[NB_PITCH_START, NB_PITCH_END]` whose single-tap lagged copy of the
+/// recent excitation / residual best correlates with the current
+/// frame's residual. Works in the residual domain rather than the
+/// synthesis domain because the per-frame ol_pitch doesn't benefit from
+/// the expensive filter convolution.
+fn search_open_loop_pitch_residual(exc_buf: &[f32], residual: &[f32; NB_FRAME_SIZE]) -> i32 {
+    let mut best_lag = NB_PITCH_START;
+    let mut best_score = -1.0f32;
+    for lag in NB_PITCH_START..=NB_PITCH_END {
+        let mut num = 0.0f32;
+        let mut den = 1e-6f32;
+        // Compare residual[i] against a lagged copy drawn from the
+        // excitation history + the current frame's developing residual.
+        for i in 0..NB_FRAME_SIZE {
+            let tgt = residual[i];
+            // Source sample: `i - lag` relative to the start of the
+            // current frame. Negative indices read from the excitation
+            // history (the last `lag` samples written before this frame).
+            let src_idx = i as isize - lag as isize;
+            let s = if src_idx >= 0 {
+                residual[src_idx as usize]
+            } else {
+                // Look into exc history (the buffer stores previous
+                // frame's excitation at the tail).
+                let hist_idx = EXC_HISTORY as isize + src_idx;
+                if hist_idx >= 0 && (hist_idx as usize) < exc_buf.len() {
+                    exc_buf[hist_idx as usize]
+                } else {
+                    0.0
+                }
+            };
+            num += tgt * s;
+            den += s * s;
+        }
+        let score = num * num / den;
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+    best_lag
+}
+
+/// Normalised one-tap pitch correlation at a given lag, in the residual
+/// domain. Returns a value in `[-1, 1]` approximately — used by the
+/// vocoder-style `forced_pitch_gain` modes to pick a 4-bit quantised
+/// pitch coefficient. The reference does a similar normalised cross-
+/// correlation in `ltp.c`'s `open_loop_pitch` + `forced_pitch_quant`.
+fn estimate_pitch_correlation(exc_buf: &[f32], lag: i32, residual: &[f32; NB_FRAME_SIZE]) -> f32 {
+    let mut num = 0.0f32;
+    let mut tgt_e = 1e-6f32;
+    let mut src_e = 1e-6f32;
+    for i in 0..NB_FRAME_SIZE {
+        let tgt = residual[i];
+        let src_idx = i as isize - lag as isize;
+        let s = if src_idx >= 0 {
+            residual[src_idx as usize]
+        } else {
+            let hist_idx = EXC_HISTORY as isize + src_idx;
+            if hist_idx >= 0 && (hist_idx as usize) < exc_buf.len() {
+                exc_buf[hist_idx as usize]
+            } else {
+                0.0
+            }
+        };
+        num += tgt * s;
+        tgt_e += tgt * tgt;
+        src_e += s * s;
+    }
+    let denom = (tgt_e * src_e).sqrt();
+    (num / denom).clamp(-1.0, 1.0)
+}
+
 /// Generic split-codebook search in the synthesis domain. The
 /// sub-frame is partitioned into `nb_subvect` disjoint sub-vectors of
 /// `subvect_size` samples each; for each one we pick the `shape_cb`
@@ -1281,72 +1422,48 @@ fn search_split_cb_generic<const MAX_SUBVECT: usize>(
 }
 
 // =====================================================================
-// Fixed (split) codebook search — per-submode helpers
+// Fixed (split) codebook search — parameterised dispatch
 // =====================================================================
 
-/// Mode 5: 8 sub-vectors × 5 samples, 6-bit shape (`EXC_5_64_TABLE`).
-const MODE5_SUBVECT_SIZE: usize = 5;
-const MODE5_NB_SUBVECT: usize = 8;
-const MODE5_SHAPE_BITS: usize = 6;
-const MODE5_SHAPE_ENTRIES: usize = 1 << MODE5_SHAPE_BITS; // 64
+/// Maximum number of sub-vectors any NB sub-mode uses. Sub-mode 5 has 8
+/// × 5-sample sub-vectors; all others have fewer sub-vectors per frame.
+const MAX_NB_SUBVECT: usize = 8;
 
-/// Mode 3: 4 sub-vectors × 10 samples, 5-bit shape
-/// (`EXC_10_32_TABLE` from `submodes::SPLIT_CB_NB_LBR`).
-const MODE3_SUBVECT_SIZE: usize = 10;
-const MODE3_NB_SUBVECT: usize = 4;
-const MODE3_SHAPE_BITS: usize = 5;
-const MODE3_SHAPE_ENTRIES: usize = 1 << MODE3_SHAPE_BITS; // 32
-
-fn search_split_cb_5x64_filtered(
+/// Search the split-codebook whose layout is described by `params`
+/// (matching the decoder's `split_cb_shape_sign_unquant` — only
+/// `have_sign = false` is used by the NB ladder). Returns one index per
+/// sub-vector, placed at positions `0..nb_subvect`. Entries beyond that
+/// are zero and should not be consulted.
+fn search_split_cb_by_params(
     target: &[f32; NB_SUBFRAME_SIZE],
     h: &[f32],
     ener: f32,
-) -> [usize; MODE5_NB_SUBVECT] {
-    search_split_cb_generic::<MODE5_NB_SUBVECT>(
+    params: &crate::submodes::SplitCbParams,
+) -> [usize; MAX_NB_SUBVECT] {
+    let shape_entries = 1usize << params.shape_bits;
+    search_split_cb_generic::<MAX_NB_SUBVECT>(
         target,
         h,
         ener,
-        &EXC_5_64_TABLE,
-        MODE5_SHAPE_ENTRIES,
-        MODE5_SUBVECT_SIZE,
-        MODE5_NB_SUBVECT,
+        params.shape_cb,
+        shape_entries,
+        params.subvect_size,
+        params.nb_subvect,
     )
 }
 
-fn search_split_cb_10x32_filtered(
-    target: &[f32; NB_SUBFRAME_SIZE],
-    h: &[f32],
-    ener: f32,
-) -> [usize; MODE3_NB_SUBVECT] {
-    search_split_cb_generic::<MODE3_NB_SUBVECT>(
-        target,
-        h,
-        ener,
-        &EXC_10_32_TABLE,
-        MODE3_SHAPE_ENTRIES,
-        MODE3_SUBVECT_SIZE,
-        MODE3_NB_SUBVECT,
-    )
-}
-
-/// Inverse of `search_split_cb_5x64_filtered` — recomputes the
-/// normalised innovation the decoder will reconstruct from the chosen
-/// indices.
-fn expand_split_cb_5x64(indices: &[usize; MODE5_NB_SUBVECT], out: &mut [f32; NB_SUBFRAME_SIZE]) {
-    for i in 0..MODE5_NB_SUBVECT {
-        let base = indices[i] * MODE5_SUBVECT_SIZE;
-        for j in 0..MODE5_SUBVECT_SIZE {
-            out[i * MODE5_SUBVECT_SIZE + j] = EXC_5_64_TABLE[base + j] as f32 * 0.03125;
-        }
-    }
-}
-
-/// Inverse of `search_split_cb_10x32_filtered` — mode-3 reconstruction.
-fn expand_split_cb_10x32(indices: &[usize; MODE3_NB_SUBVECT], out: &mut [f32; NB_SUBFRAME_SIZE]) {
-    for i in 0..MODE3_NB_SUBVECT {
-        let base = indices[i] * MODE3_SUBVECT_SIZE;
-        for j in 0..MODE3_SUBVECT_SIZE {
-            out[i * MODE3_SUBVECT_SIZE + j] = EXC_10_32_TABLE[base + j] as f32 * 0.03125;
+/// Inverse of `search_split_cb_by_params` — rebuilds the normalised
+/// per-sample innovation (before multiplication by `ener`) that the
+/// decoder will reconstruct.
+fn expand_split_cb_by_params(
+    indices: &[usize; MAX_NB_SUBVECT],
+    params: &crate::submodes::SplitCbParams,
+    out: &mut [f32; NB_SUBFRAME_SIZE],
+) {
+    for i in 0..params.nb_subvect {
+        let base = indices[i] * params.subvect_size;
+        for j in 0..params.subvect_size {
+            out[i * params.subvect_size + j] = params.shape_cb[base + j] as f32 * 0.03125;
         }
     }
 }
@@ -1475,10 +1592,46 @@ mod tests {
     }
 
     #[test]
-    fn with_submode_rejects_unsupported() {
-        // Mode 1 and mode 7 are documented but unimplemented.
-        assert!(NbEncoder::with_submode(1).is_err());
-        assert!(NbEncoder::with_submode(7).is_err());
+    fn with_submode_accepts_full_ladder() {
+        // All 8 NB sub-modes defined by the reference must construct.
+        for id in 1..=8 {
+            NbEncoder::with_submode(id)
+                .unwrap_or_else(|e| panic!("submode {id} should construct: {e}"));
+        }
+    }
+
+    #[test]
+    fn with_submode_rejects_out_of_range() {
+        // `0` is the libspeex silent frame (not emitted here); 9+ are
+        // reserved / invalid. All must error out.
+        assert!(NbEncoder::with_submode(0).is_err());
+        assert!(NbEncoder::with_submode(9).is_err());
+        assert!(NbEncoder::with_submode(15).is_err());
+    }
+
+    #[test]
+    fn encode_frame_every_submode_writes_exact_bit_count() {
+        // For each of the eight NB sub-modes, the encoder must emit
+        // exactly the `bits_per_frame` value from the descriptor — no
+        // padding, no overflow. This round-trips against the decoder's
+        // bit consumer by construction.
+        for id in 1..=8u32 {
+            let mut enc = NbEncoder::with_submode(id).expect("construct");
+            let mut bw = BitWriter::new();
+            let mut pcm = [0.0f32; NB_FRAME_SIZE];
+            for i in 0..NB_FRAME_SIZE {
+                let t = i as f32;
+                pcm[i] =
+                    4000.0 * ((t * 0.2).sin() + 0.5 * (t * 0.05).sin() + 0.25 * (t * 0.7).cos());
+            }
+            enc.encode_frame(&pcm, &mut bw).unwrap();
+            let expected = crate::submodes::nb_submode(id).unwrap().bits_per_frame;
+            assert_eq!(
+                bw.bit_position() as u32,
+                expected,
+                "submode {id} wrote wrong bit count"
+            );
+        }
     }
 
     #[test]

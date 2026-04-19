@@ -19,6 +19,7 @@ use oxideav_core::{Error, Result};
 
 use crate::bitreader::BitReader;
 use crate::lsp::{lsp_interpolate, lsp_to_lpc, lsp_unquant_lbr, lsp_unquant_nb};
+use crate::stereo::{inband_skip_bits, StereoState, SPEEX_INBAND_STEREO};
 use crate::submodes::{nb_submode, InnovKind, LspKind, LtpKind, SplitCbParams, WB_SKIP_TABLE};
 
 // ----- NB constants (from `nb_celp.h`). --------------------------------
@@ -89,6 +90,12 @@ pub struct NbDecoder {
     /// One-sample memory for the postfilter's spectral-tilt
     /// compensation stage (1 - μ·z⁻¹).
     pf_mem_tilt: f32,
+    /// Per-stream intensity-stereo state. Only read if the containing
+    /// codec decoder has been told the stream is stereo (via the
+    /// header's `nb_channels` field); the CELP loop always parses
+    /// in-band `m=14` stereo payloads to keep the bit reader aligned,
+    /// but the expansion-to-L/R step is gated on `nb_channels > 1`.
+    pub(crate) stereo: StereoState,
 }
 
 impl Default for NbDecoder {
@@ -117,7 +124,23 @@ impl NbDecoder {
             pf_mem_fir: [0.0; NB_ORDER],
             pf_mem_iir: [0.0; NB_ORDER],
             pf_mem_tilt: 0.0,
+            stereo: StereoState::new(),
         }
+    }
+
+    /// Intensity-stereo state — updated whenever the bitstream carries
+    /// an `m=14, id=9` in-band payload. Used by the wrapping codec
+    /// decoder to expand the CELP-produced mono signal into L/R.
+    pub fn stereo_state(&self) -> &StereoState {
+        &self.stereo
+    }
+
+    /// Mutable access — the top-level stereo path calls
+    /// `StereoState::expand_mono_in_place` through this handle after
+    /// the CELP frame is synthesised so the smoothing filter memory
+    /// stays in lock-step with the side-channel payloads.
+    pub fn stereo_state_mut(&mut self) -> &mut StereoState {
+        &mut self.stereo
     }
 
     /// Per-subframe Π-gain of the interpolated synthesis filter
@@ -148,8 +171,7 @@ impl NbDecoder {
         debug_assert_eq!(out.len(), NB_FRAME_SIZE);
 
         // ---- Sub-mode selection (incl. wideband-layer skip) -----------
-        let m: u32;
-        loop {
+        let m: u32 = loop {
             if br.bits_remaining() < 5 {
                 return Err(Error::invalid("Speex NB: truncated frame (need ≥5 bits)"));
             }
@@ -179,22 +201,78 @@ impl NbDecoder {
             if br.bits_remaining() < 4 {
                 return Err(Error::invalid("Speex NB: truncated frame (sub-mode)"));
             }
-            m = br.read_u32(4)?;
-            if m == 15 {
+            let m_val = br.read_u32(4)?;
+            if m_val == 15 {
                 // Terminator — frame done. Reference returns -1 here.
                 return Err(Error::Eof);
-            } else if m == 14 || m == 13 {
-                return Err(Error::unsupported(
-                    "Speex NB: in-band/user request packets (sub-mode 13/14) not implemented \
-                     — see RFC 5574 §3.4 / nb_celp.c",
-                ));
-            } else if m > 8 {
+            } else if m_val == 14 {
+                // In-band request — reference `speex_inband_handler`.
+                // Read the 4-bit request id. If it's `SPEEX_INBAND_STEREO`
+                // (id 9) decode the 8-bit intensity-stereo payload into
+                // our `stereo` state; for any other id, skip the
+                // corresponding number of bits per the ladder in
+                // `speex_callbacks.c`. Then loop to read the next `m`.
+                if br.bits_remaining() < 4 {
+                    return Err(Error::invalid(
+                        "Speex NB: truncated in-band request (no id)",
+                    ));
+                }
+                let id = br.read_u32(4)?;
+                if id == SPEEX_INBAND_STEREO {
+                    if br.bits_remaining() < 8 {
+                        return Err(Error::invalid(
+                            "Speex NB: truncated stereo side-channel payload",
+                        ));
+                    }
+                    self.stereo.read_side_channel(br)?;
+                } else {
+                    let skip = inband_skip_bits(id) as u64;
+                    if br.bits_remaining() < skip {
+                        return Err(Error::invalid(
+                            "Speex NB: truncated in-band request payload",
+                        ));
+                    }
+                    let mut left = skip as u32;
+                    while left >= 24 {
+                        br.read_u32(24)?;
+                        left -= 24;
+                    }
+                    if left > 0 {
+                        br.read_u32(left)?;
+                    }
+                }
+                continue;
+            } else if m_val == 13 {
+                // User in-band data — 5 bits of length + that-many bytes.
+                // Our decoder skips this content and moves on to the
+                // actual CELP frame. Matches the behaviour of libspeex
+                // when no user callback is registered.
+                if br.bits_remaining() < 5 {
+                    return Err(Error::invalid("Speex NB: truncated user in-band request"));
+                }
+                let len_bytes = br.read_u32(5)? as u64;
+                let skip_bits = len_bytes.saturating_mul(8);
+                if br.bits_remaining() < skip_bits {
+                    return Err(Error::invalid(
+                        "Speex NB: user in-band payload exceeds packet",
+                    ));
+                }
+                let mut left = skip_bits;
+                while left >= 24 {
+                    br.read_u32(24)?;
+                    left -= 24;
+                }
+                if left > 0 {
+                    br.read_u32(left as u32)?;
+                }
+                continue;
+            } else if m_val > 8 {
                 return Err(Error::invalid(format!(
-                    "Speex NB: invalid sub-mode id {m} (>8)"
+                    "Speex NB: invalid sub-mode id {m_val} (>8)"
                 )));
             }
-            break;
-        }
+            break m_val;
+        };
 
         // ---- Sub-mode 0 = "null mode" — emit comfort noise -----------
         let Some(sm) = nb_submode(m) else {

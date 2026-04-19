@@ -92,10 +92,18 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output.sample_rate = Some(8_000);
     output.codec_id = params.codec_id.clone();
     // Reflect the actual encoded bit rate back on the output params so
-    // a downstream muxer sees an accurate rate.
+    // a downstream muxer sees an accurate rate. Nominal rates match
+    // `libspeex/modes.c` — exact values the Speex reference advertises
+    // for each NB sub-mode.
     output.bit_rate = Some(match submode {
+        1 => 2_150,
+        2 => 5_950,
         3 => 8_000,
+        4 => 11_000,
         5 => 15_000,
+        6 => 18_200,
+        7 => 24_600,
+        8 => 3_950,
         _ => unreachable!("validated by NbEncoder::with_submode"),
     });
     if output.extradata.is_empty() {
@@ -210,7 +218,14 @@ enum SpeexBandMode {
 /// sub-mode).
 fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
     let nb_bitrate = match nb_submode {
+        1 => 2_150i32,
+        2 => 5_950i32,
         3 => 8_000i32,
+        4 => 11_000i32,
+        5 => 15_000i32,
+        6 => 18_200i32,
+        7 => 24_600i32,
+        8 => 3_950i32,
         _ => 15_000i32,
     };
     let (rate, mode_id, bitrate, frame_size) = match mode {

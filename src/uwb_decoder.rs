@@ -44,7 +44,7 @@ use crate::lsp::{lsp_interpolate, lsp_to_lpc, lsp_unquant_high};
 use crate::nb_decoder::iir_mem16;
 use crate::qmf::{qmf_synth, H0_PROTOTYPE, QMF_ORDER};
 use crate::wb_decoder::{
-    FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER, WbDecoder,
+    WbDecoder, FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER,
 };
 
 /// Number of UWB sub-frames per frame (`sb_uwb_mode.subframes = 4`).
@@ -102,6 +102,22 @@ impl UwbDecoder {
             g1_mem: [0.0; QMF_ORDER],
             first: true,
         }
+    }
+
+    /// Intensity-stereo state forwarded from the embedded WB decoder
+    /// (which forwards from the NB decoder). The UWB bitstream layers
+    /// don't introduce a separate stereo payload; the `m=14, id=9`
+    /// packet lives in the NB portion of the frame and applies to the
+    /// full-band mono output.
+    pub fn stereo_state(&self) -> &crate::stereo::StereoState {
+        self.wb.stereo_state()
+    }
+
+    /// Mutable access — used by the top-level [`crate::decoder`] to
+    /// expand the mono UWB output into L/R via
+    /// [`crate::stereo::StereoState::expand_mono_in_place`].
+    pub fn stereo_state_mut(&mut self) -> &mut crate::stereo::StereoState {
+        self.wb.stereo_state_mut()
     }
 
     /// Decode one 640-sample UWB frame (32 kHz).

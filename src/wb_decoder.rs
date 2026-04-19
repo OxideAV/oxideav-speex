@@ -134,6 +134,23 @@ impl WbDecoder {
         &self.nb
     }
 
+    /// Intensity-stereo state forwarded from the embedded NB decoder.
+    /// Wideband Speex shares the same side-channel payload as NB — the
+    /// stereo `m=14, id=9` packet lives in the NB-portion of the frame,
+    /// which is where `NbDecoder::decode_frame` reads and updates the
+    /// state.
+    pub fn stereo_state(&self) -> &crate::stereo::StereoState {
+        self.nb.stereo_state()
+    }
+
+    /// Mutable access to the embedded NB decoder's stereo state. The
+    /// top-level [`crate::decoder`] calls
+    /// [`crate::stereo::StereoState::expand_mono_in_place`] through this
+    /// handle after the CELP synthesis completes.
+    pub fn stereo_state_mut(&mut self) -> &mut crate::stereo::StereoState {
+        self.nb.stereo_state_mut()
+    }
+
     /// Decode one wideband Speex frame. Writes `WB_FULL_FRAME_SIZE`
     /// floats to `out`. On a truncated packet, returns `Error::Eof`
     /// after decoding whatever prefix was complete (the NB decoder

@@ -80,41 +80,54 @@ impl NbDecoderImpl {
         let mut br = BitReader::new(&pkt.data);
         let frames_per_packet = self.header.frames_per_packet.max(1) as usize;
         let channels = self.header.nb_channels.max(1) as usize;
-        let total_samples = NB_FRAME_SIZE * frames_per_packet;
 
-        // We only support mono right now; stereo Speex uses an interleaved
-        // intensity-stereo side-channel which is part of `libspeex/stereo.c`.
-        if channels != 1 {
-            return Err(Error::unsupported(
-                "Speex decoder: stereo (intensity-stereo side channel) not yet implemented \
-                 — see libspeex/stereo.c",
-            ));
+        // Stereo handling mirrors `libspeex/stereo.c`: the bitstream
+        // itself is always a mono CELP frame with an 8-bit in-band
+        // side-channel payload in front of each frame. We decode the
+        // mono frame first then expand it in place to L/R via
+        // `StereoState`, which has already been updated by the
+        // `m=14, id=9` branch of `NbDecoder::decode_frame`.
+        if channels > 2 {
+            return Err(Error::unsupported(format!(
+                "Speex decoder: {channels}-channel stream — Speex supports mono or stereo only"
+            )));
         }
 
-        let mut pcm = vec![0.0f32; total_samples];
-        let mut produced = 0usize;
+        // Allocate enough room for L/R expansion when stereo.
+        let mono_size = NB_FRAME_SIZE * frames_per_packet;
+        let mut pcm = vec![0.0f32; mono_size * channels.max(1)];
+        let mut produced_mono = 0usize;
         for _ in 0..frames_per_packet {
             let mut frame_buf = [0.0f32; NB_FRAME_SIZE];
             match self.nb.decode_frame(&mut br, &mut frame_buf) {
                 Ok(()) => {
-                    pcm[produced..produced + NB_FRAME_SIZE].copy_from_slice(&frame_buf);
-                    produced += NB_FRAME_SIZE;
+                    pcm[produced_mono..produced_mono + NB_FRAME_SIZE].copy_from_slice(&frame_buf);
+                    produced_mono += NB_FRAME_SIZE;
                 }
                 Err(Error::Eof) => break, // 4-bit terminator (`m=15`)
                 Err(e) => return Err(e),
             }
         }
-        if produced == 0 {
+        if produced_mono == 0 {
             return Err(Error::invalid(
                 "Speex decoder: no frames decoded from packet",
             ));
         }
-        pcm.truncate(produced);
+
+        let (produced_samples_per_chan, produced_total) = if channels == 2 {
+            self.nb
+                .stereo_state_mut()
+                .expand_mono_in_place(&mut pcm, produced_mono)?;
+            (produced_mono, produced_mono * 2)
+        } else {
+            pcm.truncate(produced_mono);
+            (produced_mono, produced_mono)
+        };
 
         // Convert float [-32768, 32767] (the reference scales output to
         // int16 range) to S16 little-endian interleaved bytes.
-        let mut bytes = Vec::with_capacity(produced * 2);
-        for v in &pcm {
+        let mut bytes = Vec::with_capacity(produced_total * 2);
+        for v in &pcm[..produced_total] {
             let i = v.round().clamp(-32768.0, 32767.0) as i16;
             bytes.extend_from_slice(&i.to_le_bytes());
         }
@@ -127,7 +140,7 @@ impl NbDecoderImpl {
             } else {
                 8_000
             },
-            samples: produced as u32,
+            samples: produced_samples_per_chan as u32,
             pts: pkt.pts,
             time_base: self.time_base,
             data: vec![bytes],
@@ -213,34 +226,46 @@ impl WbDecoderImpl {
         let frames_per_packet = self.header.frames_per_packet.max(1) as usize;
         let channels = self.header.nb_channels.max(1) as usize;
 
-        if channels != 1 {
-            return Err(Error::unsupported(
-                "Speex decoder: stereo (intensity-stereo side channel) not yet implemented \
-                 — see libspeex/stereo.c",
-            ));
+        if channels > 2 {
+            return Err(Error::unsupported(format!(
+                "Speex decoder: {channels}-channel stream — Speex supports mono or stereo only"
+            )));
         }
 
-        let mut pcm = Vec::with_capacity(WB_FULL_FRAME_SIZE * frames_per_packet);
-        let mut produced = 0usize;
+        // Pre-size for the stereo expansion case (2× the mono count).
+        let mut pcm = Vec::with_capacity(WB_FULL_FRAME_SIZE * frames_per_packet * channels.max(1));
+        let mut produced_mono = 0usize;
         for _ in 0..frames_per_packet {
             let mut frame_buf = [0.0f32; WB_FULL_FRAME_SIZE];
             match self.wb.decode_frame(&mut br, &mut frame_buf) {
                 Ok(()) => {
                     pcm.extend_from_slice(&frame_buf);
-                    produced += WB_FULL_FRAME_SIZE;
+                    produced_mono += WB_FULL_FRAME_SIZE;
                 }
                 Err(Error::Eof) => break, // 4-bit terminator in low-band
                 Err(e) => return Err(e),
             }
         }
-        if produced == 0 {
+        if produced_mono == 0 {
             return Err(Error::invalid(
                 "Speex decoder: no frames decoded from WB packet",
             ));
         }
 
-        let mut bytes = Vec::with_capacity(produced * 2);
-        for v in &pcm[..produced] {
+        let (samples_per_chan, produced_total) = if channels == 2 {
+            // Grow to 2× mono then expand in place.
+            pcm.resize(produced_mono * 2, 0.0);
+            self.wb
+                .stereo_state_mut()
+                .expand_mono_in_place(&mut pcm, produced_mono)?;
+            (produced_mono, produced_mono * 2)
+        } else {
+            pcm.truncate(produced_mono);
+            (produced_mono, produced_mono)
+        };
+
+        let mut bytes = Vec::with_capacity(produced_total * 2);
+        for v in &pcm[..produced_total] {
             let i = v.round().clamp(-32768.0, 32767.0) as i16;
             bytes.extend_from_slice(&i.to_le_bytes());
         }
@@ -253,7 +278,7 @@ impl WbDecoderImpl {
             } else {
                 16_000
             },
-            samples: produced as u32,
+            samples: samples_per_chan as u32,
             pts: pkt.pts,
             time_base: self.time_base,
             data: vec![bytes],
@@ -337,34 +362,44 @@ impl UwbDecoderImpl {
         let frames_per_packet = self.header.frames_per_packet.max(1) as usize;
         let channels = self.header.nb_channels.max(1) as usize;
 
-        if channels != 1 {
-            return Err(Error::unsupported(
-                "Speex decoder: stereo (intensity-stereo side channel) not yet implemented \
-                 — see libspeex/stereo.c",
-            ));
+        if channels > 2 {
+            return Err(Error::unsupported(format!(
+                "Speex decoder: {channels}-channel stream — Speex supports mono or stereo only"
+            )));
         }
 
-        let mut pcm = Vec::with_capacity(UWB_FULL_FRAME_SIZE * frames_per_packet);
-        let mut produced = 0usize;
+        let mut pcm = Vec::with_capacity(UWB_FULL_FRAME_SIZE * frames_per_packet * channels.max(1));
+        let mut produced_mono = 0usize;
         for _ in 0..frames_per_packet {
             let mut frame_buf = [0.0f32; UWB_FULL_FRAME_SIZE];
             match self.uwb.decode_frame(&mut br, &mut frame_buf) {
                 Ok(()) => {
                     pcm.extend_from_slice(&frame_buf);
-                    produced += UWB_FULL_FRAME_SIZE;
+                    produced_mono += UWB_FULL_FRAME_SIZE;
                 }
                 Err(Error::Eof) => break,
                 Err(e) => return Err(e),
             }
         }
-        if produced == 0 {
+        if produced_mono == 0 {
             return Err(Error::invalid(
                 "Speex decoder: no frames decoded from UWB packet",
             ));
         }
 
-        let mut bytes = Vec::with_capacity(produced * 2);
-        for v in &pcm[..produced] {
+        let (samples_per_chan, produced_total) = if channels == 2 {
+            pcm.resize(produced_mono * 2, 0.0);
+            self.uwb
+                .stereo_state_mut()
+                .expand_mono_in_place(&mut pcm, produced_mono)?;
+            (produced_mono, produced_mono * 2)
+        } else {
+            pcm.truncate(produced_mono);
+            (produced_mono, produced_mono)
+        };
+
+        let mut bytes = Vec::with_capacity(produced_total * 2);
+        for v in &pcm[..produced_total] {
             let i = v.round().clamp(-32768.0, 32767.0) as i16;
             bytes.extend_from_slice(&i.to_le_bytes());
         }
@@ -377,7 +412,7 @@ impl UwbDecoderImpl {
             } else {
                 32_000
             },
-            samples: produced as u32,
+            samples: samples_per_chan as u32,
             pts: pkt.pts,
             time_base: self.time_base,
             data: vec![bytes],

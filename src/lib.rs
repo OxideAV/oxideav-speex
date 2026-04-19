@@ -56,6 +56,7 @@ pub mod lsp_tables_wb;
 pub mod nb_decoder;
 pub mod nb_encoder;
 pub mod qmf;
+pub mod stereo;
 pub mod submodes;
 pub mod uwb_decoder;
 pub mod uwb_encoder;
