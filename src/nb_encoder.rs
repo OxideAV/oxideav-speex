@@ -54,13 +54,13 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitwriter::BitWriter;
 use crate::gain_tables::{GAIN_CDBK_LBR, GAIN_CDBK_NB};
 use crate::lsp::{lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_nb::{CDBK_NB, CDBK_NB_HIGH1, CDBK_NB_HIGH2, CDBK_NB_LOW1, CDBK_NB_LOW2};
 use crate::nb_decoder::{
     rms, NB_FRAME_SIZE, NB_NB_SUBFRAMES, NB_ORDER, NB_PITCH_END, NB_PITCH_START, NB_SUBFRAME_SIZE,
 };
+use oxideav_core::bits::BitWriter;
 // Local copy of `nb_decoder::LSP_MARGIN` — we avoid re-exporting it to
 // keep the decoder module surface untouched.
 const LSP_MARGIN: f32 = 0.002;

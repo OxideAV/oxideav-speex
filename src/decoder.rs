@@ -16,11 +16,11 @@ use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };
 
-use crate::bitreader::BitReader;
 use crate::header::{SpeexHeader, SpeexMode};
 use crate::nb_decoder::{NbDecoder, NB_FRAME_SIZE};
 use crate::uwb_decoder::{UwbDecoder, UWB_FULL_FRAME_SIZE};
 use crate::wb_decoder::{WbDecoder, WB_FULL_FRAME_SIZE};
+use oxideav_core::bits::BitReader;
 
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     if params.extradata.is_empty() {

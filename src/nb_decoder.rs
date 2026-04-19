@@ -17,9 +17,9 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitreader::BitReader;
 use crate::lsp::{lsp_interpolate, lsp_to_lpc, lsp_unquant_lbr, lsp_unquant_nb};
 use crate::submodes::{nb_submode, InnovKind, LspKind, LtpKind, SplitCbParams, WB_SKIP_TABLE};
+use oxideav_core::bits::BitReader;
 
 // ----- NB constants (from `nb_celp.h`). --------------------------------
 pub const NB_FRAME_SIZE: usize = 160;

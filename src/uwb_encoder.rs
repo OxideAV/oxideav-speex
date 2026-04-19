@@ -26,13 +26,15 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitwriter::BitWriter;
 use crate::lsp::{bw_lpc, lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
 use crate::qmf::{H0_PROTOTYPE, QMF_ORDER};
-use crate::uwb_decoder::{UWB_FRAME_SIZE, UWB_FULL_FRAME_SIZE, UWB_NB_SUBFRAMES, UWB_SUBFRAME_SIZE};
+use crate::uwb_decoder::{
+    UWB_FRAME_SIZE, UWB_FULL_FRAME_SIZE, UWB_NB_SUBFRAMES, UWB_SUBFRAME_SIZE,
+};
 use crate::wb_decoder::{FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_LPC_ORDER};
 use crate::wb_encoder::{qmf_decomp, WbEncoder};
+use oxideav_core::bits::BitWriter;
 
 /// Default: emit the folding extension (best fidelity this encoder
 /// can produce).
@@ -514,8 +516,7 @@ mod tests {
         let mut bw = BitWriter::new();
         let mut pcm = [0.0f32; UWB_FULL_FRAME_SIZE];
         for i in 0..UWB_FULL_FRAME_SIZE {
-            pcm[i] = 3000.0 * (i as f32 * 0.04).sin()
-                + 1500.0 * (i as f32 * 0.12).cos();
+            pcm[i] = 3000.0 * (i as f32 * 0.04).sin() + 1500.0 * (i as f32 * 0.12).cos();
         }
         enc.encode_frame(&pcm, &mut bw).unwrap();
         // WB at submode 3 = 492 + UWB folding = 36 ⇒ 528.
