@@ -13,8 +13,8 @@ framework but usable standalone.
 
 ```toml
 [dependencies]
-oxideav-core = "0.0"
-oxideav-codec = "0.0"
+oxideav-core = "0.1"
+oxideav-codec = "0.1"
 oxideav-speex = "0.0"
 
 # Optional — for demuxing Speex from Ogg files
