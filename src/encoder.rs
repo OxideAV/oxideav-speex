@@ -40,7 +40,6 @@ use oxideav_core::{
 };
 use std::collections::VecDeque;
 
-use crate::bitwriter::BitWriter;
 use crate::header::{SPEEX_HEADER_SIZE, SPEEX_SIGNATURE};
 use crate::nb_decoder::NB_FRAME_SIZE;
 use crate::nb_encoder::{nb_submode_for_rate, NbEncoder};
@@ -48,6 +47,7 @@ use crate::uwb_decoder::UWB_FULL_FRAME_SIZE;
 use crate::uwb_encoder::UwbEncoder;
 use crate::wb_decoder::WB_FULL_FRAME_SIZE;
 use crate::wb_encoder::WbEncoder;
+use oxideav_core::bits::BitWriter;
 
 /// Encoder factory. Accepts 8 kHz (NB), 16 kHz (WB), or 32 kHz (UWB)
 /// mono S16 parameter sets. Wideband layers NB mode-5 below the chosen
@@ -388,8 +388,8 @@ impl SpeexEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitreader::BitReader;
     use crate::nb_decoder::NbDecoder;
+    use oxideav_core::bits::BitReader;
 
     fn make_test_frame(start: usize) -> AudioFrame {
         // 160 samples of sine at 500 Hz, amplitude 8000 — simple and

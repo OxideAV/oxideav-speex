@@ -59,7 +59,6 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitwriter::BitWriter;
 use crate::hexc_tables::HEXC_TABLE;
 use crate::lsp::{bw_lpc, lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
@@ -69,6 +68,7 @@ use crate::wb_decoder::{
     FOLDING_GAIN, GC_QUANT_BOUND, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER,
     WB_NB_SUBFRAMES, WB_SUBFRAME_SIZE,
 };
+use oxideav_core::bits::BitWriter;
 
 /// Default WB sub-mode selected by [`WbEncoder::new`] — best-quality
 /// stochastic extension this encoder supports.

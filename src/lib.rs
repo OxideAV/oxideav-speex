@@ -49,8 +49,6 @@
     clippy::manual_range_contains
 )]
 
-pub mod bitreader;
-pub mod bitwriter;
 pub mod codec;
 pub mod decoder;
 pub mod encoder;

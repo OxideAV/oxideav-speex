@@ -54,9 +54,9 @@
 //!            the encoder's `exc_buf` / `mem_sp_sim` state stays in
 //!            lock-step with the decoder across frames.
 
+use oxideav_core::bits::BitWriter;
 use oxideav_core::{Error, Result};
 
-use crate::bitwriter::BitWriter;
 use crate::lsp::{lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_nb::{CDBK_NB, CDBK_NB_HIGH1, CDBK_NB_HIGH2, CDBK_NB_LOW1, CDBK_NB_LOW2};
 use crate::nb_decoder::{

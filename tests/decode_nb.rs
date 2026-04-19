@@ -98,7 +98,7 @@ fn ensure_wb_27k() -> Option<&'static str> {
 fn open_speex_file(path: &str) -> (Box<dyn Decoder>, Box<dyn Demuxer>) {
     let f = File::open(path).expect("open speex file");
     let bf: Box<dyn ReadSeek> = Box::new(BufReader::new(f));
-    let demux = oxideav_ogg::demux::open(bf).expect("ogg open");
+    let demux = oxideav_ogg::demux::open(bf, &oxideav_core::NullCodecResolver).expect("ogg open");
     let dec = make_decoder(&demux.streams()[0].params).expect("speex decoder");
     (dec, demux)
 }

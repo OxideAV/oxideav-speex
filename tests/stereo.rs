@@ -15,8 +15,8 @@
 
 #![allow(clippy::needless_range_loop)]
 
+use oxideav_core::bits::BitWriter;
 use oxideav_core::{CodecId, CodecParameters, Error, Frame, Packet, TimeBase};
-use oxideav_speex::bitwriter::BitWriter;
 use oxideav_speex::decoder::make_decoder;
 use oxideav_speex::header::{SPEEX_HEADER_SIZE, SPEEX_SIGNATURE};
 use oxideav_speex::nb_decoder::NB_FRAME_SIZE;

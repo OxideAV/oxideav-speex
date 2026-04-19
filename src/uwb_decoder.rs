@@ -39,13 +39,13 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitreader::BitReader;
 use crate::lsp::{lsp_interpolate, lsp_to_lpc, lsp_unquant_high};
 use crate::nb_decoder::iir_mem16;
 use crate::qmf::{qmf_synth, H0_PROTOTYPE, QMF_ORDER};
 use crate::wb_decoder::{
     WbDecoder, FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_FULL_FRAME_SIZE, WB_LPC_ORDER,
 };
+use oxideav_core::bits::BitReader;
 
 /// Number of UWB sub-frames per frame (`sb_uwb_mode.subframes = 4`).
 pub const UWB_NB_SUBFRAMES: usize = 4;

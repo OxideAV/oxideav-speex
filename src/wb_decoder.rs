@@ -35,12 +35,12 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitreader::BitReader;
 use crate::lsp::{lsp_interpolate, lsp_to_lpc, lsp_unquant_high};
 use crate::nb_decoder::{iir_mem16, NbDecoder, NB_NB_SUBFRAMES};
 use crate::qmf::{qmf_synth, H0_PROTOTYPE, QMF_ORDER};
 use crate::submodes::SplitCbParams;
 use crate::wb_submodes::{wb_submode, WbInnov};
+use oxideav_core::bits::BitReader;
 
 /// Order of the high-band LPC synthesis filter. Mirrors
 /// `sb_wb_mode.lpcSize = 8`.

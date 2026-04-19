@@ -24,9 +24,8 @@
 //! `speex_encode_stereo_int` can be added alongside this without
 //! touching the decoder path.
 
+use oxideav_core::bits::BitReader;
 use oxideav_core::{Error, Result};
-
-use crate::bitreader::BitReader;
 
 /// `SPEEX_INBAND_STEREO` from `speex_callbacks.h` — the 4-bit request id
 /// that follows an `m=14` in-band marker when the encoder attaches an

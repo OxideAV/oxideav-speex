@@ -13,9 +13,9 @@
 //!     cosine ("frequency-domain") values.
 //!   * `LSP_SCALING = 1.0`, `LSP_MARGIN = 0.002` (in `nb_celp.c`).
 
-use crate::bitreader::BitReader;
 use crate::lsp_tables_nb::{CDBK_NB, CDBK_NB_HIGH1, CDBK_NB_HIGH2, CDBK_NB_LOW1, CDBK_NB_LOW2};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
+use oxideav_core::bits::BitReader;
 use oxideav_core::Result;
 
 /// Initial linear LSP value for stage `i` (radians). Matches

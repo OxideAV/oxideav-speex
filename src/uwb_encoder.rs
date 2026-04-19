@@ -26,7 +26,6 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::bitwriter::BitWriter;
 use crate::lsp::{bw_lpc, lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
 use crate::qmf::{H0_PROTOTYPE, QMF_ORDER};
@@ -35,6 +34,7 @@ use crate::uwb_decoder::{
 };
 use crate::wb_decoder::{FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_LPC_ORDER};
 use crate::wb_encoder::{qmf_decomp, WbEncoder};
+use oxideav_core::bits::BitWriter;
 
 /// Default: emit the folding extension (best fidelity this encoder
 /// can produce).
