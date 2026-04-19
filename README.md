@@ -19,7 +19,7 @@ oxideav-speex = "0.0"
 
 # Optional — for demuxing Speex from Ogg files
 oxideav-ogg = "0.0"
-oxideav-container = "0.0"
+oxideav-container = "0.1"
 ```
 
 ## Decoder coverage
