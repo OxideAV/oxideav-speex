@@ -19,11 +19,19 @@
 //!     Only sub-mode 1 (folding, 36 bits of UWB overhead) is defined
 //!     by the reference; stochastic UWB sub-modes do not exist. See
 //!     [`uwb_decoder`].
-//!   * NB encoder for sub-modes 3 (8 kbps) and 5 (15 kbps, default);
-//!     WB encoder for sub-modes 1 (folding) and 3 (stochastic
+//!   * NB encoder for the **full rate ladder** — sub-modes 1..=8 (2.15
+//!     kbps vocoder through 24.6 kbps high-rate; default is sub-mode 5
+//!     at 15 kbps). Encode dispatch is driven by the
+//!     [`submodes::NbSubmode`] descriptor so adding a decoder mode
+//!     never requires a parallel encoder change.
+//!   * WB encoder for sub-modes 1 (folding) and 3 (stochastic
 //!     split-VQ, default); UWB encoder for the null layer and the
 //!     folding layer (default). See [`encoder`], [`nb_encoder`],
 //!     [`wb_encoder`], [`uwb_encoder`].
+//!   * Intensity-stereo decode ([`stereo`]) — the 8-bit
+//!     `m=14, id=9` in-band side-channel pre-pended to each frame
+//!     by the reference encoder expands the mono CELP output into
+//!     interleaved L/R.
 //!
 //! Tables (LSP, gain, fixed codebooks) are transcribed from the
 //! BSD-licensed Xiph reference (`libspeex/{lsp_tables_nb,gain_table,

@@ -30,9 +30,16 @@ oxideav-container = "0.0"
 | Wideband | 16 kHz | **1..=4** | QMF + 8th-order high-band LPC + spectral-folding (sm1) / stochastic split-VQ (sm2/3/4) excitation. |
 | Ultra-wideband | 32 kHz | **1** (folding — the only UWB sub-mode the reference defines) | Stacks a second 8th-order LPC + folding layer on top of WB, second QMF synthesis for 16→32 kHz. |
 
-Output is mono S16 at each mode's native sample rate. Stereo Speex
-(intensity side-channel) is not implemented — `nb_channels > 1`
-returns `Error::Unsupported`.
+Output is S16 at each mode's native sample rate, interleaved
+(L, R, L, R, …) for stereo and mono for single-channel streams.
+**Intensity-stereo** (the 8-bit side-channel described in the Speex
+manual §9 / `libspeex/stereo.c`) is fully implemented: streams with
+`nb_channels=2` decode through the same CELP synthesis pipeline as
+mono, then the top-level decoder expands the mono output to L/R
+according to the per-frame balance + energy-coherence payload. The
+in-band `m=14, id=9` marker is also handled for mono streams (state
+update only) so a stream that optionally carries the side-channel
+never desynchronises the bit reader.
 
 ## Encoder coverage
 
@@ -40,12 +47,31 @@ returns `Error::Unsupported`.
 
 | NB sub-mode | Bits/frame | Nominal rate | Selection |
 |-------------|-----------:|-------------:|-----------|
-| **3** | 160 | 8 kbps | `bit_rate ≤ 12_000` |
-| **5** *(default)* | 300 | 15 kbps | `bit_rate > 12_000` or `None` |
+| **1** | 43 | 2.15 kbps | `bit_rate ≤ 3_000` |
+| **8** | 79 | 3.95 kbps | `3_000 < bit_rate ≤ 5_000` |
+| **2** | 119 | 5.95 kbps | `5_000 < bit_rate ≤ 7_000` |
+| **3** | 160 | 8 kbps | `7_000 < bit_rate ≤ 9_500` |
+| **4** | 220 | 11 kbps | `9_500 < bit_rate ≤ 13_000` |
+| **5** *(default)* | 300 | 15 kbps | `13_000 < bit_rate ≤ 16_500` or `None` |
+| **6** | 364 | 18.2 kbps | `16_500 < bit_rate ≤ 21_000` |
+| **7** | 492 | 24.6 kbps | `21_000 < bit_rate` |
 
-NB sub-modes 1/2/4/6/7/8 are not implemented by the encoder and
-return `Error::Unsupported` if explicitly constructed via
-`NbEncoder::with_submode`.
+All 8 NB sub-modes emit a bit-exact stream for the companion
+[`nb_decoder::NbDecoder`]: LSP VQ (LBR 18-bit or NB 30-bit), open-loop
+pitch (vocoder modes 1, 2, 8), three-tap LTP (modes 3-7), split
+innovation codebook (or PRNG for mode 1), optional double-codebook
+(mode 7). Per-mode gain-corrected SNR on a synthetic speech-like
+signal:
+
+| Mode | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|------|---|---|---|---|---|---|---|---|
+| SNR (dB) | coherent | 2.6 | 18.4 | 20.7 | 24.8 | 25.1 | 25.4 | coherent |
+
+Modes 1 and 8 are vocoder-style: they produce an audible, spectrally
+correct signal but don't map onto a gain-corrected SNR metric because
+their excitation is either all PRNG (mode 1) or extremely coarse
+(mode 8, 20-sample algebraic codebook). Their round-trip tests assert
+non-silent coherent output instead.
 
 ### Wideband (16 kHz)
 
@@ -77,6 +103,10 @@ the Speex UWB reference.
 Encoder input must be mono S16 at the band's native rate (8000 /
 16000 / 32000 Hz). A downstream muxer sees the chosen mode reflected
 in the 80-byte Speex header written to `CodecParameters::extradata`.
+The encoder does not emit the in-band stereo side-channel; for an
+authored stereo stream, build the `m=14, id=9` payload yourself and
+prepend it to each encoded mono frame (see `tests/stereo.rs` for the
+exact bit layout).
 
 ## Quick use
 
