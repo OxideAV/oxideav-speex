@@ -123,13 +123,6 @@ pub struct NbEncoder {
     /// interpolation on the encoder side — mirrors what the decoder
     /// will do).
     old_qlsp: [f32; NB_ORDER],
-    /// Interpolated quantised LPC from the last sub-frame of the
-    /// previous frame — used as the IIR memory seed when the encoder
-    /// needs to match the decoder's cold-start for perceptual filters.
-    /// We retain it for symmetry but the current A-by-S uses residual
-    /// matching only.
-    #[allow(dead_code)]
-    interp_qlpc: [f32; NB_ORDER],
     /// Encoder-side excitation history — same shape as the decoder's
     /// so pitch lags can be resolved identically.
     exc_buf: Vec<f32>,
@@ -203,7 +196,6 @@ impl NbEncoder {
         Ok(Self {
             submode,
             old_qlsp,
-            interp_qlpc: [0.0; NB_ORDER],
             exc_buf: vec![0.0; EXC_BUF_LEN],
             mem_analysis: [0.0; NB_ORDER],
             mem_sp_sim: [0.0; NB_ORDER],
@@ -663,7 +655,6 @@ impl NbEncoder {
 
         // ---- 11. Save state for next frame ---------------------------
         self.old_qlsp = qlsp;
-        self.interp_qlpc = interp_qlpc[NB_NB_SUBFRAMES - 1];
         self.first = false;
         // Slide excitation history left by one frame.
         self.exc_buf.copy_within(NB_FRAME_SIZE.., 0);
