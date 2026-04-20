@@ -1,0 +1,124 @@
+oxideav-speex third-party notices
+=================================
+
+This crate is distributed under the MIT license (see LICENSE) and
+additionally incorporates material from the following upstream
+projects. Their copyright notices and license terms are reproduced
+below and apply to the incorporated material.
+
+
+libspeex (Xiph.Org Foundation)
+------------------------------
+
+The Speex speech codec support in this crate is a derivative work
+of libspeex, the BSD-licensed Xiph.Org reference implementation
+(primary author Jean-Marc Valin). It includes both numeric data
+tables reproduced verbatim and algorithmic source files that mirror
+the control flow of libspeex C sources.
+
+Verbatim data tables
+~~~~~~~~~~~~~~~~~~~~
+
+The following Rust modules contain numeric tables transcribed
+verbatim from libspeex. Values only — no derived code — and copied
+under the Xiph BSD-3-Clause licence reproduced below:
+
+  * `src/exc_tables.rs` — innovation (fixed) codebooks from
+    `libspeex/exc_5_256_table.c`, `libspeex/exc_5_64_table.c`,
+    `libspeex/exc_8_128_table.c`, `libspeex/exc_10_32_table.c`, and
+    `libspeex/exc_20_32_table.c`.
+  * `src/gain_tables.rs` — pitch-gain (LTP) codebooks from
+    `libspeex/gain_table.c` and `libspeex/gain_table_lbr.c`.
+  * `src/hexc_tables.rs` — high-band (SB-CELP) innovation codebooks
+    from `libspeex/hexc_table.c` and `libspeex/hexc_10_32_table.c`.
+  * `src/lsp_tables_nb.rs` — narrowband LSP codebooks from
+    `libspeex/lsp_tables_nb.c`.
+  * `src/lsp_tables_wb.rs` — wideband LSP codebooks
+    (`high_lsp_cdbk`, `high_lsp_cdbk2`) from
+    `libspeex/high_lsp_tables.c`.
+  * `src/qmf.rs` — the 64-tap QMF analysis/synthesis prototype
+    `h0[]` from `libspeex/sb_celp.c` (float path, rescaled by
+    2^-16 from the reference fixed-point coefficients).
+
+Algorithmic ports
+~~~~~~~~~~~~~~~~~
+
+The following Rust modules are derivative works that mirror the
+control flow, constants, and sub-frame structure of corresponding
+libspeex C sources. They are not line-by-line copies but are close
+enough to the reference that libspeex's BSD-3-Clause terms apply:
+
+  * `src/nb_decoder.rs` — mirrors `nb_decode` in
+    `libspeex/nb_celp.c`. Helper kernels (`pitch_unquant_3tap`,
+    `forced_pitch_unquant`, `iir_mem16`, perceptual-filter and
+    comb-filter helpers) are direct float ports of the equivalents
+    in `libspeex/ltp.c`, `libspeex/cb_search.c`, and
+    `libspeex/filters.c`. NB constants such as `LSP_MARGIN` and
+    the sub-frame gain quantiser come from `libspeex/nb_celp.c` /
+    `nb_celp.h`.
+  * `src/submodes.rs` — reproduces the eight `nb_submodeN`
+    configuration records from `libspeex/modes.c` (lbr_pitch,
+    forced_pitch_gain, have_subframe_gain, nb_subvect,
+    gain_bits, comb_gain, etc.) and the wideband-layer skip table
+    from `libspeex/nb_celp.c`.
+  * `src/wb_decoder.rs` — mirrors `sb_decode` in
+    `libspeex/sb_celp.c`, including the 16-entry
+    `gc_quant_bound[]` table and the spectral-folding excitation
+    path.
+  * `src/wb_encoder.rs` — mirrors the high-band analysis pipeline
+    from `libspeex/sb_celp.c` and the QMF decomposition from
+    `libspeex/filters.c` (`qmf_decomp`, float path).
+  * `src/wb_submodes.rs` — reproduces the four `wb_submodeN`
+    records from `libspeex/modes_wb.c`.
+  * `src/uwb_decoder.rs` — mirrors the `sb_uwb_mode` configuration
+    in `libspeex/modes.c` / `libspeex/sb_celp.c`
+    (`lpcSize = 8`, `subframeSize = 40`, `frameSize = 320`), reusing
+    the reference `wb_submode1` record.
+  * `src/lsp.rs` — float-mode port of the relevant parts of
+    `libspeex/lsp.c` (closed-form LSP polynomial reconstruction)
+    and `libspeex/quant_lsp.c`, plus the bandwidth-expansion helper
+    from `libspeex/lpc.c`.
+  * `src/qmf.rs` — `qmf_synth` mirrors the synthesis loop in
+    `libspeex/filters.c`.
+  * `src/header.rs` — the Speex Ogg header layout mirrors
+    `SpeexHeader` in `libspeex/speex_header.c`.
+  * `src/lib.rs` — the MSB-first bit reader/writer matches
+    `libspeex/bits.c`.
+
+libspeex is distributed under the following terms:
+
+    Copyright 2002-2008 Xiph.org Foundation
+    Copyright 2002-2008 Jean-Marc Valin
+    Copyright 2005-2007 Analog Devices Inc.
+    Copyright 2005-2008 Commonwealth Scientific and Industrial Research
+                            Organisation (CSIRO)
+    Copyright 1993, 2002, 2006 David Rowe
+    Copyright 2003 EpicGames
+    Copyright 1992-1994 Jutta Degener, Carsten Bormann
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+    - Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+    - Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+    - Neither the name of the Xiph.org Foundation nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE FOUNDATION OR
+    CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
