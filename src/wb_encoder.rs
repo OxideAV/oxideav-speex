@@ -11,14 +11,21 @@
 //!   excitation is recovered at the decoder by alternating-sign scaling
 //!   of the NB innovation; the encoder only transmits LSPs + a 5-bit
 //!   folding gain per sub-frame.
+//! - **Sub-mode 2** — 112-bit low-bit-rate stochastic extension. The
+//!   high-band excitation is a split-VQ innovation (4 sub-vectors ×
+//!   10 samples, 5-bit shape, no sign) plus a 4-bit gain index per
+//!   sub-frame. `HEXC_10_32_TABLE` (`split_cb_high_lbr`) is the shape
+//!   book.
 //! - **Sub-mode 3** — 192-bit stochastic extension. The high-band
 //!   excitation is a split-VQ innovation (5 sub-vectors × 8 samples,
 //!   7-bit shape + 1-bit sign) plus a 4-bit gain index per sub-frame,
 //!   giving ~9.6 kbit/s on top of NB mode 5 (24.6 kbit/s total).
-//!
-//! Sub-modes 2 and 4 are accepted by the table driver in
-//! [`crate::wb_submodes`] but not implemented in this encoder — see
-//! [`WbEncoder::with_submode`] for the supported set.
+//! - **Sub-mode 4** — 352-bit double-codebook stochastic extension.
+//!   Same split-CB layout as sub-mode 3 but the codebook is searched
+//!   twice per sub-frame and the two contributions summed with the
+//!   second pass weighted 0.4× at the decoder. Searching the second
+//!   book on the *residual* of the first pass gives a second VQ layer
+//!   that closes the gap between sub-mode 3 and true transparency.
 //!
 //! ### Default
 //!
@@ -59,7 +66,7 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::hexc_tables::HEXC_TABLE;
+use crate::hexc_tables::{HEXC_10_32_TABLE, HEXC_TABLE};
 use crate::lsp::{bw_lpc, lsp_interpolate, lsp_to_lpc};
 use crate::lsp_tables_wb::{HIGH_LSP_CDBK, HIGH_LSP_CDBK2};
 use crate::nb_encoder::NbEncoder;
@@ -81,9 +88,22 @@ const SM3_NB_SUBVECT: usize = 5;
 const SM3_SHAPE_BITS: u32 = 7;
 const SM3_SHAPE_ENTRIES: usize = 1 << SM3_SHAPE_BITS; // 128
 
+/// Sub-mode 2 split-CB layout: 4 sub-vectors × 10 samples, 5-bit shape,
+/// no sign. Matches `SPLIT_CB_HIGH_LBR` in `wb_submodes.rs`.
+const SM2_SUBVECT_SIZE: usize = 10;
+const SM2_NB_SUBVECT: usize = 4;
+const SM2_SHAPE_BITS: u32 = 5;
+const SM2_SHAPE_ENTRIES: usize = 1 << SM2_SHAPE_BITS; // 32
+
 /// Gain-index scaling factor used by the decoder's SB-CELP stochastic
 /// branch (`sb_celp.c`: `gc = 0.87360 * gc_quant_bound[qgc]`).
 const GC_QUANT_SCALE: f32 = 0.87360;
+
+/// Second-pass weight the decoder applies to the extra codebook pass in
+/// WB sub-mode 4 (`sb_celp.c`: `innov2[i] * 0.4 * scale`). Mirroring it
+/// on the encoder side lets us search the residual at the exact weight
+/// the decoder will apply.
+const SM4_DOUBLE_CB_WEIGHT: f32 = 0.4;
 
 /// Wideband encoder state. Holds the sub-encoder for the NB (low-band)
 /// path, the QMF analysis memory for the two branches, and the
@@ -121,19 +141,21 @@ impl WbEncoder {
 
     /// Construct a WB encoder for a specific sub-mode.
     ///
-    /// Supported: **1** (folding) and **3** (stochastic split-CB).
-    /// Returns `Error::Unsupported` for any other submode id
-    /// (incl. sub-modes 2 and 4 which are defined by the reference
-    /// but not implemented here).
+    /// Supported: **1** (folding, 36 bits), **2** (low-bit-rate split
+    /// VQ, 112 bits), **3** (stochastic split-VQ, 192 bits), and
+    /// **4** (double-codebook split-VQ, 352 bits). Returns
+    /// `Error::Unsupported` for any other submode id — the reference
+    /// defines no WB sub-modes beyond `1..=4`.
     pub fn with_submode(submode: u32) -> Result<Self> {
         match submode {
-            1 | 3 => {}
+            1..=4 => {}
             other => {
                 return Err(Error::unsupported(format!(
-                    "Speex WB encoder: sub-mode {other} is not implemented. \
-                     Use 1 (spectral-folding, 36 bits) or 3 (stochastic \
-                     split-VQ, 192 bits). Sub-modes 2/4 are defined by the \
-                     reference but have no encoder here."
+                    "Speex WB encoder: sub-mode {other} is not defined by \
+                     the reference. Valid WB sub-modes are 1 (folding, 36 \
+                     bits), 2 (low-bit-rate split-VQ, 112 bits), 3 \
+                     (stochastic split-VQ, 192 bits), 4 (double-codebook \
+                     split-VQ, 352 bits)."
                 )));
             }
         }
@@ -161,12 +183,14 @@ impl WbEncoder {
     /// NB prefix + WB extension (excludes any Ogg/container overhead).
     /// Matches the bit count the decoder will consume.
     pub fn bits_per_frame(&self) -> u32 {
-        // NB mode 5 = 300 bits; WB extension adds 36 (sub-mode 1) or
-        // 192 (sub-mode 3). Both include the 4-bit wideband-bit +
-        // submode-selector prefix.
+        // NB mode 5 = 300 bits. The WB extension bit counts here all
+        // include the 4-bit wideband-bit + submode-selector prefix
+        // (matching `WbSubmode::bits_per_frame` in `wb_submodes.rs`).
         300 + match self.submode {
             1 => 36,
+            2 => 112,
             3 => 192,
+            4 => 352,
             _ => unreachable!("submode validated in with_submode"),
         }
     }
@@ -297,6 +321,32 @@ impl WbEncoder {
                     let q = q_f.round().clamp(0.0, 31.0) as u32;
                     bw.write_bits(q, 5);
                 }
+                2 => {
+                    // Sub-mode 2 (low-bit-rate stochastic) — 4 sub-vects ×
+                    // 10 samples, 5-bit shape, no sign. Same 4-bit gain
+                    // quantiser + same `scale = gc · el / filter_ratio`
+                    // inversion as sub-mode 3; only the codebook layout
+                    // differs. Each sub-vector's 10 samples are compared
+                    // against 32 codebook entries (no sign bit to flip).
+                    let eps = 1e-6f32;
+                    let el = nb_exc_rms[sub];
+                    let gc_target = (hb_res_rms * filter_ratio.max(eps)) / el.max(eps);
+                    let qgc_target = gc_target / GC_QUANT_SCALE;
+                    let qgc = nearest_gc_index(qgc_target);
+                    bw.write_bits(qgc as u32, 4);
+
+                    let gc = GC_QUANT_SCALE * GC_QUANT_BOUND[qgc];
+                    let scale = gc * el / filter_ratio.max(eps);
+                    let inv_scale = if scale.abs() > eps { 1.0 / scale } else { 0.0 };
+                    let mut target = [0.0f32; WB_SUBFRAME_SIZE];
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        target[j] = residual[j] * inv_scale;
+                    }
+                    let indices = search_split_cb_sm2(&target);
+                    for shape_idx in indices {
+                        bw.write_bits(shape_idx as u32, SM2_SHAPE_BITS);
+                    }
+                }
                 3 => {
                     // Sub-mode 3 (stochastic split-CB, 7-bit shape, 1-bit
                     // sign, 5 subvects × 8 samples, 4-bit gain).
@@ -339,6 +389,57 @@ impl WbEncoder {
                     }
                     let indices = search_split_cb_sm3(&target);
                     for (shape_idx, sign_bit) in indices {
+                        bw.write_bits(sign_bit, 1);
+                        bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
+                    }
+                }
+                4 => {
+                    // Sub-mode 4 (double-codebook). Same gain quantiser
+                    // and shape codebook as sub-mode 3 but the decoder
+                    // sums a *second* split-CB pass weighted 0.4× at the
+                    // same scale. Our inversion:
+                    //   * gc/scale picked as in sub-mode 3.
+                    //   * First search picks sign+shape to minimise
+                    //     `target - pass1` in the scaled codebook
+                    //     domain.
+                    //   * Second search picks sign+shape to minimise
+                    //     `(target - pass1) - 0.4 * pass2`.
+                    // The decoder recovers `exc = scale*(pass1 + 0.4*pass2)`
+                    // so the combined search target is `target / scale`.
+                    let eps = 1e-6f32;
+                    let el = nb_exc_rms[sub];
+                    let gc_target = (hb_res_rms * filter_ratio.max(eps)) / el.max(eps);
+                    let qgc_target = gc_target / GC_QUANT_SCALE;
+                    let qgc = nearest_gc_index(qgc_target);
+                    bw.write_bits(qgc as u32, 4);
+
+                    let gc = GC_QUANT_SCALE * GC_QUANT_BOUND[qgc];
+                    let scale = gc * el / filter_ratio.max(eps);
+                    let inv_scale = if scale.abs() > eps { 1.0 / scale } else { 0.0 };
+                    let mut target = [0.0f32; WB_SUBFRAME_SIZE];
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        target[j] = residual[j] * inv_scale;
+                    }
+
+                    // Pass 1 — pick the best split-CB for `target`.
+                    let indices_a = search_split_cb_sm3(&target);
+                    // Reconstruct pass-1 output in the same domain the
+                    // decoder will see (`Σ sign · 0.03125 · SHAPE[.]`) —
+                    // using `sm3` because sm4 shares `SPLIT_CB_HIGH`.
+                    let pass1 = reconstruct_sm3(&indices_a);
+                    for (shape_idx, sign_bit) in indices_a {
+                        bw.write_bits(sign_bit, 1);
+                        bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
+                    }
+
+                    // Pass 2 — search the residual (scaled so the
+                    // 0.4× weight matches the decoder).
+                    let mut residual2 = [0.0f32; WB_SUBFRAME_SIZE];
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        residual2[j] = (target[j] - pass1[j]) / SM4_DOUBLE_CB_WEIGHT;
+                    }
+                    let indices_b = search_split_cb_sm3(&residual2);
+                    for (shape_idx, sign_bit) in indices_b {
                         bw.write_bits(sign_bit, 1);
                         bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
                     }
@@ -413,6 +514,56 @@ fn search_split_cb_sm3(target: &[f32; WB_SUBFRAME_SIZE]) -> [(usize, u32); SM3_N
             }
         }
         out[sv] = (best_shape, best_sign);
+    }
+    out
+}
+
+/// Rebuild the sub-mode 3 excitation contribution in the **normalised**
+/// (post-`scale`) domain — matches the `Σ sign · 0.03125 · SHAPE[.]`
+/// accumulation the decoder performs inside
+/// [`crate::wb_decoder::split_cb_shape_sign_unquant`]. Used by the
+/// sub-mode 4 double-book branch to compute the pass-1 residual.
+fn reconstruct_sm3(indices: &[(usize, u32); SM3_NB_SUBVECT]) -> [f32; WB_SUBFRAME_SIZE] {
+    let mut out = [0.0f32; WB_SUBFRAME_SIZE];
+    for (sv, &(shape, sign_bit)) in indices.iter().enumerate() {
+        let sign: f32 = if sign_bit != 0 { -1.0 } else { 1.0 };
+        let base = shape * SM3_SUBVECT_SIZE;
+        let off = sv * SM3_SUBVECT_SIZE;
+        for j in 0..SM3_SUBVECT_SIZE {
+            out[off + j] += sign * 0.03125 * HEXC_TABLE[base + j] as f32;
+        }
+    }
+    out
+}
+
+/// Search sub-mode 2's split codebook (`HEXC_10_32_TABLE`, 32×10,
+/// have_sign=false) against a normalised target `t[0..40]`. Each of
+/// the 4 sub-vectors picks the `shape` that best matches its 10-sample
+/// slice. No sign bit — the decoder adds the codebook entry as-is.
+///
+/// Returns `[shape_idx; 4]` in sub-vector order. Exactly what
+/// [`crate::wb_decoder::split_cb_shape_sign_unquant`] will read for
+/// WB sub-mode 2.
+fn search_split_cb_sm2(target: &[f32; WB_SUBFRAME_SIZE]) -> [usize; SM2_NB_SUBVECT] {
+    let mut out = [0usize; SM2_NB_SUBVECT];
+    for sv in 0..SM2_NB_SUBVECT {
+        let off = sv * SM2_SUBVECT_SIZE;
+        let mut best_shape = 0usize;
+        let mut best_err = f32::INFINITY;
+        for shape in 0..SM2_SHAPE_ENTRIES {
+            let base = shape * SM2_SUBVECT_SIZE;
+            let mut err = 0.0f32;
+            for j in 0..SM2_SUBVECT_SIZE {
+                let cb = (HEXC_10_32_TABLE[base + j] as f32) * 0.03125;
+                let d = target[off + j] - cb;
+                err += d * d;
+            }
+            if err < best_err {
+                best_err = err;
+                best_shape = shape;
+            }
+        }
+        out[sv] = best_shape;
     }
     out
 }
@@ -844,6 +995,36 @@ mod tests {
     }
 
     #[test]
+    fn encode_frame_submode_2_writes_412_bits() {
+        // 300 NB bits + 112 WB-extension bits = 412 bits per frame.
+        let mut enc = WbEncoder::with_submode(2).unwrap();
+        let mut bw = BitWriter::new();
+        let mut pcm = [0.0f32; WB_FULL_FRAME_SIZE];
+        for i in 0..WB_FULL_FRAME_SIZE {
+            let t = i as f32;
+            pcm[i] = 4000.0 * (t * 0.1).sin() + 2000.0 * (t * 0.35).cos();
+        }
+        enc.encode_frame(&pcm, &mut bw).unwrap();
+        assert_eq!(bw.bit_position(), 412);
+        assert_eq!(enc.bits_per_frame(), 412);
+    }
+
+    #[test]
+    fn encode_frame_submode_4_writes_652_bits() {
+        // 300 NB bits + 352 WB-extension bits = 652 bits per frame.
+        let mut enc = WbEncoder::with_submode(4).unwrap();
+        let mut bw = BitWriter::new();
+        let mut pcm = [0.0f32; WB_FULL_FRAME_SIZE];
+        for i in 0..WB_FULL_FRAME_SIZE {
+            let t = i as f32;
+            pcm[i] = 4000.0 * (t * 0.1).sin() + 2000.0 * (t * 0.35).cos();
+        }
+        enc.encode_frame(&pcm, &mut bw).unwrap();
+        assert_eq!(bw.bit_position(), 652);
+        assert_eq!(enc.bits_per_frame(), 652);
+    }
+
+    #[test]
     fn default_submode_is_three() {
         let enc = WbEncoder::new();
         assert_eq!(enc.submode(), DEFAULT_WB_SUBMODE);
@@ -852,9 +1033,16 @@ mod tests {
 
     #[test]
     fn unsupported_submodes_report_unsupported() {
-        for bad in [0, 2, 4, 5, 6, 7, 8] {
+        for bad in [0u32, 5, 6, 7, 8] {
             let err = WbEncoder::with_submode(bad);
             assert!(err.is_err(), "submode {bad} should not be supported");
+        }
+    }
+
+    #[test]
+    fn all_documented_submodes_supported() {
+        for ok in [1u32, 2, 3, 4] {
+            assert!(WbEncoder::with_submode(ok).is_ok(), "submode {ok}");
         }
     }
 

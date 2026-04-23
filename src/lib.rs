@@ -24,10 +24,12 @@
 //!     at 15 kbps). Encode dispatch is driven by the
 //!     [`submodes::NbSubmode`] descriptor so adding a decoder mode
 //!     never requires a parallel encoder change.
-//!   * WB encoder for sub-modes 1 (folding) and 3 (stochastic
-//!     split-VQ, default); UWB encoder for the null layer and the
-//!     folding layer (default). See [`encoder`], [`nb_encoder`],
-//!     [`wb_encoder`], [`uwb_encoder`].
+//!   * WB encoder covering the **full WB sub-mode ladder** — sub-modes
+//!     1 (folding, 336 b), 2 (LBR split-VQ, 412 b), 3 (stochastic
+//!     split-VQ, 492 b — default) and 4 (double-codebook split-VQ,
+//!     652 b). UWB encoder for the null layer and the folding layer
+//!     (default). See [`encoder`], [`nb_encoder`], [`wb_encoder`],
+//!     [`uwb_encoder`].
 //!   * Intensity-stereo decode ([`stereo`]) — the 8-bit
 //!     `m=14, id=9` in-band side-channel pre-pended to each frame
 //!     by the reference encoder expands the mono CELP output into

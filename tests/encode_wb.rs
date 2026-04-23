@@ -337,3 +337,81 @@ fn encode_decode_wb_submode_3_sine_chirp_snr_above_floor() {
         "WB-3 sine+chirp SNR should clear 8 dB, got {snr:.1} dB"
     );
 }
+
+#[test]
+fn encode_decode_wb_submode_2_roundtrip_is_coherent() {
+    // bit_rate 18_001..=22_000 picks WB sub-mode 2 (LBR split-VQ, 412
+    // bits → 52 bytes / 20 ms frame after 4-bit pad).
+    let input = build_input(25);
+    let input_rms = rms_i16(&input);
+    assert!(input_rms > 100.0);
+
+    let (packets, decoded) = wb_encode_decode(Some(20_600), &input);
+    let n_frames = input.len() / WB_FULL_FRAME_SIZE;
+    assert_eq!(packets.len(), n_frames);
+    for p in &packets {
+        assert_eq!(
+            p.data.len(),
+            52,
+            "sub-mode 2 packets are 412 bits → 52 bytes"
+        );
+    }
+    let out_rms = rms_i16(&decoded);
+    eprintln!("WB-2 input RMS = {input_rms}, decoded RMS = {out_rms}");
+    assert!(out_rms > 10.0);
+
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB sub-mode 2 gain-corrected SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(snr > 8.0, "WB-2 SNR should clear 8 dB, got {snr:.1} dB");
+}
+
+#[test]
+fn encode_decode_wb_submode_4_roundtrip_is_coherent() {
+    // bit_rate > 28_000 picks WB sub-mode 4 (double-codebook split-VQ,
+    // 652 bits → 82 bytes / 20 ms frame after 4-bit pad).
+    let input = build_input(25);
+    let input_rms = rms_i16(&input);
+    assert!(input_rms > 100.0);
+
+    let (packets, decoded) = wb_encode_decode(Some(32_600), &input);
+    let n_frames = input.len() / WB_FULL_FRAME_SIZE;
+    assert_eq!(packets.len(), n_frames);
+    for p in &packets {
+        assert_eq!(
+            p.data.len(),
+            82,
+            "sub-mode 4 packets are 652 bits → 82 bytes"
+        );
+    }
+    let out_rms = rms_i16(&decoded);
+    eprintln!("WB-4 input RMS = {input_rms}, decoded RMS = {out_rms}");
+    assert!(out_rms > 10.0);
+
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB sub-mode 4 gain-corrected SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(snr > 8.0, "WB-4 SNR should clear 8 dB, got {snr:.1} dB");
+}
+
+#[test]
+fn encode_decode_wb_submode_2_sine_chirp_snr_above_floor() {
+    let input = sine_chirp_200ms();
+    let (_, decoded) = wb_encode_decode(Some(20_600), &input);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB-2 sine+chirp SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(
+        snr > 8.0,
+        "WB-2 sine+chirp SNR should clear 8 dB, got {snr:.1} dB"
+    );
+}
+
+#[test]
+fn encode_decode_wb_submode_4_sine_chirp_snr_above_floor() {
+    let input = sine_chirp_200ms();
+    let (_, decoded) = wb_encode_decode(Some(32_600), &input);
+    let snr = snr_db(&input, &decoded);
+    eprintln!("WB-4 sine+chirp SNR ≈ {snr:.1} dB (floor 8 dB)");
+    assert!(
+        snr > 8.0,
+        "WB-4 sine+chirp SNR should clear 8 dB, got {snr:.1} dB"
+    );
+}

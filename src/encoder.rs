@@ -10,9 +10,12 @@
 //!   * **16 kHz wideband** — NB mode 5 + one of the following WB
 //!     extension layers:
 //!     * Sub-mode 1 (~1.8 kbps) spectral folding → 336 bits/frame.
+//!     * Sub-mode 2 (~5.6 kbps) low-bit-rate split-VQ → 412 bits/frame.
 //!     * Sub-mode 3 (~9.6 kbps) stochastic split-VQ → 492 bits/frame.
 //!       **This is the default** — better 4–8 kHz fidelity than
 //!       folding at the cost of ~8 kbps.
+//!     * Sub-mode 4 (~17.6 kbps) double-codebook split-VQ → 652
+//!       bits/frame. Highest-quality WB layer.
 //!   * **32 kHz ultra-wideband** — WB (NB mode 5 + WB sub-mode 3 by
 //!     default) plus a UWB extension layer. Two UWB layers are
 //!     available, selected via `bit_rate`:
@@ -25,9 +28,12 @@
 //!
 //! Callers can override the WB sub-mode via the
 //! [`CodecParameters::bit_rate`] field when constructing the encoder:
-//!   * `bit_rate ≤ 20_000` selects WB sub-mode 1 (folding, 16.6 kbps).
-//!   * `bit_rate >= 20_001` selects WB sub-mode 3 (stochastic, 24.6 kbps).
-//!   * `None` ≡ WB sub-mode 3 (default).
+//!   * `bit_rate ≤ 18_000` selects WB sub-mode 1 (folding, 16.8 kbps).
+//!   * `18_001..=22_000` selects WB sub-mode 2 (~20.6 kbps).
+//!   * `22_001..=28_000` or `None` selects WB sub-mode 3 (~24.6 kbps,
+//!     default).
+//!   * `bit_rate >= 28_001` selects WB sub-mode 4 (~32.6 kbps double
+//!     codebook).
 //!
 //! The produced packets embed an 80-byte Speex header as `extradata`
 //! describing the chosen mode; one encoded codec-frame per container
@@ -122,12 +128,18 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }))
 }
 
-/// Pick a WB sub-mode id (1 or 3) based on `bit_rate`. Returns the
-/// default (3) when `bit_rate` is `None`.
+/// Pick a WB sub-mode id (1..=4) based on `bit_rate`. Returns the
+/// default (3) when `bit_rate` is `None`. Thresholds are chosen so the
+/// numerically-named kbps values the encoder advertises lie inside the
+/// correct bucket (e.g. asking for 16_800 selects sub-mode 1, which
+/// emits exactly 16_800).
 fn wb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
     match bit_rate {
-        Some(r) if r <= 20_000 => 1,
-        _ => 3,
+        Some(r) if r <= 18_000 => 1,
+        Some(r) if r <= 22_000 => 2,
+        Some(r) if r <= 28_000 => 3,
+        Some(_) => 4,
+        None => 3,
     }
 }
 
@@ -142,10 +154,14 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output.sample_rate = Some(16_000);
     output.codec_id = params.codec_id.clone();
     // Reflect the actual encoded bit rate back on the output params so
-    // a downstream muxer sees an accurate rate.
+    // a downstream muxer sees an accurate rate. The numbers come from
+    // the bit counts the WB encoder writes (NB mode 5 + the WB extension
+    // layer, wrapped at 50 fps).
     output.bit_rate = Some(match submode {
-        1 => 16_800,
-        3 => 24_600,
+        1 => 16_800,  // 336 bits / 20 ms
+        2 => 20_600,  // 412 bits / 20 ms
+        3 => 24_600,  // 492 bits / 20 ms
+        4 => 32_600,  // 652 bits / 20 ms
         _ => 16_000,
     });
     if output.extradata.is_empty() {
