@@ -16,10 +16,14 @@
 //!   emits in DTX / silent frames. This is what
 //!   [`UwbEncoder::with_null_layer`] produces.
 //! * **Folding layer (uwb-bit = 1, submode = 1)** — 1 + 3 + 12 + 4×5 =
-//!   36 bits on top of the WB frame, picked to roughly match the
-//!   UWB-layer RMS. Matches the reference's `wb_submode1.bits = 36`
-//!   with UWB's 4-subframe layout. [`UwbEncoder::new`] /
-//!   `with_submode(1)` selects this path.
+//!   36 bits on top of the WB frame. The folding gain is inverted
+//!   against the **reconstructed** WB high-band excitation
+//!   (`WbEncoder::hb_innov()`, which bit-for-bit matches what
+//!   `WbDecoder::hb_innov()` will recover from the emitted stream), so
+//!   the 5-bit gain quantiser targets the envelope the decoder will
+//!   actually fold — not an encoder-side approximation. Matches the
+//!   reference's `wb_submode1.bits = 36` with UWB's 4-subframe layout.
+//!   [`UwbEncoder::new`] / `with_submode(1)` selects this path.
 //!
 //! Sub-modes 2/3/4 are **not defined** by the Speex UWB reference —
 //! UWB is folding-only.
@@ -35,6 +39,12 @@ use crate::uwb_decoder::{
 use crate::wb_decoder::{FOLDING_GAIN, LSP_MARGIN_HIGH, WB_FRAME_SIZE, WB_LPC_ORDER};
 use crate::wb_encoder::{qmf_decomp, WbEncoder};
 use oxideav_core::bits::BitWriter;
+
+// The decoder's UWB folding layer reads the WB decoder's reconstructed
+// 4–8 kHz excitation (`wb.hb_innov()`) as the folding source. The
+// encoder reconstructs the same signal inside `WbEncoder::encode_frame`
+// and exposes it via `WbEncoder::hb_innov()`, so our UWB folding gain
+// can be computed against the *exact* signal the decoder will fold.
 
 /// Default: emit the folding extension (best fidelity this encoder
 /// can produce).
@@ -188,12 +198,22 @@ impl UwbEncoder {
         // The decoder reconstructs each UWB sub-frame's excitation as
         //   exc[i] = ±FG · g · wb_hb_innov[src + i]   (alternating sign)
         // where `wb_hb_innov` is the wideband decoder's reconstructed
-        // high-band excitation. We don't have that reconstructed signal
-        // on the encoder side without running a second analysis pass,
-        // so we approximate the folding source by the (known-at-encode)
-        // WB high-band *input* signal. The decoder's actual source is
-        // a quantised synthesis of that same band, so their RMS levels
-        // track within a factor the 5-bit quantiser can absorb.
+        // 4–8 kHz excitation. We invert that directly: ask the WB
+        // encoder for the `hb_innov` it produced (exposed via
+        // `WbEncoder::hb_innov()`) — that's bit-for-bit what the
+        // decoder will see on its own `wb.hb_innov()` after parsing
+        // our bitstream. Using the exact source lets the 5-bit gain
+        // quantiser nail the right envelope instead of absorbing an
+        // encoder/decoder RMS mismatch.
+        //
+        // Filter-ratio inversion: same rl/rh formula the decoder uses,
+        // with rl pulled from the WB encoder's NB sub-encoder's
+        // `pi_gain` (the WB decoder does the same thing — look up
+        // `wb_pi_gain = wb.nb().pi_gain()` inside
+        // `UwbDecoder::decode_folding_layer`).
+
+        let wb_hb_innov = *self.wb.hb_innov();
+        let wb_pi_gain = *self.wb.nb().pi_gain();
 
         let mut interp_qlsp = [0.0f32; WB_LPC_ORDER];
         let mut ak = [0.0f32; WB_LPC_ORDER];
@@ -211,14 +231,19 @@ impl UwbEncoder {
             );
             lsp_to_lpc(&interp_qlsp, &mut ak, WB_LPC_ORDER);
 
-            // Symmetric filter ratio — we don't carry the NB decoder's
-            // pi_gain on the encoder side, and the decoder's rl/rh
-            // division hinges on that cross-layer coupling. A flat
-            // ratio of 1.0 leaves the 5-bit gain quant to absorb the
-            // residual envelope mismatch; good enough for a folding
-            // layer whose goal is just injecting some 8–16 kHz
-            // broadband energy of the right order of magnitude.
-            let filter_ratio = 1.0f32;
+            // Filter-response ratio — mirrors the decoder's formula:
+            //   rh = 1 + Σ_{even k} (ak[k+1] - ak[k])  (ω=π response)
+            //   rl = wb_pi_gain[sub]                   (WB NB sub-frame)
+            //   filter_ratio = (rl + .01) / (rh + .01)
+            let mut rh = 1.0f32;
+            let mut k = 0;
+            while k + 1 < WB_LPC_ORDER {
+                rh += ak[k + 1] - ak[k];
+                k += 2;
+            }
+            let rl_idx = sub.min(wb_pi_gain.len() - 1);
+            let rl = wb_pi_gain[rl_idx];
+            let filter_ratio = (rl + 0.01) / (rh + 0.01);
 
             // Target: the LPC residual of the UWB high band on this
             // sub-frame (80 samples).
@@ -227,17 +252,39 @@ impl UwbEncoder {
             fir_filter_stateless(hb_sub, &ak, &mut residual, WB_LPC_ORDER);
             let hb_res_rms = rms(&residual);
 
-            // Folding source: use the WB input high-band signal (0–8
-            // kHz of the 32 kHz full-band, i.e. the QMF-decomposed
-            // "low" for UWB — which for UWB's folding purposes plays
-            // the role of `wb_hb_innov` in the reference). UWB subframe
-            // is 80 samples; WB innov is 160, so stride by half — same
-            // wrap the decoder performs.
+            // Folding-source RMS — walk the same 80-sample window the
+            // decoder walks through `wb_hb_innov`. WB hb_innov is 160
+            // samples at 8 kHz decimated, so UWB's 80-sample sub-frame
+            // consumes 40 source samples (2 per fold pair). Compute RMS
+            // over the effective source slice the decoder will actually
+            // multiply by (±FG · g).
             let src_off = (off / 2) & !1;
-            let wrap_end = (src_off + UWB_SUBFRAME_SIZE / 2).min(WB_FRAME_SIZE);
-            let src_slice = &low[src_off..wrap_end];
-            let folding_rms = FOLDING_GAIN * rms(src_slice);
+            let mut src_sum_sq = 0.0f64;
+            let mut n_taken = 0usize;
+            let mut i = 0;
+            while i + 1 < UWB_SUBFRAME_SIZE {
+                let src_i = (src_off + i / 2) % WB_FRAME_SIZE;
+                let src_j = (src_off + i / 2 + 1) % WB_FRAME_SIZE;
+                let s0 = wb_hb_innov[src_i] as f64;
+                let s1 = wb_hb_innov[src_j] as f64;
+                src_sum_sq += s0 * s0 + s1 * s1;
+                n_taken += 2;
+                i += 2;
+            }
+            let src_rms = if n_taken > 0 {
+                (src_sum_sq / n_taken as f64).sqrt() as f32
+            } else {
+                0.0
+            };
+            let folding_rms = FOLDING_GAIN * src_rms;
 
+            // Decoder: `g_after = exp(.125·(q-10)) / filter_ratio` and
+            // `exc[i] = ±FG · g_after · src[·]`, so the post-scaling
+            // RMS equals `folding_rms · g_after`. Set that equal to
+            // the residual RMS and solve for q:
+            //   g_after · filter_ratio = hb_res_rms / folding_rms
+            //   g_raw (before filter_ratio) = hb_res_rms · filter_ratio / folding_rms
+            //   q = 10 + 8 · ln(g_raw).
             let eps = 1e-6f32;
             let g_target = (hb_res_rms / folding_rms.max(eps)) * filter_ratio.max(eps);
             let q_f = 10.0 + 8.0 * g_target.max(eps).ln();

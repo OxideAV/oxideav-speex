@@ -255,3 +255,4 @@ fn encode_decode_uwb_folding_layer_roundtrip_is_coherent() {
         "UWB folding SNR should clear 6 dB, got {snr:.1} dB"
     );
 }
+

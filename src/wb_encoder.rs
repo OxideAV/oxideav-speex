@@ -110,7 +110,7 @@ const SM4_DOUBLE_CB_WEIGHT: f32 = 0.4;
 /// previous frame's quantised high-band LSPs for sub-frame
 /// interpolation.
 pub struct WbEncoder {
-    /// Which WB sub-mode this encoder emits (1 or 3).
+    /// Which WB sub-mode this encoder emits (1..=4).
     submode: u32,
     /// NB CELP encoder for the 0–4 kHz band.
     nb: NbEncoder,
@@ -123,6 +123,11 @@ pub struct WbEncoder {
     /// First-frame flag — makes the first interpolation use `qlsp`
     /// alone (same trick the decoder uses).
     first: bool,
+    /// Reconstructed high-band excitation from the most recent
+    /// `encode_frame` — this is exactly what `WbDecoder::hb_innov`
+    /// will recover from the emitted bitstream. Exposed to the UWB
+    /// encoder so its folding source matches the decoder's bit-for-bit.
+    hb_innov: [f32; WB_FRAME_SIZE],
 }
 
 impl Default for WbEncoder {
@@ -171,7 +176,24 @@ impl WbEncoder {
             qmf_mem_hi: [0.0; QMF_ORDER],
             old_qlsp_high,
             first: true,
+            hb_innov: [0.0; WB_FRAME_SIZE],
         })
+    }
+
+    /// The WB high-band excitation this encoder reconstructed in its
+    /// most recent [`Self::encode_frame`] call — identical to the
+    /// `hb_innov` the matching [`crate::wb_decoder::WbDecoder`] would
+    /// populate from the emitted bitstream. Consumed by
+    /// [`crate::uwb_encoder::UwbEncoder`] so the UWB folding source
+    /// matches the decoder bit-for-bit.
+    pub fn hb_innov(&self) -> &[f32; WB_FRAME_SIZE] {
+        &self.hb_innov
+    }
+
+    /// Narrowband sub-encoder access — needed by the UWB encoder so it
+    /// can replicate the decoder's `pi_gain` → filter-ratio path.
+    pub(crate) fn nb(&self) -> &NbEncoder {
+        &self.nb
     }
 
     /// The WB sub-mode this encoder was constructed for.
@@ -304,6 +326,13 @@ impl WbEncoder {
             fir_filter_stateless(hb_sub, &ak, &mut residual, WB_LPC_ORDER);
             let hb_res_rms = rms(&residual);
 
+            // Reconstructed high-band excitation for this sub-frame —
+            // populated by each branch below. We then copy it into
+            // `self.hb_innov` so downstream (UWB encoder) sees the
+            // same signal `WbDecoder::hb_innov()` would produce from
+            // our emitted bitstream.
+            let mut rec_exc = [0.0f32; WB_SUBFRAME_SIZE];
+
             match self.submode {
                 1 => {
                     // Sub-mode 1 (spectral folding) — pick a 5-bit `q`
@@ -320,6 +349,19 @@ impl WbEncoder {
                     let q_f = 10.0 + 8.0 * g_target.max(eps).ln();
                     let q = q_f.round().clamp(0.0, 31.0) as u32;
                     bw.write_bits(q, 5);
+
+                    // Mirror the decoder reconstruction bit-for-bit.
+                    let q_signed = q as i32;
+                    let g = (0.125f32 * (q_signed - 10) as f32).exp();
+                    let g = g / filter_ratio.max(eps);
+                    let mut i = 0;
+                    while i + 1 < WB_SUBFRAME_SIZE {
+                        let s0 = nb_innov[off + i];
+                        let s1 = nb_innov[off + i + 1];
+                        rec_exc[i] = FOLDING_GAIN * s0 * g;
+                        rec_exc[i + 1] = -FOLDING_GAIN * s1 * g;
+                        i += 2;
+                    }
                 }
                 2 => {
                     // Sub-mode 2 (low-bit-rate stochastic) — 4 sub-vects ×
@@ -343,8 +385,14 @@ impl WbEncoder {
                         target[j] = residual[j] * inv_scale;
                     }
                     let indices = search_split_cb_sm2(&target);
-                    for shape_idx in indices {
+                    for &shape_idx in indices.iter() {
                         bw.write_bits(shape_idx as u32, SM2_SHAPE_BITS);
+                    }
+                    // Reconstruct (no sign, scale at 1/32 like the
+                    // decoder's split-CB path).
+                    let pass1 = reconstruct_sm2(&indices);
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        rec_exc[j] = scale * pass1[j];
                     }
                 }
                 3 => {
@@ -391,6 +439,10 @@ impl WbEncoder {
                     for (shape_idx, sign_bit) in indices {
                         bw.write_bits(sign_bit, 1);
                         bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
+                    }
+                    let pass1 = reconstruct_sm3(&indices);
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        rec_exc[j] = scale * pass1[j];
                     }
                 }
                 4 => {
@@ -439,13 +491,29 @@ impl WbEncoder {
                         residual2[j] = (target[j] - pass1[j]) / SM4_DOUBLE_CB_WEIGHT;
                     }
                     let indices_b = search_split_cb_sm3(&residual2);
+                    let pass2 = reconstruct_sm3(&indices_b);
                     for (shape_idx, sign_bit) in indices_b {
                         bw.write_bits(sign_bit, 1);
                         bw.write_bits(shape_idx as u32, SM3_SHAPE_BITS);
                     }
+                    // Decoder: exc = scale * (pass1 + 0.4 * pass2).
+                    for j in 0..WB_SUBFRAME_SIZE {
+                        rec_exc[j] = scale * (pass1[j] + SM4_DOUBLE_CB_WEIGHT * pass2[j]);
+                    }
                 }
                 _ => unreachable!("submode validated in with_submode"),
             }
+
+            // Match the decoder sanitisation before saving — the UWB
+            // encoder reads this buffer expecting the same clamped,
+            // finite-only values the decoder will see.
+            for v in &mut rec_exc {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+                *v = v.clamp(-32000.0, 32000.0);
+            }
+            self.hb_innov[off..off + WB_SUBFRAME_SIZE].copy_from_slice(&rec_exc);
         }
 
         // ---- 8. Save state -------------------------------------------
@@ -564,6 +632,21 @@ fn search_split_cb_sm2(target: &[f32; WB_SUBFRAME_SIZE]) -> [usize; SM2_NB_SUBVE
             }
         }
         out[sv] = best_shape;
+    }
+    out
+}
+
+/// Rebuild the sub-mode 2 excitation contribution in the normalised
+/// (post-`scale`) domain — mirror of the decoder's split-CB unquant
+/// for `SPLIT_CB_HIGH_LBR` (no sign bit; `+= 0.03125 · SHAPE[.]`).
+fn reconstruct_sm2(indices: &[usize; SM2_NB_SUBVECT]) -> [f32; WB_SUBFRAME_SIZE] {
+    let mut out = [0.0f32; WB_SUBFRAME_SIZE];
+    for (sv, &shape) in indices.iter().enumerate() {
+        let base = shape * SM2_SUBVECT_SIZE;
+        let off = sv * SM2_SUBVECT_SIZE;
+        for j in 0..SM2_SUBVECT_SIZE {
+            out[off + j] += 0.03125 * HEXC_10_32_TABLE[base + j] as f32;
+        }
     }
     out
 }
@@ -1043,6 +1126,41 @@ mod tests {
     fn all_documented_submodes_supported() {
         for ok in [1u32, 2, 3, 4] {
             assert!(WbEncoder::with_submode(ok).is_ok(), "submode {ok}");
+        }
+    }
+
+    #[test]
+    fn hb_innov_has_energy_when_input_has_high_band() {
+        // Mixed low + high band input: a 400 Hz fundamental (drives the
+        // NB encoder's excitation) plus a 5 kHz tone (drives the WB
+        // high-band residual). The WB encoder's reconstructed
+        // `hb_innov` should therefore have non-trivial RMS for both
+        // folding (sub-mode 1) and stochastic (sub-modes 2/3/4)
+        // branches — zero would mean the reconstruction path is
+        // broken and the UWB encoder would see silence.
+        for submode in [1u32, 2, 3, 4] {
+            let mut enc = WbEncoder::with_submode(submode).unwrap();
+            let mut bw = BitWriter::new();
+            let mut pcm = [0.0f32; WB_FULL_FRAME_SIZE];
+            for i in 0..WB_FULL_FRAME_SIZE {
+                let t = i as f32 / 16_000.0;
+                pcm[i] = 4000.0 * (2.0 * std::f32::consts::PI * 400.0 * t).sin()
+                    + 2500.0 * (2.0 * std::f32::consts::PI * 5000.0 * t).sin();
+            }
+            // Drive a few frames so LSP state settles before we check.
+            for _ in 0..4 {
+                enc.encode_frame(&pcm, &mut bw).unwrap();
+            }
+            let hb = enc.hb_innov();
+            let rms: f32 = {
+                let s: f32 = hb.iter().map(|v| v * v).sum();
+                (s / hb.len() as f32).sqrt()
+            };
+            eprintln!("WB-{submode} hb_innov RMS = {rms}");
+            assert!(
+                rms > 1.0,
+                "WB-{submode} hb_innov should carry real excitation, got RMS {rms}"
+            );
         }
     }
 
