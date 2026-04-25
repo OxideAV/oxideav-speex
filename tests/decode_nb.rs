@@ -16,8 +16,8 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
-use oxideav_codec::Decoder;
-use oxideav_container::{Demuxer, ReadSeek};
+use oxideav_core::Decoder;
+use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_core::{Error, Frame};
 use oxideav_speex::decoder::make_decoder;
 

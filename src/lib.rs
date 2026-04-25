@@ -72,7 +72,7 @@ pub mod wb_decoder;
 pub mod wb_encoder;
 pub mod wb_submodes;
 
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 
 pub const CODEC_ID_STR: &str = "speex";
 

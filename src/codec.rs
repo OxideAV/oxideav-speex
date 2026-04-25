@@ -6,8 +6,8 @@
 //! registry knows to offer the same implementation block for decode
 //! and encode.
 
-use oxideav_codec::{CodecInfo, CodecRegistry, Decoder, Encoder};
 use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, Result};
+use oxideav_core::{CodecInfo, CodecRegistry, Decoder, Encoder};
 
 pub fn register(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::audio("speex_sw")

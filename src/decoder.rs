@@ -1,5 +1,5 @@
 //! Top-level Speex decoder — wires the NB CELP synthesis loop and the
-//! WB / UWB sub-band CELP extensions into the [`oxideav_codec::Decoder`]
+//! WB / UWB sub-band CELP extensions into the [`oxideav_core::Decoder`]
 //! trait.
 //!
 //! Extracts the 80-byte Speex header from `CodecParameters::extradata`
@@ -11,7 +11,7 @@
 //! one Ogg packet. The decoder loops over the bitstream until the
 //! 4-bit terminator (`m=15`) is read or the bit buffer is exhausted.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };

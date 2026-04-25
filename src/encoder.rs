@@ -1,5 +1,5 @@
 //! Top-level Speex encoder — wraps the NB, WB, and UWB CELP analysis
-//! loops behind the [`oxideav_codec::Encoder`] trait.
+//! loops behind the [`oxideav_core::Encoder`] trait.
 //!
 //! Supported:
 //!   * **8 kHz narrowband** — sub-mode 3 (8 kbps) and sub-mode 5
@@ -39,7 +39,7 @@
 //! describing the chosen mode; one encoded codec-frame per container
 //! packet is emitted.
 
-use oxideav_codec::Encoder;
+use oxideav_core::Encoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, MediaType, Packet, Result, SampleFormat,
     TimeBase,
@@ -158,10 +158,10 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     // the bit counts the WB encoder writes (NB mode 5 + the WB extension
     // layer, wrapped at 50 fps).
     output.bit_rate = Some(match submode {
-        1 => 16_800,  // 336 bits / 20 ms
-        2 => 20_600,  // 412 bits / 20 ms
-        3 => 24_600,  // 492 bits / 20 ms
-        4 => 32_600,  // 652 bits / 20 ms
+        1 => 16_800, // 336 bits / 20 ms
+        2 => 20_600, // 412 bits / 20 ms
+        3 => 24_600, // 492 bits / 20 ms
+        4 => 32_600, // 652 bits / 20 ms
         _ => 16_000,
     });
     if output.extradata.is_empty() {

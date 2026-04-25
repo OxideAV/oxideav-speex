@@ -19,7 +19,7 @@
 //! band rather than a direct encode — the test guards against total
 //! garbage output, not bit-exact reproduction.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat, TimeBase,
 };
@@ -255,4 +255,3 @@ fn encode_decode_uwb_folding_layer_roundtrip_is_coherent() {
         "UWB folding SNR should clear 6 dB, got {snr:.1} dB"
     );
 }
-

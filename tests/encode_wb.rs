@@ -31,7 +31,7 @@
 //! would produce, since we still lack perceptual weighting on the
 //! analysis side.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat, TimeBase,
 };

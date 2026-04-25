@@ -15,7 +15,7 @@
 //! metric is the threshold the task asks for — low enough to pass
 //! despite the level offset but high enough to catch total garbage.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat, TimeBase,
 };
