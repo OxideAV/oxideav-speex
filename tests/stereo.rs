@@ -134,7 +134,8 @@ fn stereo_decode_balances_left_and_right_per_payload() {
         loop {
             match dec.receive_frame() {
                 Ok(Frame::Audio(af)) => {
-                    assert_eq!(af.channels, 2, "frame must be stereo");
+                    // Decoder is configured stereo via dec_params.channels = 2;
+                    // verify by iterating L/R interleaved samples below.
                     for (l, r) in audio_samples_interleaved(&af.data[0]) {
                         left.push(l);
                         right.push(r);

@@ -106,7 +106,6 @@ fn open_speex_file(path: &str) -> (Box<dyn Decoder>, Box<dyn Demuxer>) {
 fn decode_to_f32(path: &str) -> (Vec<f32>, u32) {
     let (mut dec, mut demux) = open_speex_file(path);
     let mut pcm = Vec::<f32>::new();
-    let mut observed_sr: Option<u32> = None;
     loop {
         let pkt = match demux.next_packet() {
             Ok(p) => p,
@@ -119,8 +118,8 @@ fn decode_to_f32(path: &str) -> (Vec<f32>, u32) {
         loop {
             match dec.receive_frame() {
                 Ok(Frame::Audio(af)) => {
-                    // S16 interleaved -> f32 in [-1, 1].
-                    observed_sr.get_or_insert(af.sample_rate);
+                    // S16 interleaved -> f32 in [-1, 1]. Stream-level
+                    // sample rate is sourced from the demuxer below.
                     let bytes = &af.data[0];
                     for chunk in bytes.chunks_exact(2) {
                         let s = i16::from_le_bytes([chunk[0], chunk[1]]);
@@ -135,9 +134,7 @@ fn decode_to_f32(path: &str) -> (Vec<f32>, u32) {
         }
     }
     let _ = dec.flush();
-    let sr = observed_sr
-        .or_else(|| demux.streams()[0].params.sample_rate)
-        .unwrap_or(8_000);
+    let sr = demux.streams()[0].params.sample_rate.unwrap_or(8_000);
     (pcm, sr)
 }
 

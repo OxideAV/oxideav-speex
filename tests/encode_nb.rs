@@ -17,7 +17,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat, TimeBase,
+    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat,
 };
 use oxideav_speex::decoder::make_decoder;
 use oxideav_speex::encoder::make_encoder;
@@ -52,12 +52,8 @@ fn audio_frame_s16(samples: &[i16]) -> AudioFrame {
         bytes.extend_from_slice(&s.to_le_bytes());
     }
     AudioFrame {
-        format: SampleFormat::S16,
-        channels: 1,
-        sample_rate: 8_000,
         samples: samples.len() as u32,
         pts: None,
-        time_base: TimeBase::new(1, 8_000),
         data: vec![bytes],
     }
 }

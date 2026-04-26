@@ -330,26 +330,9 @@ impl Encoder for SpeexEncoder {
 }
 
 impl SpeexEncoder {
-    fn expected_rate(&self) -> u32 {
-        match &self.band {
-            BandState::Nb(_) => 8_000,
-            BandState::Wb(_) => 16_000,
-            BandState::Uwb(_) => 32_000,
-        }
-    }
-
     fn ingest(&mut self, frame: &AudioFrame) -> Result<()> {
-        let expected = self.expected_rate();
-        if frame.channels != 1 || frame.sample_rate != expected {
-            return Err(Error::invalid(format!(
-                "Speex encoder: input must be mono {expected} Hz S16"
-            )));
-        }
-        if frame.format != SampleFormat::S16 {
-            return Err(Error::invalid(
-                "Speex encoder: input sample format must be S16",
-            ));
-        }
+        // Stream-level validation (mono S16 at the expected rate) is
+        // owned by the factory at construction time — see `make_encoder`.
         let bytes = frame
             .data
             .first()
@@ -418,12 +401,8 @@ mod tests {
             data.extend_from_slice(&s.to_le_bytes());
         }
         AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: 8_000,
             samples: NB_FRAME_SIZE as u32,
             pts: None,
-            time_base: TimeBase::new(1, 8_000),
             data: vec![data],
         }
     }
@@ -529,12 +508,8 @@ mod tests {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         let af = AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: 16_000,
             samples: samples.len() as u32,
             pts: None,
-            time_base: TimeBase::new(1, 16_000),
             data: vec![bytes],
         };
         enc.send_frame(&Frame::Audio(af)).unwrap();

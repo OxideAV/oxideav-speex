@@ -13,7 +13,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
+    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result,
 };
 
 use crate::header::{SpeexHeader, SpeexMode};
@@ -57,20 +57,16 @@ struct NbDecoderImpl {
     codec_id: CodecId,
     nb: NbDecoder,
     header: SpeexHeader,
-    time_base: TimeBase,
     pending: Option<Packet>,
     eof: bool,
 }
 
 impl NbDecoderImpl {
     fn new(codec_id: CodecId, header: SpeexHeader) -> Self {
-        let rate = if header.rate > 0 { header.rate } else { 8_000 };
-        let time_base = TimeBase::new(1, rate as i64);
         Self {
             codec_id,
             nb: NbDecoder::new(),
             header,
-            time_base,
             pending: None,
             eof: false,
         }
@@ -133,16 +129,8 @@ impl NbDecoderImpl {
         }
 
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: channels as u16,
-            sample_rate: if self.header.rate > 0 {
-                self.header.rate
-            } else {
-                8_000
-            },
             samples: produced_samples_per_chan as u32,
             pts: pkt.pts,
-            time_base: self.time_base,
             data: vec![bytes],
         }))
     }
@@ -202,20 +190,16 @@ struct WbDecoderImpl {
     codec_id: CodecId,
     wb: WbDecoder,
     header: SpeexHeader,
-    time_base: TimeBase,
     pending: Option<Packet>,
     eof: bool,
 }
 
 impl WbDecoderImpl {
     fn new(codec_id: CodecId, header: SpeexHeader) -> Self {
-        let rate = if header.rate > 0 { header.rate } else { 16_000 };
-        let time_base = TimeBase::new(1, rate as i64);
         Self {
             codec_id,
             wb: WbDecoder::new(),
             header,
-            time_base,
             pending: None,
             eof: false,
         }
@@ -271,16 +255,8 @@ impl WbDecoderImpl {
         }
 
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: channels as u16,
-            sample_rate: if self.header.rate > 0 {
-                self.header.rate
-            } else {
-                16_000
-            },
             samples: samples_per_chan as u32,
             pts: pkt.pts,
-            time_base: self.time_base,
             data: vec![bytes],
         }))
     }
@@ -338,20 +314,16 @@ struct UwbDecoderImpl {
     codec_id: CodecId,
     uwb: UwbDecoder,
     header: SpeexHeader,
-    time_base: TimeBase,
     pending: Option<Packet>,
     eof: bool,
 }
 
 impl UwbDecoderImpl {
     fn new(codec_id: CodecId, header: SpeexHeader) -> Self {
-        let rate = if header.rate > 0 { header.rate } else { 32_000 };
-        let time_base = TimeBase::new(1, rate as i64);
         Self {
             codec_id,
             uwb: UwbDecoder::new(),
             header,
-            time_base,
             pending: None,
             eof: false,
         }
@@ -405,16 +377,8 @@ impl UwbDecoderImpl {
         }
 
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: channels as u16,
-            sample_rate: if self.header.rate > 0 {
-                self.header.rate
-            } else {
-                32_000
-            },
             samples: samples_per_chan as u32,
             pts: pkt.pts,
-            time_base: self.time_base,
             data: vec![bytes],
         }))
     }
