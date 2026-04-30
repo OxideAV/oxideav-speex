@@ -34,6 +34,14 @@
 //!     `m=14, id=9` in-band side-channel pre-pended to each frame
 //!     by the reference encoder expands the mono CELP output into
 //!     interleaved L/R.
+//!   * Typed in-band signalling per Speex manual §5.5 / RFC 5574 —
+//!     [`inband::InbandMessage`] covers all 16 `m=14` codes from
+//!     Table 5.1 plus the `m=13` user payload and the `m=15` frame
+//!     terminator. [`inband::pad_to_octet_boundary`] writes the
+//!     RFC 5574 §3.3 padding pattern (a single `0` followed by all
+//!     ones to the next octet boundary). The CELP decoders still skip
+//!     unrecognised in-band requests opaquely (matching libspeex's
+//!     "no callback registered" default); typed parsing is opt-in.
 //!
 //! Tables (LSP, gain, fixed codebooks) are transcribed from the
 //! BSD-licensed Xiph reference (`libspeex/{lsp_tables_nb,gain_table,
@@ -58,6 +66,7 @@ pub mod exc_tables;
 pub mod gain_tables;
 pub mod header;
 pub mod hexc_tables;
+pub mod inband;
 pub mod lsp;
 pub mod lsp_tables_nb;
 pub mod lsp_tables_wb;

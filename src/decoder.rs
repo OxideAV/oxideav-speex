@@ -12,9 +12,7 @@
 //! 4-bit terminator (`m=15`) is read or the bit buffer is exhausted.
 
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 use crate::header::{SpeexHeader, SpeexMode};
 use crate::nb_decoder::{NbDecoder, NB_FRAME_SIZE};

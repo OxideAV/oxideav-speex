@@ -80,11 +80,16 @@ one of:
 
 | WB sub-mode | Extra bits | Total bits/frame | Total rate | Selection |
 |-------------|-----------:|-----------------:|-----------:|-----------|
-| **1** | 36 | 336 | ~16.8 kbps | `bit_rate ≤ 20_000` |
-| **3** *(default)* | 192 | 492 | ~24.6 kbps | `bit_rate > 20_000` or `None` |
+| **1** | 36 | 336 | ~16.8 kbps | `bit_rate ≤ 18_000` |
+| **2** | 112 | 412 | ~20.6 kbps | `18_001 ≤ bit_rate ≤ 22_000` |
+| **3** *(default)* | 192 | 492 | ~24.6 kbps | `22_001 ≤ bit_rate ≤ 28_000` or `None` |
+| **4** | 352 | 652 | ~32.6 kbps | `bit_rate > 28_000` |
 
-Sub-modes 2 and 4 are recognised by the decoder tables but not
-emitted by the encoder (return `Error::Unsupported`).
+All four WB sub-modes are emitted by the encoder. Sub-mode 2 uses the
+low-bit-rate split-VQ codebook (`HEXC_10_32_TABLE`, 32×10, no sign);
+sub-mode 4 runs the standard split-VQ codebook (`HEXC_TABLE`, 128×8 +
+sign) twice per sub-frame and sums the two contributions with the
+second pass weighted 0.4× — same layout the decoder rebuilds.
 
 ### Ultra-wideband (32 kHz)
 
@@ -107,6 +112,53 @@ The encoder does not emit the in-band stereo side-channel; for an
 authored stereo stream, build the `m=14, id=9` payload yourself and
 prepend it to each encoded mono frame (see `tests/stereo.rs` for the
 exact bit layout).
+
+### In-band signalling (Speex manual §5.5 / RFC 5574)
+
+The [`inband`](src/inband.rs) module exposes the full Speex Table 5.1
+in a typed [`InbandMessage`] enum, plus encoder + decoder helpers:
+
+| Code | Variant | Payload | Notes |
+|----:|---------|---------|-------|
+| 0 | `PerceptualEnhance(bool)` | 1 bit | Decoder enhancement on/off |
+| 1 | `PacketLossLessAggressive(bool)` | 1 bit | Encoder back-off hint |
+| 2 | `ModeSwitch(u8)` | 4 bits | Switch encoder mode N |
+| 3 | `LowBandMode(u8)` | 4 bits | Low-band mode N |
+| 4 | `HighBandMode(u8)` | 4 bits | High-band mode N |
+| 5 | `VbrQuality(u8)` | 4 bits | Switch to VBR quality N |
+| 6 | `RequestAck(AckPolicy)` | 4 bits | None / All / InBandOnly |
+| 7 | `RateControl(RateControl)` | 4 bits | CBR / VAD / DTX / VBR / VBR+DTX |
+| 8 | `Character(u8)` | 8 bits | Transmit one byte |
+| 9 | `StereoSideChannel(u8)` | 8 bits | Intensity-stereo payload |
+| 10 | `MaxBitrate(u16)` | 16 bits | Max acceptable bytes/s |
+| 11 | `Reserved11(u16)` | 16 bits | Reserved (kept verbatim) |
+| 12 | `AckPacket(u32)` | 32 bits | Ack packet N |
+| 13–15 | `Reserved13/14/15` | 32 / 64 / 64 bits | Reserved |
+| `m=13` | `UserPayload(Vec<u8>)` | 5-bit length + N bytes | Application-defined |
+| `m=15` | `Terminator` | 0 bits | Frame terminator |
+
+The CELP decoders still skip unrecognised in-band requests opaquely
+(matching libspeex's "no callback registered" default), so existing
+streams keep decoding unchanged. Typed parsing is opt-in:
+
+```rust
+use oxideav_core::bits::BitReader;
+use oxideav_speex::inband::{decode_inband, InbandMessage};
+
+let mut br = BitReader::new(&packet_bytes);
+while let Ok(Some(msg)) = decode_inband(&mut br) {
+    match msg {
+        InbandMessage::ModeSwitch(n) => println!("peer asked for mode {n}"),
+        InbandMessage::Terminator => break,
+        _ => {}
+    }
+}
+```
+
+The [`pad_to_octet_boundary`] helper writes the RFC 5574 §3.3 padding
+pattern (`0` followed by all-ones, LSB-aligned). It is only required
+for the last frame in an RTP packet; Ogg-wrapped streams don't need
+it because Ogg already aligns each packet to a byte boundary.
 
 ## Quick use
 

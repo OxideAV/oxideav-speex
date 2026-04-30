@@ -20,9 +20,7 @@
 //! garbage output, not bit-exact reproduction.
 
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat};
 use oxideav_speex::decoder::make_decoder;
 use oxideav_speex::encoder::make_encoder;
 use oxideav_speex::uwb_decoder::UWB_FULL_FRAME_SIZE;
