@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-speex/compare/v0.0.5...v0.0.6) - 2026-05-05
+
+### Other
+
+- auto-register via oxideav_core::register! macro (linkme distributed slice)
+- unify entry point on register(&mut RuntimeContext) ([#502](https://github.com/OxideAV/oxideav-speex/pull/502))
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-speex/compare/v0.0.4...v0.0.5) - 2026-05-03
 
 ### Other
