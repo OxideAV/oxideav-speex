@@ -233,10 +233,11 @@ impl StereoSideChannel {
     ///
     /// The wideband bit is fixed at 0 because every CELP frame
     /// (narrowband, wideband-low-band, ultra-wideband-low-band)
-    /// introduces a request packet with a 0-prefix; libspeex flags `m=14`
-    /// after that 1-bit narrowband indicator on every band. The decoder
-    /// in [`crate::nb_decoder`] expects exactly this layout when scanning
-    /// for in-band markers ahead of the CELP frame proper.
+    /// introduces a request packet with a 0-prefix and the 4-bit
+    /// `m=14` marker after that 1-bit narrowband indicator. The
+    /// decoder in [`crate::nb_decoder`] expects exactly this layout
+    /// when scanning for in-band markers ahead of the CELP frame
+    /// proper.
     pub fn write_inband(&self, bw: &mut BitWriter) {
         // 5-bit prefix: wb=0 + m=14, packed MSB-first as 0b01110 (= 14).
         bw.write_bits(14, 5);

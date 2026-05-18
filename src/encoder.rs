@@ -9,7 +9,7 @@
 //! produced from the `(L+R)/2` downmix. The companion decoder
 //! ([`crate::stereo::StereoState`] + [`crate::decoder::make_decoder`])
 //! expands the mono output back to L/R using the same smoothing rule
-//! it applies to libspeex-encoded streams.
+//! it applies to externally-encoded streams.
 //!
 //! Supported:
 //!   * **8 kHz narrowband** — sub-mode 3 (8 kbps) and sub-mode 5
