@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-speex/compare/v0.0.6...v0.0.7) - 2026-05-18
+
+### Other
+
+- drop two stray libspeex references in stereo encoder docs
+- intensity-stereo encode (Speex manual §5.5 Table 5.1 code 9)
+
 ### Added
 
 - **Intensity-stereo encode.** The top-level encoder factory now
