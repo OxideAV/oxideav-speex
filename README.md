@@ -105,13 +105,39 @@ The folding layer follows the reference's `sb_uwb_mode`: 4 sub-frames of
 4 × 5-bit folding gain. Sub-modes other than 1 are **not defined** by
 the Speex UWB reference.
 
-Encoder input must be mono S16 at the band's native rate (8000 /
-16000 / 32000 Hz). A downstream muxer sees the chosen mode reflected
-in the 80-byte Speex header written to `CodecParameters::extradata`.
-The encoder does not emit the in-band stereo side-channel; for an
-authored stereo stream, build the `m=14, id=9` payload yourself and
-prepend it to each encoded mono frame (see `tests/stereo.rs` for the
-exact bit layout).
+Encoder input is S16 at the band's native rate (8000 / 16000 /
+32000 Hz). A downstream muxer sees the chosen mode reflected in the
+80-byte Speex header written to `CodecParameters::extradata`.
+
+### Stereo encode (intensity side-channel)
+
+Setting `params.channels = Some(2)` switches the encoder into
+intensity-stereo mode. For every codec frame the encoder:
+
+1. Computes the per-frame energies `eL = ΣL²`, `eR = ΣR²`,
+   `eM = Σ((L+R)/2)²` from the interleaved input.
+2. Quantises them to `(sign, dexp, e_ratio_idx)` —
+   `balance = eL/eR ⇒ dexp = round(4·|ln(balance)|)` clamped to
+   `[0, 31]`, and `e_ratio = eM/(eL+eR)` matched to the nearest
+   entry in `{0.25, 0.315, 0.397, 0.5}`.
+3. Writes the 17-bit Speex manual §5.5 Table 5.1 code-9 packet
+   (`wb=0 (1) || m=14 (4) || id=9 (4) || sign (1) || dexp (5) ||
+   e_ratio_idx (2)`) ahead of the CELP frame.
+4. Mixes the input to mono via `M = (L+R)/2` and feeds that to the
+   same NB / WB / UWB CELP analysis pipeline used by the mono path.
+
+The companion decoder reads the side channel and expands the mono
+synthesis to interleaved L/R via the smoothing rule documented in
+`StereoState::expand_mono_in_place` — exactly the path the decoder
+already runs for libspeex-encoded streams. NB stereo packets are
+**40 bytes** at sub-mode 5 (300-bit CELP + 17-bit prefix, padded to
+the next byte boundary); WB / UWB grow by a similar 17-bit prefix
+plus padding.
+
+Silent frames emit the neutral payload `(sign=0, dexp=0,
+e_ratio_idx=3)` matching `StereoState::new` so the smoothing filter
+never sees a step-change in `balance` / `e_ratio` when audio
+resumes.
 
 ### In-band signalling (Speex manual §5.5 / RFC 5574)
 

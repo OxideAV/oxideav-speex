@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Intensity-stereo encode.** The top-level encoder factory now
+  accepts `channels = Some(2)` for the NB, WB, and UWB rates. Each
+  output packet is prefixed by the 17-bit Speex manual §5.5
+  Table 5.1 code-9 side-channel request (`wb=0 || m=14 || id=9 ||
+  sign || dexp || e_ratio_idx`) computed from the per-frame
+  `(eL, eR, eM)` energies, followed by the standard mono CELP frame
+  produced from the `(L+R)/2` downmix. NB sub-mode 5 stereo packets
+  are 40 bytes (317 bits before pad). Silent frames emit the
+  neutral payload `(0, 0, 3)` matching the decoder's
+  `StereoState::new`. New `StereoSideChannel` type carries the
+  pre-quantised triple between the energy analysis and the bit
+  writer; `mix_to_mono`, `energies`, and `write_inband` helpers
+  expose the building blocks for callers driving the bitstream
+  directly. The Speex-in-Ogg header byte 48..52 now reflects the
+  caller-supplied channel count.
+- `tests/encode_stereo.rs` — 9 integration tests covering NB / WB /
+  UWB factory acceptance, the 38-vs-40-byte size delta between mono
+  and stereo NB-5 packets, left-loud / right-loud / balanced
+  round-trips through the encoder + decoder, and the quad-channel
+  rejection path.
+- `StereoSideChannel::{from_lr, to_state, mix_to_mono, energies,
+  write_inband}` plus the `E_RATIO_QUANT_VALUES` constant
+  (encoder-side equivalent of the decoder's existing quantisation
+  table).
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-speex/compare/v0.0.5...v0.0.6) - 2026-05-06
 
 ### Other

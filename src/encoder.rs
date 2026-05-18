@@ -1,6 +1,16 @@
 //! Top-level Speex encoder — wraps the NB, WB, and UWB CELP analysis
 //! loops behind the [`oxideav_core::Encoder`] trait.
 //!
+//! Stereo input (`channels=2`) is accepted and encoded as the
+//! reference's "intensity stereo" — each output packet is prefixed by
+//! the 17-bit in-band side-channel request (Speex manual §5.5 Table
+//! 5.1, code 9) carrying a per-frame `(sign, dexp, e_ratio_idx)` triple
+//! computed from the L/R energies, followed by a mono CELP frame
+//! produced from the `(L+R)/2` downmix. The companion decoder
+//! ([`crate::stereo::StereoState`] + [`crate::decoder::make_decoder`])
+//! expands the mono output back to L/R using the same smoothing rule
+//! it applies to libspeex-encoded streams.
+//!
 //! Supported:
 //!   * **8 kHz narrowband** — sub-mode 3 (8 kbps) and sub-mode 5
 //!     (15 kbps) NB encode, selected via [`CodecParameters::bit_rate`]:
@@ -49,6 +59,7 @@ use std::collections::VecDeque;
 use crate::header::{SPEEX_HEADER_SIZE, SPEEX_SIGNATURE};
 use crate::nb_decoder::NB_FRAME_SIZE;
 use crate::nb_encoder::{nb_submode_for_rate, NbEncoder};
+use crate::stereo::StereoSideChannel;
 use crate::uwb_decoder::UWB_FULL_FRAME_SIZE;
 use crate::uwb_encoder::UwbEncoder;
 use crate::wb_decoder::WB_FULL_FRAME_SIZE;
@@ -63,10 +74,10 @@ use oxideav_core::bits::BitWriter;
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let sample_rate = params.sample_rate.unwrap_or(8_000);
     let channels = params.channels.unwrap_or(1);
-    if channels != 1 {
+    if channels != 1 && channels != 2 {
         return Err(Error::unsupported(format!(
-            "Speex encoder: only mono is supported (got {channels} channels) \
-             — stereo encode (intensity side-channel) is not implemented"
+            "Speex encoder: only mono (1 channel) and stereo (2 channels) are \
+             supported (got {channels} channels)"
         )));
     }
     let sample_format = params.sample_format.unwrap_or(SampleFormat::S16);
@@ -77,9 +88,9 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }
 
     match sample_rate {
-        8_000 => make_nb(params),
-        16_000 => make_wb(params),
-        32_000 => make_uwb(params),
+        8_000 => make_nb(params, channels),
+        16_000 => make_wb(params, channels),
+        32_000 => make_uwb(params, channels),
         other => Err(Error::unsupported(format!(
             "Speex encoder: sample rate {other} Hz not supported \
              — use 8000 (narrowband), 16000 (wideband), or 32000 (ultra-wideband)"
@@ -87,14 +98,14 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }
 }
 
-fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+fn make_nb(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
     let submode = nb_submode_for_rate(params.bit_rate);
     let nb = NbEncoder::with_submode(submode)?;
 
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
-    output.channels = Some(1);
+    output.channels = Some(channels);
     output.sample_rate = Some(8_000);
     output.codec_id = params.codec_id.clone();
     // Reflect the actual encoded bit rate back on the output params so
@@ -113,7 +124,7 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         _ => unreachable!("validated by NbEncoder::with_submode"),
     });
     if output.extradata.is_empty() {
-        output.extradata = build_speex_header(SpeexBandMode::Nb, submode);
+        output.extradata = build_speex_header(SpeexBandMode::Nb, submode, channels);
     }
 
     Ok(Box::new(SpeexEncoder {
@@ -121,6 +132,7 @@ fn make_nb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         time_base: TimeBase::new(1, 8_000),
         band: BandState::Nb(Box::new(nb)),
         frame_size: NB_FRAME_SIZE,
+        channels,
         pcm_queue: Vec::new(),
         pending: VecDeque::new(),
         frame_index: 0,
@@ -143,14 +155,14 @@ fn wb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
     }
 }
 
-fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+fn make_wb(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
     let submode = wb_submode_for_rate(params.bit_rate);
     let wb = WbEncoder::with_submode(submode)?;
 
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
-    output.channels = Some(1);
+    output.channels = Some(channels);
     output.sample_rate = Some(16_000);
     output.codec_id = params.codec_id.clone();
     // Reflect the actual encoded bit rate back on the output params so
@@ -165,7 +177,7 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         _ => 16_000,
     });
     if output.extradata.is_empty() {
-        output.extradata = build_speex_header(SpeexBandMode::Wb, 5);
+        output.extradata = build_speex_header(SpeexBandMode::Wb, 5, channels);
     }
 
     Ok(Box::new(SpeexEncoder {
@@ -173,6 +185,7 @@ fn make_wb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         time_base: TimeBase::new(1, 16_000),
         band: BandState::Wb(Box::new(wb)),
         frame_size: WB_FULL_FRAME_SIZE,
+        channels,
         pcm_queue: Vec::new(),
         pending: VecDeque::new(),
         frame_index: 0,
@@ -189,14 +202,14 @@ fn uwb_submode_for_rate(bit_rate: Option<u64>) -> u32 {
     }
 }
 
-fn make_uwb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+fn make_uwb(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
     let submode = uwb_submode_for_rate(params.bit_rate);
     let uwb = UwbEncoder::with_submode(submode)?;
 
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
-    output.channels = Some(1);
+    output.channels = Some(channels);
     output.sample_rate = Some(32_000);
     output.codec_id = params.codec_id.clone();
     output.bit_rate = Some(match submode {
@@ -204,7 +217,7 @@ fn make_uwb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         _ => 26_400,
     });
     if output.extradata.is_empty() {
-        output.extradata = build_speex_header(SpeexBandMode::Uwb, 5);
+        output.extradata = build_speex_header(SpeexBandMode::Uwb, 5, channels);
     }
 
     Ok(Box::new(SpeexEncoder {
@@ -212,6 +225,7 @@ fn make_uwb(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         time_base: TimeBase::new(1, 32_000),
         band: BandState::Uwb(Box::new(uwb)),
         frame_size: UWB_FULL_FRAME_SIZE,
+        channels,
         pcm_queue: Vec::new(),
         pending: VecDeque::new(),
         frame_index: 0,
@@ -231,8 +245,10 @@ enum SpeexBandMode {
 /// 16 kHz; for NB it's mode 0 and rate 8 kHz. `nb_submode` is the NB
 /// CELP sub-mode id (3 or 5 — used to populate the advertised bitrate
 /// field; the band-mode id in the header is independent of the NB
-/// sub-mode).
-fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
+/// sub-mode). `nb_channels` is reflected verbatim into byte 48 so a
+/// downstream decoder (or demuxer round-trip) sees the correct
+/// channel count for stereo streams.
+fn build_speex_header(mode: SpeexBandMode, nb_submode: u32, nb_channels: u16) -> Vec<u8> {
     let nb_bitrate = match nb_submode {
         1 => 2_150i32,
         2 => 5_950i32,
@@ -265,7 +281,7 @@ fn build_speex_header(mode: SpeexBandMode, nb_submode: u32) -> Vec<u8> {
     h[36..40].copy_from_slice(&rate.to_le_bytes());
     h[40..44].copy_from_slice(&mode_id.to_le_bytes());
     h[44..48].copy_from_slice(&4u32.to_le_bytes()); // mode_bitstream_version
-    h[48..52].copy_from_slice(&1u32.to_le_bytes()); // nb_channels
+    h[48..52].copy_from_slice(&(nb_channels as u32).to_le_bytes()); // nb_channels
     h[52..56].copy_from_slice(&bitrate.to_le_bytes());
     h[56..60].copy_from_slice(&frame_size.to_le_bytes());
     h[60..64].copy_from_slice(&0u32.to_le_bytes()); // vbr
@@ -285,9 +301,14 @@ struct SpeexEncoder {
     time_base: TimeBase,
     band: BandState,
     /// Samples per full codec frame at the band's native rate (160 for
-    /// NB, 320 for WB — both mono).
+    /// NB, 320 for WB — both mono). For stereo input, the encoder
+    /// buffers `2·frame_size` i16 samples (L/R interleaved) per frame.
     frame_size: usize,
-    /// Queued mono i16 PCM samples awaiting a full frame.
+    /// 1 for mono streams, 2 for intensity-stereo streams.
+    channels: u16,
+    /// Queued i16 PCM samples awaiting a full frame. Mono streams push
+    /// one entry per sample; stereo streams push two interleaved
+    /// (L, R) entries per sample-pair.
     pcm_queue: Vec<i16>,
     pending: VecDeque<Packet>,
     frame_index: u64,
@@ -317,9 +338,11 @@ impl Encoder for SpeexEncoder {
     fn flush(&mut self) -> Result<()> {
         if !self.eof {
             self.eof = true;
-            // Pad any stragglers to a full frame with zeros.
+            // Pad any stragglers to a full frame with zeros. For
+            // stereo, the per-frame quota is doubled (L+R interleaved).
+            let frame_quota = self.frame_size * self.channels as usize;
             if !self.pcm_queue.is_empty() {
-                while self.pcm_queue.len() < self.frame_size {
+                while self.pcm_queue.len() < frame_quota {
                     self.pcm_queue.push(0);
                 }
                 self.drain_full_frames(true)?;
@@ -350,16 +373,32 @@ impl SpeexEncoder {
     }
 
     fn drain_full_frames(&mut self, _flushing: bool) -> Result<()> {
-        while self.pcm_queue.len() >= self.frame_size {
-            let mut pcm = vec![0.0f32; self.frame_size];
-            for (dst, src) in pcm.iter_mut().zip(self.pcm_queue[..self.frame_size].iter()) {
-                *dst = *src as f32;
-            }
-            self.pcm_queue.drain(..self.frame_size);
+        let frame_quota = self.frame_size * self.channels as usize;
+        while self.pcm_queue.len() >= frame_quota {
+            // Build the mono f32 frame the CELP encoders consume. For
+            // stereo we additionally compute the per-frame
+            // (sign, dexp, e_ratio_idx) triple and write the in-band
+            // side-channel ahead of the CELP frame.
+            let mut bw = BitWriter::with_capacity(128);
+            let pcm: Vec<f32> = match self.channels {
+                1 => self.pcm_queue[..self.frame_size]
+                    .iter()
+                    .map(|&v| v as f32)
+                    .collect(),
+                2 => {
+                    let lr = &self.pcm_queue[..frame_quota];
+                    let (el, er, em) = StereoSideChannel::energies(lr, self.frame_size)?;
+                    let side = StereoSideChannel::from_lr(el, er, em);
+                    side.write_inband(&mut bw);
+                    StereoSideChannel::mix_to_mono(lr, self.frame_size)?
+                }
+                // Validated by the factory.
+                _ => unreachable!(),
+            };
+            self.pcm_queue.drain(..frame_quota);
             let pts = Some(self.frame_index as i64 * self.frame_size as i64);
             self.frame_index += 1;
 
-            let mut bw = BitWriter::with_capacity(96);
             match &mut self.band {
                 BandState::Nb(nb) => nb.encode_frame(&pcm, &mut bw)?,
                 BandState::Wb(wb) => wb.encode_frame(&pcm, &mut bw)?,
@@ -367,7 +406,8 @@ impl SpeexEncoder {
             }
             // NB mode 5 packs 300 bits into 38 bytes (4-bit zero pad).
             // WB NB-mode-5 + WB-mode-1 packs 336 bits into 42 bytes
-            // (already byte-aligned).
+            // (already byte-aligned). For stereo, add 17 bits of
+            // side-channel prefix.
             let data = bw.finish();
 
             self.pending.push_back(Packet {
