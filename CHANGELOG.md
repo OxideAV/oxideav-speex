@@ -6,6 +6,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Ogg/Speex stream-header packet parser per *The Speex Codec Manual*
+  §7.3 (Table 7.1): `SpeexHeader::parse(buf)` validates the
+  `b"Speex   "` magic and decodes all 13 little-endian `int32` fields
+  plus the `speex_version` ASCII string. Surfaces typed
+  `HeaderError::TooShort` / `HeaderError::BadMagic` for malformed
+  inputs.
+- Public constants `SPEEX_MAGIC`, `SPEEX_HEADER_LEN` (80), and the
+  three documented mode IDs `SPEEX_MODE_NARROWBAND` /
+  `SPEEX_MODE_WIDEBAND` / `SPEEX_MODE_ULTRAWIDEBAND` for downstream
+  consumers.
+- Seven unit tests covering NB / WB / UWB synthetic headers, bad
+  magic, short buffers, trailing-byte tolerance, and exhaustive
+  field-order mapping against Table 7.1.
+
 ### Erased
 
 - Prior master history was force-erased on **2026-05-19** under
@@ -25,5 +41,5 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Next
 
-- Clean-room re-implementation against the published Speex
-  specifications + RFC 5574 in a future round.
+- Clean-room re-implementation of the CELP frame decoder against the
+  published Speex specifications + RFC 5574 in subsequent rounds.
