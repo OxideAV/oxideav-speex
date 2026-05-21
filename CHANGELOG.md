@@ -21,6 +21,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 - Seven unit tests covering NB / WB / UWB synthetic headers, bad
   magic, short buffers, trailing-byte tolerance, and exhaustive
   field-order mapping against Table 7.1.
+- Round 2: minimal MSB-first `BitReader` matching the Speex
+  bit-packing convention (next-read bit is immediately to the right
+  of the previous bit within the same byte, MSB-first); surfaces
+  `BitError::Underflow { requested, remaining }` and
+  `BitError::TooWide` diagnostics.
+- Round 2: narrowband frame-header parser per
+  *The Speex Codec Manual* §9.3 — `NarrowbandFrameHeader::parse`
+  consumes the leading 5 bits of every Speex frame (1-bit wideband
+  flag from §10.4 + 4-bit mode ID), dispatches the mode ID through
+  the new `Submode` enum (regular CELP, custom in-band mode 13,
+  in-band signalling mode 14, terminator mode 15 — per §5.5 +
+  Table 5.1), and rejects the spec's "reserved" range 9..=12 as
+  `FrameError::ReservedMode`.
+- Round 2: typed `NarrowbandSubmode` records for modes 0..=8 covering
+  every column of Table 9.1 — LSP-VQ width (`LspQuant`), frame-level
+  open-loop pitch / pitch-gain / excitation-gain bit counts,
+  sub-frame fine-pitch / pitch-gain (`PitchGainQuant`) / innovation
+  gain / innovation VQ bit counts, plus the `Total` row — exported as
+  the public `NARROWBAND_SUBMODES: [NarrowbandSubmode; 9]` table. A
+  self-consistency test re-derives `Total` from the field breakdown
+  for every column.
+- Round 2: 24 new unit tests (31 total), covering MSB-first bit
+  reading + boundary straddling + underflow + zero-width reads,
+  frame-header parsing for every documented mode ID, reserved-mode
+  rejection, and Table 9.1 row totals.
 
 ### Erased
 
