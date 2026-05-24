@@ -33,7 +33,7 @@ against the published Speex specifications + RFC 5574.
 - Returns typed `HeaderError::TooShort` / `HeaderError::BadMagic` for
   bad inputs.
 
-**Round 2** (this commit) adds the **per-frame leading prefix** parser
+**Round 2** added the **per-frame leading prefix** parser
 + the typed **narrowband sub-mode table** distilled from §9.3 and
 Table 9.1:
 
@@ -57,38 +57,94 @@ Table 9.1:
   and the table's `Total` row. A self-consistency test recomputes
   `Total` from the breakdown for every column.
 
-No CELP frame body is decoded yet — the LSP VQ, pitch / innovation
-codebooks, and synthesis filter all still return
-`Error::NotImplemented`. They land in subsequent rounds.
+**Round 3** (this commit) adds the **narrowband CELP frame-body
+bit-reader** — `NarrowbandFrameBody::parse` — that walks Table 9.1's
+columns in the bit-stream order documented in §9.3 ("all frame-based
+parameters are packed before sub-frame parameters; the parameters for
+a certain sub-frame are all packed before the following sub-frame is
+packed"):
+
+- Frame-level: LSP VQ index (0 / 18 / 30 bits), open-loop pitch
+  period (0 / 7 bits), open-loop pitch gain (0 / 4 bits), open-loop
+  excitation gain (0 / 5 bits).
+- Sub-frame ×4: fine pitch period (0 / 7 bits, de-biased per §9.2 to
+  the spec's [17, 144] range via the public `PITCH_PERIOD_MIN` /
+  `PITCH_PERIOD_MAX` constants), pitch-gain VQ index (0 / 5 / 7 bits),
+  innovation gain (0 / 1 / 3 bits), innovation VQ raw index (up to 96
+  bits per sub-frame for mode 7, surfaced as `u128`).
+
+Eight raw-index fields per frame × four sub-frames = 12 distinct
+field positions consumed per body, plus the four frame-level fields.
+The struct intentionally records only the index integers; codebook
+lookup (LSP VQ → 10 LSP coefficients, innovation VQ → 40-sample
+sub-vector innovation signal, pitch-gain VQ → three β coefficients)
+is deferred until the Speex CELP **companion-table** docs gap closes
+— see "Spec gaps noted" below.
+
+An integration test (`tests/narrowband_body_fixture.rs`) exercises the
+parser against a real `speexenc`-encoded narrowband fixture: 51 audio
+packets, every one parsed end-to-end through both the round-2 header
+parser and the round-3 body parser, with every per-field index range
+asserted against the mode-5 column of Table 9.1. The fixture
+regeneration command is recorded in `tests/fixtures/Makefile`;
+`speexenc` is used as an opaque binary — its source is NOT consulted.
+
+LSP→LPC conversion, codebook lookup, and the synthesis filter still
+return `Error::NotImplemented`. They land in subsequent rounds, once
+the companion-table material is staged.
 
 ### Coverage estimate
 
-~5 % of the Speex codec surface (Ogg stream header + per-frame leading
-prefix + Table 9.1 sub-mode budgets; CELP frame body + wideband
-high-band + encoder + in-band signalling pending).
+~10 % of the Speex codec surface (Ogg stream header + per-frame
+leading prefix + Table 9.1 sub-mode budgets + frame-body bit-reader
+producing raw indices; codebook lookup + LSP→LPC + pitch / innovation
+synthesis + wideband high-band + encoder + in-band signalling
+pending).
 
 ### Spec material consulted
 
 - `docs/audio/speex/speex-manual.pdf` — *The Speex Codec Manual*
   Version 1.2 Beta 3 (Jean-Marc Valin, December 2007). §5.5
   ("Packing and in-band signalling", Table 5.1), §7.3 ("Ogg file
-  format", Table 7.1), §9.1–§9.3 (narrowband mode, Table 9.1), §10.4
-  (wideband bit allocation).
+  format", Table 7.1), §8 (CELP overview — source/filter, LPC, pitch,
+  innovation), §9.1 ("Whole-frame analysis": 160-sample frame, 4
+  sub-frames of 40 samples), §9.2 ("Sub-frame analysis-by-synthesis":
+  pitch period in [17, 144] encoded with 7 bits; 3-tap β
+  coefficients VQ'd with 5 or 7 bits; sub-vector innovation codebook
+  sizes), §9.3 (Bit allocation, Table 9.1 — bit-stream packing
+  order), §10.4 (wideband bit allocation).
 - `docs/audio/speex/rfc5574-speex.txt` — RFC 5574 *RTP Payload Format
   for the Speex Codec*, Tables 1 & 2 for the mode ↔ bit-rate mapping
   cross-reference.
 
 No external library source (libspeex / Speex reference implementation,
 FFmpeg, etc.) was consulted, paraphrased, or used as cross-check
-oracle.
+oracle. `speexenc` was invoked as an opaque binary only for fixture
+generation; its output bytes are the test input.
 
 ### Spec gaps noted
 
 - §9.3 prose says *"only the first 7 values are used (the others are
   reserved)"* but Table 9.1 itself lists 9 columns (modes 0..=8). The
-  implementation follows the table; round-3 should keep an eye on
-  whether mode 8 turns out to be a documented-but-unused encoder
-  selection or whether real encoders emit it.
+  implementation follows the table.
+- The Speex Manual does **not** publish the per-mode LSP VQ codebooks,
+  pitch-gain VQ codebooks, or innovation codebooks themselves — those
+  live in the libspeex distribution as `*_table.c` files. Round 3
+  therefore stops at the **raw bit-index** layer: every codebook
+  index, pitch period offset and gain index is recovered as an
+  integer, but mapping `lsp_index` → ten LSP coefficients (and
+  thence into LPC) or `innovation_vq_index` → a 40-sample
+  sub-vector cannot proceed until the codebook tables are staged
+  under `docs/audio/speex/` for clean-room transcription. This is
+  tracked as the round-prompt "#969 stage Speex CELP companion
+  tables" follow-up.
+- The Speex Manual's §9.4 in the staged PDF is titled "Perceptual
+  enhancement" and Table 9.2 is "Quality versus bit-rate" (mode ↔
+  quality ↔ mflops); neither matches the round-3 prompt's reference
+  to "Manual §9.4 / Table 9.2" for the narrowband-decoder frame
+  layout / LSP values. The frame-layout material the round actually
+  needs lives in §9.1 + §9.2 + §9.3 + Table 9.1 of the PDF, and
+  Round 3 sources its work from there.
 
 ## License
 
