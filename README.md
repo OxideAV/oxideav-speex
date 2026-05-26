@@ -93,13 +93,47 @@ LSP→LPC conversion, codebook lookup, and the synthesis filter still
 return `Error::NotImplemented`. They land in subsequent rounds, once
 the companion-table material is staged.
 
+**Round 4** (this commit) adds the **§5.5 in-band signalling parser**
+— the bodies that the round-2 dispatcher recognised but left to a
+follow-up round:
+
+- `InbandMessage::parse` walks mode 14's body: a 4-bit Table 5.1 code
+  (`code`) followed by a payload of `1 / 4 / 8 / 16 / 32 / 64` bits as
+  prescribed by the code's row. Surfaces the typed
+  `InbandCodeSpec { code, payload_bits, kind }` + the raw `payload`
+  bits zero-extended into a `u64`. The wide path (>32 bits) splits the
+  payload across two `BitReader::read` calls to side-step the reader's
+  32-bit width guard. Reserved rows (11 / 13 / 14 / 15) parse without
+  error per §5.5's "by default ignore" rule — the cursor still
+  advances past the declared payload so subsequent frames in the same
+  packet stay aligned.
+- `CustomInbandMessage::parse` walks mode 13's body: the 5-bit
+  byte-count field (max 31 bytes per the 5-bit width) and discards
+  `size_bytes * 8` opaque payload bits — exactly the behaviour
+  §5.5's final paragraph specifies ("The size of the message in
+  bytes is encoded with 5 bits, so that the decoder can skip it if
+  it doesn't know how to interpret it.").
+- The public `INBAND_TABLE_5_1: [InbandCodeSpec; 16]` array stages
+  Table 5.1 verbatim: every code 0..=15 carries its `payload_bits`
+  width and an [`InbandKind`] tag (`PerceptualEnhancement`,
+  `LessAggressive`, `SwitchMode`, `SwitchModeLowBand`,
+  `SwitchModeHighBand`, `SwitchQualityVbr`, `RequestAcknowledge`,
+  `SetRateMode`, `TransmitCharacter`, `IntensityStereo`,
+  `AnnounceMaxBitrate`, `AcknowledgePacket`, `Reserved`).
+- New `Error::Signalling(SignallingError)` top-level error variant +
+  `From<BitError>` plumbing matching the round-2/3 error envelopes.
+
+This element is **unblocked by the round prompt** because §5.5 +
+Table 5.1 are fully published in the staged Speex Codec Manual — no
+CELP companion-table material (the open #969 blocker) is touched.
+
 ### Coverage estimate
 
-~10 % of the Speex codec surface (Ogg stream header + per-frame
+~12 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 sub-mode budgets + frame-body bit-reader
-producing raw indices; codebook lookup + LSP→LPC + pitch / innovation
-synthesis + wideband high-band + encoder + in-band signalling
-pending).
+producing raw indices + §5.5 in-band signalling body parser for
+modes 13 / 14; codebook lookup + LSP→LPC + pitch / innovation
+synthesis + wideband high-band + encoder pending).
 
 ### Spec material consulted
 

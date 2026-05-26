@@ -85,6 +85,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `speexenc` is invoked as an opaque binary.
 - Round 3: 44 tests total (42 unit + 2 integration), up from 31 in
   round 2.
+- Round 4: §5.5 in-band signalling body parsers — `InbandMessage`
+  (mode 14: 4-bit Table 5.1 code + `1 / 4 / 8 / 16 / 32 / 64` bits of
+  payload) and `CustomInbandMessage` (mode 13: 5-bit byte-count +
+  opaque payload skipped per §5.5's "decoder can skip it if it
+  doesn't know how to interpret it" rule). Both consume the body
+  that the round-2 dispatcher leaves immediately after the 5-bit
+  frame prefix, so the cursor lands on the first bit of the next
+  frame in the same packet without a manual re-sync.
+- Round 4: public `INBAND_TABLE_5_1: [InbandCodeSpec; 16]` table
+  staging every row of *The Speex Codec Manual* Table 5.1 verbatim
+  (`PerceptualEnhancement` / `LessAggressive` / `SwitchMode` /
+  `SwitchModeLowBand` / `SwitchModeHighBand` / `SwitchQualityVbr` /
+  `RequestAcknowledge` / `SetRateMode` / `TransmitCharacter` /
+  `IntensityStereo` / `AnnounceMaxBitrate` / `AcknowledgePacket` +
+  reserved-row category). Lookup helper `inband_code_spec(code)`
+  returns the row for any of the sixteen 4-bit codes.
+- Round 4: public constants `CUSTOM_INBAND_SIZE_BITS` (5),
+  `CUSTOM_INBAND_MAX_BYTES` (31), and `INBAND_CODE_BITS` (4) for
+  downstream consumers' bit-budget math.
+- Round 4: typed `Error::Signalling(SignallingError)` top-level
+  variant + `From<SignallingError>` conversion matching the
+  round-2 / round-3 error envelopes.
+- Round 4: 22 new unit tests (66 total: 64 unit + 2 integration)
+  covering Table 5.1 structural sanity (sixteen rows, codes match
+  index, payload widths match the manual, reserved-row taxonomy),
+  parsing every documented code category (perceptual enhancement /
+  switch mode / transmit character / max bit-rate / packet ack /
+  reserved 64-bit), the 32-bit + 64-bit width split paths,
+  truncated-code + truncated-payload underflow diagnosis, mode-13
+  size-zero / size-one / max-31-byte payload skip, and end-to-end
+  round-trip parsing through `NarrowbandFrameHeader::parse` for
+  mode 14 (transmit `'B'`) + mode 13 (zero-size custom message).
 
 ### Erased
 
