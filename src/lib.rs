@@ -22,13 +22,23 @@
 //!   → coefficients, innovation VQ → 40-sample sub-vector) and LSP→LPC
 //!   conversion stay deferred until the Speex CELP companion table
 //!   docs gap closes.
-//! * **Round 4** (this commit) — the §5.5 in-band signalling bodies
-//!   that the round-2 dispatcher leaves unparsed: [`InbandMessage`]
-//!   walks mode 14's 4-bit Table 5.1 code + 1/4/8/16/32/64-bit
-//!   payload; [`CustomInbandMessage`] consumes mode 13's 5-bit byte
-//!   size + opaque payload. Table 5.1 itself is staged as the public
+//! * **Round 4** — the §5.5 in-band signalling bodies that the
+//!   round-2 dispatcher leaves unparsed: [`InbandMessage`] walks
+//!   mode 14's 4-bit Table 5.1 code + 1/4/8/16/32/64-bit payload;
+//!   [`CustomInbandMessage`] consumes mode 13's 5-bit byte size +
+//!   opaque payload. Table 5.1 itself is staged as the public
 //!   [`INBAND_TABLE_5_1`] array indexed by code value. The §5.5 path
 //!   needs no CELP companion tables — it is bit-stream framing only.
+//! * **Round 5** (this commit) — the wideband high-band sub-mode
+//!   table from §10.4 / Table 10.1 (modes 0..=4, 5 columns) plus a
+//!   high-band frame-body bit-reader. A wideband packet is the
+//!   concatenation of an embedded narrowband frame (round 3) followed
+//!   by a 1-bit wideband flag, a 3-bit high-band mode ID, the 12-bit
+//!   LSP MSVQ index (modes 1..=4), and four sub-frames of `gain || VQ`
+//!   bits as listed in Table 10.1. See [`WidebandHighBandFrameHeader`]
+//!   and [`WidebandHighBandBody`]. As with round 3 the body lands
+//!   only the raw bit indices — the high-band LSP MSVQ codebook +
+//!   innovation codebook are #969-blocked until staged.
 //!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`].
@@ -43,6 +53,7 @@ mod header;
 mod narrowband_body;
 mod signalling;
 mod submode;
+mod wideband;
 
 pub use bitreader::{BitError, BitReader};
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
@@ -60,6 +71,11 @@ pub use signalling::{
     INBAND_TABLE_5_1,
 };
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
+pub use wideband::{
+    HighBandSubFrameIndices, WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader,
+    WidebandHighBandSubmode, WidebandSubmode, HIGH_BAND_FRAME_PREFIX_BITS,
+    HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+};
 
 /// Crate-local error type. Until the full clean-room rebuild lands, the
 /// codec-level public API paths return [`Error::NotImplemented`]; the
@@ -80,6 +96,9 @@ pub enum Error {
     /// A §5.5 in-band signalling body failed to parse — see
     /// [`SignallingError`].
     Signalling(SignallingError),
+    /// A wideband high-band frame body failed to parse — see
+    /// [`WidebandBodyError`].
+    Wideband(WidebandBodyError),
 }
 
 impl core::fmt::Display for Error {
@@ -93,6 +112,7 @@ impl core::fmt::Display for Error {
             Error::Frame(e) => write!(f, "oxideav-speex: {}", e),
             Error::NarrowbandBody(e) => write!(f, "oxideav-speex: {}", e),
             Error::Signalling(e) => write!(f, "oxideav-speex: {}", e),
+            Error::Wideband(e) => write!(f, "oxideav-speex: {}", e),
         }
     }
 }
@@ -105,6 +125,7 @@ impl std::error::Error for Error {
             Error::Frame(e) => Some(e),
             Error::NarrowbandBody(e) => Some(e),
             Error::Signalling(e) => Some(e),
+            Error::Wideband(e) => Some(e),
         }
     }
 }
@@ -130,6 +151,12 @@ impl From<NarrowbandBodyError> for Error {
 impl From<SignallingError> for Error {
     fn from(e: SignallingError) -> Self {
         Error::Signalling(e)
+    }
+}
+
+impl From<WidebandBodyError> for Error {
+    fn from(e: WidebandBodyError) -> Self {
+        Error::Wideband(e)
     }
 }
 

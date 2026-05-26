@@ -127,13 +127,56 @@ This element is **unblocked by the round prompt** because §5.5 +
 Table 5.1 are fully published in the staged Speex Codec Manual — no
 CELP companion-table material (the open #969 blocker) is touched.
 
+**Round 5** (this commit) adds the **wideband (sub-band CELP)
+high-band sub-mode table** from §10.4 / Table 10.1 plus a high-band
+frame-body bit-reader:
+
+- `WIDEBAND_HIGH_BAND_SUBMODES: [WidebandHighBandSubmode; 5]` stages
+  Table 10.1 verbatim for modes 0..=4 — every row captured with rows
+  `Wideband bit` (1) / `Mode ID` (3 bits, *not* 4) / `LSP` (0 / 12
+  bits MSVQ) / `Excitation gain` (0/5/4/4/4 per sub-frame) /
+  `Excitation VQ` (0/0/20/40/80 per sub-frame) / `Total`
+  (4/36/112/192/352 bits per 20 ms high-band frame).
+- `WidebandHighBandFrameHeader::parse` consumes the 4-bit high-band
+  prefix; `WidebandHighBandBody::parse` walks Table 10.1's columns
+  in the spec-stated order (frame-LSP first, then four sub-frames of
+  `excitation_gain || excitation_vq`). Per §10.4: *"the entire
+  narrowband frame is packed before the high-band is encoded. The
+  narrowband part of the bit-stream is as defined in table 9.1. The
+  high-band follows, as described in table 10.1."*
+- `WidebandSubmode::for_id` dispatches the 3-bit field into
+  `Documented(...)` for modes 0..=4 and `ReservedHighRate(id)` for
+  modes 5..=7 — encodable but not in the staged Table 10.1 (Table
+  10.2 lists 0..=10 with composite bit-rates but does not detail
+  modes 5..=10's per-field budgets; recorded as a docs gap below).
+- New public constants `HIGH_BAND_FRAME_PREFIX_BITS` (4) and
+  `HIGH_BAND_SUBFRAMES_PER_FRAME` (4); new
+  `HighBandSubFrameIndices` struct (excitation gain + excitation VQ
+  index as raw integers).
+- New `Error::Wideband(WidebandBodyError)` envelope variant with
+  `Underflow(BitError)` + `ReservedHighRate(u8)` + `From<BitError>`
+  plumbing matching the round-2/3/4 error shape.
+- 21 new unit tests in `src/wideband.rs` (89 tests total, up from
+  68 in round 4) covering Table 10.1 structural sanity, per-column
+  field-width assertions, mode-0 silent-body, mode-4 widest-field
+  round-trip, mode-1 no-innovation-VQ, truncated-frame underflow,
+  reserved-high-rate dispatch, and the cursor-after-prefix contract.
+
+As with round 3, this round stops at the raw bit-index layer. The
+high-band LSP MSVQ codebook (level-1 + level-2, both 6-bit per §10.1)
+and the per-mode high-band innovation codebooks are also in the
+libspeex `*_table.c` files and remain #969-blocked.
+
 ### Coverage estimate
 
-~12 % of the Speex codec surface (Ogg stream header + per-frame
-leading prefix + Table 9.1 sub-mode budgets + frame-body bit-reader
-producing raw indices + §5.5 in-band signalling body parser for
-modes 13 / 14; codebook lookup + LSP→LPC + pitch / innovation
-synthesis + wideband high-band + encoder pending).
+~16 % of the Speex codec surface (Ogg stream header + per-frame
+leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
+wideband high-band sub-mode budgets + narrowband frame-body
+bit-reader + wideband high-band frame-body bit-reader + §5.5
+in-band signalling body parser for modes 13 / 14; codebook lookup
+(narrowband LSP/pitch/innovation + high-band LSP MSVQ/innovation) +
+LSP→LPC + pitch / innovation synthesis + ultra-wideband framing +
+encoder pending).
 
 ### Spec material consulted
 
@@ -146,10 +189,14 @@ synthesis + wideband high-band + encoder pending).
   pitch period in [17, 144] encoded with 7 bits; 3-tap β
   coefficients VQ'd with 5 or 7 bits; sub-vector innovation codebook
   sizes), §9.3 (Bit allocation, Table 9.1 — bit-stream packing
-  order), §10.4 (wideband bit allocation).
+  order), §10 / §10.1 / §10.4 (wideband sub-band CELP — QMF split
+  into low/high 8 kHz bands; 12-bit MSVQ for high-band LSP via two
+  6-bit codebooks; high-band frame layout Table 10.1; high-band
+  composite bit-rates Table 10.2).
 - `docs/audio/speex/rfc5574-speex.txt` — RFC 5574 *RTP Payload Format
   for the Speex Codec*, Tables 1 & 2 for the mode ↔ bit-rate mapping
-  cross-reference.
+  cross-reference (Table 2 confirms wideband + ultra-wideband mode
+  IDs 0..=10).
 
 No external library source (libspeex / Speex reference implementation,
 FFmpeg, etc.) was consulted, paraphrased, or used as cross-check
@@ -179,6 +226,24 @@ generation; its output bytes are the test input.
   layout / LSP values. The frame-layout material the round actually
   needs lives in §9.1 + §9.2 + §9.3 + Table 9.1 of the PDF, and
   Round 3 sources its work from there.
+- Table 10.1 in the staged manual only details five wideband
+  high-band columns (modes 0..=4); Table 10.2 names modes 0..=10
+  with composite bit-rates / quality descriptors but does not list
+  the per-field bit budgets for modes 5..=10. Round 5 therefore
+  surfaces modes 5..=7 (the rest of the 3-bit field's encodable
+  range) as `WidebandSubmode::ReservedHighRate(id)`; modes 8..=10
+  fall outside the 3-bit field entirely and are unreachable via a
+  conforming bit-stream. A follow-up docs round needs to stage the
+  Table 10.1 columns for modes 5..=10 from the original Speex Codec
+  Manual revisions if they are documented anywhere outside the
+  libspeex source tree.
+- Ultra-wideband (mode 2 in the Ogg stream header) has no dedicated
+  §11 chapter in the staged Speex Codec Manual; only RFC 5574 Table
+  2 lists the per-mode bit-rates. The bit-stream packing layout for
+  the 32 kHz high-band is therefore not in the staged spec — UWB
+  framing is deferred to a follow-up round once the relevant
+  material is staged (likely a triple-band QMF + per-band CELP, but
+  the exact bit allocation is a docs gap).
 
 ## License
 

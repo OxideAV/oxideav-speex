@@ -117,6 +117,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   size-zero / size-one / max-31-byte payload skip, and end-to-end
   round-trip parsing through `NarrowbandFrameHeader::parse` for
   mode 14 (transmit `'B'`) + mode 13 (zero-size custom message).
+- Round 5: wideband high-band sub-mode table from *The Speex Codec
+  Manual* §10.4 / Table 10.1 (modes 0..=4, 5 columns). Public
+  `WIDEBAND_HIGH_BAND_SUBMODES: [WidebandHighBandSubmode; 5]` stages
+  every column verbatim with rows `Wideband bit` / `Mode ID` (3 bits,
+  not 4) / `LSP` (12-bit MSVQ for modes 1..=4, 0 for silence mode 0) /
+  `Excitation gain` (sub-frame, 0/5/4/4/4 bits) / `Excitation VQ`
+  (sub-frame, 0/0/20/40/80 bits) / `Total` (4/36/112/192/352 bits per
+  20 ms high-band frame).
+- Round 5: `WidebandHighBandFrameHeader::parse` consumes the 4-bit
+  high-band prefix (1-bit wideband flag + 3-bit mode ID, distinct
+  from the narrowband 5-bit prefix); `WidebandHighBandBody::parse`
+  walks Table 10.1's columns in `frame-LSP || (gain || VQ) × 4
+  sub-frames` order per §10.4 ("the entire narrowband frame is packed
+  before the high-band is encoded. The narrowband part of the
+  bit-stream is as defined in table 9.1. The high-band follows, as
+  described in table 10.1.").
+- Round 5: `WidebandSubmode::for_id` dispatches the 3-bit mode ID
+  into `Documented(WidebandHighBandSubmode)` for modes 0..=4 and
+  `ReservedHighRate(u8)` for modes 5..=7 (encodable in the 3-bit
+  field but the staged Table 10.1 stops at column 4; Table 10.2 lists
+  modes 5..=10 with composite bit-rates but does not detail the
+  per-field budgets, so these IDs surface without a bit-budget
+  contract until a follow-up docs round stages the missing columns).
+- Round 5: public constants `HIGH_BAND_FRAME_PREFIX_BITS` (4) and
+  `HIGH_BAND_SUBFRAMES_PER_FRAME` (4) for downstream consumers; new
+  `HighBandSubFrameIndices` struct carrying per-sub-frame
+  `excitation_gain_index` (u8) and `excitation_vq_index` (u128,
+  sized for mode 4's 80-bit max).
+- Round 5: typed `WidebandBodyError::Underflow(BitError)` +
+  `ReservedHighRate(u8)` errors with `From<BitError>` conversion;
+  new `Error::Wideband(WidebandBodyError)` top-level envelope
+  variant + `From<WidebandBodyError>` plumbing.
+- Round 5: 21 new unit tests in `src/wideband.rs` (87 unit tests
+  total, up from 66) covering Table 10.1 structural sanity (five
+  columns, mode IDs match index, totals match field breakdown, totals
+  match the manual's verbatim `Total` row), per-column field-width
+  assertions (LSP / excitation gain / excitation VQ), mode 0 silent
+  high-band with empty body, mode 4 widest-fields round-trip, mode 1
+  no-innovation-VQ assertion, truncated-frame underflow diagnosis,
+  reserved-high-rate dispatch (modes 5..=7), out-of-3-bit-range
+  rejection, and the wideband-flag-cleared surfacing.
+- Round 5: 89 tests total (87 unit + 2 integration), up from 68 in
+  round 4.
 
 ### Erased
 
