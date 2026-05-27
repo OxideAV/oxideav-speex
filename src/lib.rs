@@ -29,7 +29,19 @@
 //!   opaque payload. Table 5.1 itself is staged as the public
 //!   [`INBAND_TABLE_5_1`] array indexed by code value. The §5.5 path
 //!   needs no CELP companion tables — it is bit-stream framing only.
-//! * **Round 5** (this commit) — the wideband high-band sub-mode
+//! * **Round r165** (this commit) — typed packet → frame iterator
+//!   composing the round-2..5 primitives end-to-end. See
+//!   [`PacketFrames`], [`PacketFrame`], and the [`parse_packet`]
+//!   convenience that returns a `Vec<PacketFrame>`. Walks a Speex
+//!   packet body per §5.5 ("Sometimes it is desirable to pack more
+//!   than one frame per packet … it is possible to include a
+//!   terminator code. That terminator consists of the code 15
+//!   (decimal) encoded with 5 bits"), dispatching each successive
+//!   5-bit prefix into a CELP frame, a wideband narrowband+high-band
+//!   pair, a §5.5 in-band signalling message, or a mode-13 custom
+//!   in-band message, and terminating cleanly on mode 15 or on
+//!   <5-bit padding tail.
+//! * **Round 5** — the wideband high-band sub-mode
 //!   table from §10.4 / Table 10.1 (modes 0..=4, 5 columns) plus a
 //!   high-band frame-body bit-reader. A wideband packet is the
 //!   concatenation of an embedded narrowband frame (round 3) followed
@@ -51,6 +63,7 @@ mod bitreader;
 mod frame;
 mod header;
 mod narrowband_body;
+mod packet;
 mod signalling;
 mod submode;
 mod wideband;
@@ -65,6 +78,7 @@ pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
     PITCH_PERIOD_MIN,
 };
+pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
 pub use signalling::{
     inband_code_spec, CustomInbandMessage, InbandCodeSpec, InbandKind, InbandMessage,
     SignallingError, CUSTOM_INBAND_MAX_BYTES, CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS,
@@ -99,6 +113,8 @@ pub enum Error {
     /// A wideband high-band frame body failed to parse — see
     /// [`WidebandBodyError`].
     Wideband(WidebandBodyError),
+    /// A whole-packet walk failed mid-frame — see [`PacketError`].
+    Packet(PacketError),
 }
 
 impl core::fmt::Display for Error {
@@ -113,6 +129,7 @@ impl core::fmt::Display for Error {
             Error::NarrowbandBody(e) => write!(f, "oxideav-speex: {}", e),
             Error::Signalling(e) => write!(f, "oxideav-speex: {}", e),
             Error::Wideband(e) => write!(f, "oxideav-speex: {}", e),
+            Error::Packet(e) => write!(f, "oxideav-speex: {}", e),
         }
     }
 }
@@ -126,6 +143,7 @@ impl std::error::Error for Error {
             Error::NarrowbandBody(e) => Some(e),
             Error::Signalling(e) => Some(e),
             Error::Wideband(e) => Some(e),
+            Error::Packet(e) => Some(e),
         }
     }
 }
@@ -157,6 +175,12 @@ impl From<SignallingError> for Error {
 impl From<WidebandBodyError> for Error {
     fn from(e: WidebandBodyError) -> Self {
         Error::Wideband(e)
+    }
+}
+
+impl From<PacketError> for Error {
+    fn from(e: PacketError) -> Self {
+        Error::Packet(e)
     }
 }
 

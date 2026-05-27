@@ -167,13 +167,73 @@ high-band LSP MSVQ codebook (level-1 + level-2, both 6-bit per §10.1)
 and the per-mode high-band innovation codebooks are also in the
 libspeex `*_table.c` files and remain #969-blocked.
 
+**Round r165** (this commit) adds the **typed packet → frame
+iterator** that composes the round-2 / 3 / 4 / r160 primitives
+end-to-end without introducing any codebook-dependent logic:
+
+- New module `src/packet.rs` with public [`PacketFrames`] iterator,
+  [`PacketFrame`] sum type, [`PacketError`] envelope, and a
+  [`parse_packet`] convenience that returns `Vec<PacketFrame>`.
+- Walks a Speex packet body per §5.5's *"Sometimes it is desirable
+  to pack more than one frame per packet … it is possible to
+  include a terminator code. That terminator consists of the code
+  15 (decimal) encoded with 5 bits, as shown in Table 9.2 … calling
+  speex_bits_write automatically inserts the terminator so as to
+  fill the last byte."* — dispatching each successive 5-bit prefix
+  into:
+  * a regular narrowband CELP frame
+    (`PacketFrame::Narrowband { header, body }`),
+  * a wideband narrowband+high-band pair
+    (`PacketFrame::Wideband { header, narrowband, high_band_header,
+    high_band }`) when the narrowband prefix's wideband flag is set —
+    per §10.4 *"the entire narrowband frame is packed before the
+    high-band is encoded"*,
+  * a §5.5 in-band signalling message
+    (`PacketFrame::InbandSignalling { header, message }`),
+  * a §5.5 custom in-band message
+    (`PacketFrame::CustomInband { header, message }`),
+  * a mode-15 terminator (yields `None` and halts iteration).
+- Treats `< NARROWBAND_FRAME_PREFIX_BITS` of remaining bits as
+  end-of-packet padding (clean halt, no error) — matches the §5.5
+  trailing-pad convention.
+- Surfaces a `PacketError::Wideband(ReservedHighRate(id))` and halts
+  iteration when the high-band 3-bit mode field falls in `5..=7`
+  (the Table 10.1 docs gap), letting the caller inspect what
+  remains via [`PacketFrames::remaining_bits`].
+- Implements [`std::iter::Iterator`] directly on `PacketFrames<'_>`,
+  so combinators (`filter`, `count`, `collect`) work naturally.
+- New top-level `Error::Packet(PacketError)` envelope variant +
+  `From<PacketError>` plumbing.
+- 19 new unit tests in `src/packet.rs` (108 unit tests total, up
+  from 89) covering empty buffer, terminator-only packet, single
+  silence frame + padding, two-silence + terminator multi-frame
+  packet, in-band signalling intermixed with CELP, custom in-band
+  size-0 + silence, reserved-mode rejection, truncated-body
+  underflow, error-then-None invariant, wideband silence frame
+  round-trip, reserved-high-rate dispatch, and packet structural
+  combinator usage.
+- New integration test `tests/packet_iterator_fixture.rs` (2 tests)
+  walks every audio packet of the round-3 `speexenc`-encoded
+  narrowband fixture through `PacketFrames` and asserts (a) every
+  packet yields ≥ 1 narrowband frame of the expected mode 5, and
+  (b) after iteration halts every packet has < 5 trailing bits
+  (the §5.5 padding tail). 112 tests total (108 unit + 4
+  integration), up from 91 in round 5.
+
+This is composition only — no #969-blocked tables are touched. The
+iterator's variants carry the same raw bit-index payloads that the
+underlying primitives already produced; once the CELP codebooks
+land, the variant payloads grow decoded values, but the dispatch
+structure stays.
+
 ### Coverage estimate
 
-~16 % of the Speex codec surface (Ogg stream header + per-frame
+~18 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
-in-band signalling body parser for modes 13 / 14; codebook lookup
+in-band signalling body parser for modes 13 / 14 + typed packet →
+frame iterator composing the above end-to-end; codebook lookup
 (narrowband LSP/pitch/innovation + high-band LSP MSVQ/innovation) +
 LSP→LPC + pitch / innovation synthesis + ultra-wideband framing +
 encoder pending).

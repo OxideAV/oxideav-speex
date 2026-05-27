@@ -160,6 +160,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejection, and the wideband-flag-cleared surfacing.
 - Round 5: 89 tests total (87 unit + 2 integration), up from 68 in
   round 4.
+- Round r165: typed packet → frame iterator composing the
+  round-2 / 3 / 4 / r160 primitives end-to-end per *The Speex Codec
+  Manual* §5.5 — `PacketFrames::new(buf)` yields one
+  `PacketFrame` per frame in the body and halts cleanly on a mode-15
+  terminator or on `< NARROWBAND_FRAME_PREFIX_BITS` of remaining
+  padding. New `parse_packet(buf) -> Vec<PacketFrame>` convenience.
+- Round r165: `PacketFrame` enum with `Narrowband` / `Wideband` /
+  `InbandSignalling` / `CustomInband` variants — each carrying the
+  5-bit prefix alongside the typed body. Wideband variant captures
+  both halves (narrowband body + high-band header + high-band body)
+  per §10.4 *"the entire narrowband frame is packed before the
+  high-band is encoded"*.
+- Round r165: typed `PacketError` envelope (`Frame` /
+  `NarrowbandBody` / `Wideband` / `Signalling` / `UnexpectedEnd`)
+  with `From` conversions from every underlying error type; new
+  top-level `Error::Packet(PacketError)` variant + `From<PacketError>`
+  plumbing.
+- Round r165: iterator surfaces a clean halt for the §5.5
+  terminator + padding tail, and a `PacketError::Wideband(
+  ReservedHighRate(id))` when the high-band 3-bit mode field lands
+  in `5..=7` (the Table 10.1 docs gap).
+- Round r165: 19 new unit tests in `src/packet.rs` (108 unit tests
+  total, up from 89) covering empty buffer, terminator-only packet,
+  single silence frame + padding, multi-frame packets, in-band
+  signalling intermixed with CELP, custom in-band size-0 + silence,
+  reserved-mode rejection, truncated-body underflow, error-then-None
+  iterator invariant, wideband-silence round-trip, reserved-high-rate
+  dispatch, and `Iterator` combinator usage (`filter` / `count`).
+- Round r165: new integration test `tests/packet_iterator_fixture.rs`
+  (2 tests) walks every audio packet of the existing
+  `speexenc`-encoded narrowband fixture through `PacketFrames` and
+  asserts every packet yields the expected mode-5 narrowband frame,
+  the iterator halts cleanly, and `< 5` bits of trailing padding
+  remain after the terminator.
+- Round r165: 112 tests total (108 unit + 4 integration), up from
+  91 in round 5.
 
 ### Erased
 
