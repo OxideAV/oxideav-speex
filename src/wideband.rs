@@ -46,10 +46,9 @@
 //! [`WidebandHighBandBody::parse`] routine that walks Table 10.1's
 //! columns in the order documented in §10.4. **No** codebook lookup —
 //! the high-band LSP MSVQ codebook + the high-band innovation codebook
-//! both live in the libspeex `*_table.c` files and are #969-blocked
-//! until staged under `docs/audio/speex/`. This round stops at the raw
-//! bit-index layer, matching the precedent set by [`crate::narrowband_body`]
-//! in round 3.
+//! are #969-blocked until staged under `docs/audio/speex/`. This round
+//! stops at the raw bit-index layer, matching the precedent set by
+//! [`crate::narrowband_body`] in round 3.
 //!
 //! ## Spec gaps noted (forwarded to follow-up rounds)
 //!

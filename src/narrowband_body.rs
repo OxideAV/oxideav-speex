@@ -64,10 +64,9 @@
 //! Mapping `lsp_index` → ten LSP coefficients, and `innovation_vq_index`
 //! → a 40-sample sub-vector innovation signal, both require the Speex
 //! CELP **companion table** files (LSP VQ codebooks, innovation
-//! codebooks, pitch-gain VQ codebooks). Those tables live in the
-//! `libspeex` distribution as `*_table.c` files; they are not yet
-//! staged under `docs/audio/speex/` for clean-room transcription. Until
-//! they are, this module stops at the raw bit-index layer.
+//! codebooks, pitch-gain VQ codebooks). Those tables are not yet staged
+//! under `docs/audio/speex/` for clean-room transcription (tracked as
+//! #969). Until they are, this module stops at the raw bit-index layer.
 
 use crate::bitreader::{BitError, BitReader};
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
