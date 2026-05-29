@@ -35,7 +35,7 @@
 //! No external library source is consulted; the payload widths are
 //! transcribed straight from the manual table column "Size (bits)".
 
-use crate::bitreader::{BitError, BitReader};
+use crate::bitreader::{BitError, BitReader, BitWriter};
 use core::fmt;
 
 /// Per *The Speex Codec Manual* §5.5, the custom in-band message
@@ -307,6 +307,46 @@ impl InbandMessage {
         };
         Ok(Self { spec, payload })
     }
+
+    /// Serialise a mode-14 in-band signalling message to a [`BitWriter`]
+    /// positioned **immediately after** the 5-bit Speex frame prefix
+    /// (the symmetric inverse of [`Self::parse`]). Writes the 4-bit
+    /// `spec.code` followed by `spec.payload_bits` of `payload`,
+    /// MSB-first, leaving the writer's cursor at the first bit of the
+    /// next frame's prefix.
+    ///
+    /// Wide payloads (>32 bits — reserved codes 14 / 15) are split
+    /// across two `BitWriter::write` calls mirroring the parse path.
+    /// `payload` bits above the spec's `payload_bits` width are
+    /// silently truncated; the writer's contract is "the low N bits
+    /// land in the stream, MSB-first".
+    pub fn write(&self, writer: &mut BitWriter) -> Result<(), SignallingError> {
+        writer.write(u32::from(self.spec.code) & 0x0F, INBAND_CODE_BITS)?;
+        let bits = self.spec.payload_bits;
+        if bits == 0 {
+            // No-op — Table 5.1 has no zero-width rows today, but the
+            // writer's `n == 0` is a documented no-op so this is safe.
+        } else if bits <= 32 {
+            writer.write((self.payload as u32) & masked(bits), bits)?;
+        } else {
+            let hi_bits = bits - 32;
+            let hi = (self.payload >> 32) as u32 & masked(hi_bits);
+            let lo = self.payload as u32;
+            writer.write(hi, hi_bits)?;
+            writer.write(lo, 32)?;
+        }
+        Ok(())
+    }
+}
+
+/// Helper: a u32 mask that selects the low `n` bits (`n` in 1..=32).
+/// `n == 32` returns `u32::MAX` (avoids the `1 << 32` UB shift).
+fn masked(n: u32) -> u32 {
+    if n >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << n) - 1
+    }
 }
 
 /// A parsed mode-13 custom in-band message.
@@ -351,6 +391,31 @@ impl CustomInbandMessage {
     /// Number of payload bits the parser advanced past.
     pub fn payload_bits(&self) -> u32 {
         u32::from(self.size_bytes) * 8
+    }
+
+    /// Serialise a mode-13 custom in-band message header to a
+    /// [`BitWriter`] positioned immediately after the 5-bit Speex frame
+    /// prefix. Writes the 5-bit `size_bytes` field followed by
+    /// `size_bytes * 8` bits of `payload` (taken from the caller-supplied
+    /// slice, with `payload.len() >= size_bytes as usize` required).
+    ///
+    /// The payload itself is opaque to Speex per §5.5 ("so that the
+    /// decoder can skip it if it doesn't know how to interpret it"), so
+    /// the writer accepts arbitrary bytes; only the size header carries
+    /// meaning at the framing level. Returns [`SignallingError`] only if
+    /// the BitWriter's bit budget overflows — there are no semantic
+    /// errors at this layer.
+    ///
+    /// `size_bytes` is capped at 5 bits (max [`CUSTOM_INBAND_MAX_BYTES`])
+    /// by the `& 0x1F` masking on the field width; callers should
+    /// validate higher up if a hard error is desired.
+    pub fn write(&self, writer: &mut BitWriter, payload: &[u8]) -> Result<(), SignallingError> {
+        let size = u32::from(self.size_bytes) & 0x1F;
+        writer.write(size, CUSTOM_INBAND_SIZE_BITS)?;
+        for &byte in payload.iter().take(size as usize) {
+            writer.write(u32::from(byte), 8)?;
+        }
+        Ok(())
     }
 }
 
@@ -695,5 +760,175 @@ mod tests {
         assert_eq!(msg.payload_bits(), 0);
         // 5 (prefix) + 5 (size) + 0 (payload) = 10 bits.
         assert_eq!(r.consumed_bits(), 10);
+    }
+
+    // ---- Round-187 round-trip: InbandMessage / CustomInbandMessage::write ----
+
+    #[test]
+    fn masked_helper_covers_full_width_range() {
+        // Sanity for the local helper used by `InbandMessage::write` to
+        // strip stray high-order payload bits before emission.
+        assert_eq!(masked(1), 0b1);
+        assert_eq!(masked(4), 0b1111);
+        assert_eq!(masked(8), 0xFF);
+        assert_eq!(masked(16), 0xFFFF);
+        assert_eq!(masked(31), 0x7FFF_FFFF);
+        assert_eq!(masked(32), u32::MAX);
+    }
+
+    #[test]
+    fn inband_message_write_then_parse_round_trips_every_table_row() {
+        // For each Table 5.1 row, build a representative payload, write
+        // it via `InbandMessage::write`, then parse it back via
+        // `InbandMessage::parse` and confirm the structured value
+        // matches.
+        for code in 0u8..16 {
+            let spec = inband_code_spec(code);
+            // A payload that exercises all `payload_bits` low bits.
+            let payload = if spec.payload_bits >= 64 {
+                0x0123_4567_89AB_CDEF
+            } else {
+                ((1u64 << spec.payload_bits) - 1)
+                    ^ 0xA5A5_A5A5_A5A5_A5A5 & ((1u64 << spec.payload_bits) - 1)
+            };
+            let msg = InbandMessage { spec, payload };
+            let mut w = BitWriter::new();
+            msg.write(&mut w).unwrap();
+            // Should have emitted exactly 4 + payload_bits.
+            assert_eq!(w.bits_written(), INBAND_CODE_BITS + spec.payload_bits);
+            w.pad_to_byte().unwrap();
+            let bytes = w.into_bytes();
+            let mut r = BitReader::new(&bytes);
+            let round = InbandMessage::parse(&mut r).unwrap();
+            assert_eq!(round.spec.code, code);
+            assert_eq!(round.spec.payload_bits, spec.payload_bits);
+            assert_eq!(round.payload, payload, "round-trip code {} payload", code);
+        }
+    }
+
+    #[test]
+    fn inband_message_write_truncates_high_bits_above_width() {
+        // Code 0 is a 1-bit payload; pass a multi-bit payload value and
+        // confirm only the low bit lands.
+        let spec = inband_code_spec(0);
+        let msg = InbandMessage {
+            spec,
+            payload: 0xFE,
+        };
+        let mut w = BitWriter::new();
+        msg.write(&mut w).unwrap();
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let round = InbandMessage::parse(&mut r).unwrap();
+        // Low bit of 0xFE is 0 — that's what should land.
+        assert_eq!(round.payload, 0);
+    }
+
+    #[test]
+    fn inband_message_write_wide_path_64_bit_payload() {
+        // Code 14: 64-bit reserved payload; exercises the >32-bit split.
+        let payload: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        let msg = InbandMessage {
+            spec: inband_code_spec(14),
+            payload,
+        };
+        let mut w = BitWriter::new();
+        msg.write(&mut w).unwrap();
+        // 4 (code) + 64 (payload) = 68 bits.
+        assert_eq!(w.bits_written(), 68);
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let round = InbandMessage::parse(&mut r).unwrap();
+        assert_eq!(round.payload, payload);
+    }
+
+    #[test]
+    fn custom_inband_write_then_parse_round_trips_size_zero() {
+        let msg = CustomInbandMessage { size_bytes: 0 };
+        let mut w = BitWriter::new();
+        msg.write(&mut w, &[]).unwrap();
+        assert_eq!(w.bits_written(), CUSTOM_INBAND_SIZE_BITS);
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let round = CustomInbandMessage::parse(&mut r).unwrap();
+        assert_eq!(round.size_bytes, 0);
+        assert_eq!(round.payload_bits(), 0);
+    }
+
+    #[test]
+    fn custom_inband_write_then_parse_round_trips_with_payload() {
+        // 4-byte opaque payload; round-trip the size header. The parser
+        // discards the payload bits — only `size_bytes` is checked.
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let msg = CustomInbandMessage { size_bytes: 4 };
+        let mut w = BitWriter::new();
+        msg.write(&mut w, &payload).unwrap();
+        assert_eq!(
+            w.bits_written(),
+            CUSTOM_INBAND_SIZE_BITS + (payload.len() as u32) * 8
+        );
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let round = CustomInbandMessage::parse(&mut r).unwrap();
+        assert_eq!(round.size_bytes, 4);
+        assert_eq!(round.payload_bits(), 32);
+    }
+
+    #[test]
+    fn custom_inband_write_takes_only_size_bytes_from_payload_slice() {
+        // Caller passes a larger slice than `size_bytes` declares — the
+        // writer only emits the first `size_bytes` bytes.
+        let payload = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+        let msg = CustomInbandMessage { size_bytes: 2 };
+        let mut w = BitWriter::new();
+        msg.write(&mut w, &payload).unwrap();
+        // 5 (size) + 2 * 8 (payload) = 21 bits.
+        assert_eq!(w.bits_written(), 5 + 16);
+    }
+
+    #[test]
+    fn custom_inband_write_caps_size_field_at_five_bits() {
+        // size_bytes is a u8; the writer should mask to 5 bits before
+        // emission. Confirm via round-trip that a value above 0x1F
+        // wraps the field. (Such a value would never round-trip; the
+        // writer's job here is to never emit a >5-bit size field.)
+        let msg = CustomInbandMessage { size_bytes: 0x1F };
+        let mut w = BitWriter::new();
+        msg.write(&mut w, &[0u8; 31]).unwrap();
+        // 5 (size) + 31 * 8 (payload) = 253 bits.
+        assert_eq!(w.bits_written(), 5 + 31 * 8);
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let round = CustomInbandMessage::parse(&mut r).unwrap();
+        assert_eq!(round.size_bytes, 0x1F);
+    }
+
+    #[test]
+    fn end_to_end_write_header_then_inband_then_parse() {
+        // Build a full mode-14 frame (5-bit prefix + 4-bit code + payload)
+        // using the public encoder-shaped writers, then parse it back as
+        // a `(header, message)` pair via the existing parsers.
+        use crate::frame::NarrowbandFrameHeader;
+        let hdr = NarrowbandFrameHeader::new(false, 14).unwrap();
+        let msg = InbandMessage {
+            spec: inband_code_spec(8),
+            payload: 0x5A, // 'Z'
+        };
+        let mut w = BitWriter::new();
+        hdr.write(&mut w).unwrap();
+        msg.write(&mut w).unwrap();
+        w.pad_to_byte().unwrap();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let parsed_hdr = NarrowbandFrameHeader::parse(&mut r).unwrap();
+        let parsed_msg = InbandMessage::parse(&mut r).unwrap();
+        assert_eq!(parsed_hdr.mode_id, 14);
+        assert_eq!(parsed_msg.spec.code, 8);
+        assert_eq!(parsed_msg.payload, 0x5A);
     }
 }

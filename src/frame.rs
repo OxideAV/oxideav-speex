@@ -30,7 +30,7 @@
 //! [`NarrowbandFrameHeader`] + dispatch the mode ID through
 //! [`crate::submode::Submode`]. No CELP body parsing yet.
 
-use crate::bitreader::{BitError, BitReader};
+use crate::bitreader::{BitError, BitReader, BitWriter};
 use crate::submode::Submode;
 use core::fmt;
 
@@ -112,6 +112,39 @@ impl NarrowbandFrameHeader {
         let mut r = BitReader::new(buf);
         let h = Self::parse(&mut r)?;
         Ok((h, r))
+    }
+
+    /// Build a header value from a (wideband, mode_id) pair, dispatching
+    /// the mode ID through [`Submode::for_id`]. Returns
+    /// [`FrameError::ReservedMode`] for IDs in `9..=12`, matching the
+    /// rejection [`Self::parse`] would issue if it read the same bits
+    /// off the wire.
+    ///
+    /// This is the constructor an encoder calls before [`Self::write`]
+    /// — round 2's [`Self::parse`] is the inverse mapping for the
+    /// reader side. The two are designed to round-trip:
+    /// `parse(write(header))` recovers `header`.
+    pub fn new(wideband: bool, mode_id: u8) -> Result<Self, FrameError> {
+        let submode = Submode::for_id(mode_id).ok_or(FrameError::ReservedMode(mode_id))?;
+        Ok(Self {
+            wideband,
+            mode_id,
+            submode,
+        })
+    }
+
+    /// Serialise the 5-bit Speex frame prefix (1-bit wideband flag +
+    /// 4-bit mode ID, MSB-first) to a [`BitWriter`]. Inverse operation
+    /// of [`Self::parse`]: a buffer built by `write(header)` and then
+    /// parsed by [`Self::parse`] yields a header equal to the original.
+    ///
+    /// `mode_id` is masked to its low 4 bits before emission so the
+    /// caller cannot inadvertently emit a 5-bit value. The wideband
+    /// flag is the single high bit of the prefix.
+    pub fn write(&self, writer: &mut BitWriter) -> Result<(), FrameError> {
+        writer.write(u32::from(self.wideband as u8), 1)?;
+        writer.write(u32::from(self.mode_id) & 0x0F, 4)?;
+        Ok(())
     }
 }
 
@@ -226,5 +259,113 @@ mod tests {
         assert!(h.wideband);
         assert_eq!(h.mode_id, 0b0101);
         assert_eq!(r.read(3).unwrap(), 0b110);
+    }
+
+    // ---- Round-187 round-trip: NarrowbandFrameHeader::write ----
+
+    #[test]
+    fn new_constructs_header_for_celp_mode() {
+        let h = NarrowbandFrameHeader::new(false, 5).expect("mode 5 is valid CELP");
+        assert!(!h.wideband);
+        assert_eq!(h.mode_id, 5);
+        match h.submode {
+            Submode::Celp(s) => assert_eq!(s.mode_id, 5),
+            other => panic!("expected CELP, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn new_rejects_reserved_mode_ids() {
+        for id in 9u8..=12 {
+            match NarrowbandFrameHeader::new(false, id) {
+                Err(FrameError::ReservedMode(got)) => assert_eq!(got, id),
+                other => panic!("mode {} should be reserved, got {:?}", id, other),
+            }
+        }
+    }
+
+    #[test]
+    fn new_dispatches_signalling_slots() {
+        assert_eq!(
+            NarrowbandFrameHeader::new(false, 13).unwrap().submode,
+            Submode::CustomInband
+        );
+        assert_eq!(
+            NarrowbandFrameHeader::new(false, 14).unwrap().submode,
+            Submode::InbandSignalling
+        );
+        assert_eq!(
+            NarrowbandFrameHeader::new(false, 15).unwrap().submode,
+            Submode::Terminator
+        );
+    }
+
+    #[test]
+    fn write_then_parse_round_trips_all_celp_modes() {
+        use crate::bitreader::BitWriter;
+        for id in 0u8..=8 {
+            for wb in [false, true] {
+                let h = NarrowbandFrameHeader::new(wb, id).unwrap();
+                let mut w = BitWriter::new();
+                h.write(&mut w).unwrap();
+                w.pad_to_byte().unwrap();
+                let bytes = w.into_bytes();
+                let (round, _) = NarrowbandFrameHeader::parse_bytes(&bytes).unwrap();
+                assert_eq!(round, h, "round-trip failed for (wb={}, id={})", wb, id);
+            }
+        }
+    }
+
+    #[test]
+    fn write_then_parse_round_trips_signalling_slots() {
+        use crate::bitreader::BitWriter;
+        for id in [13u8, 14, 15] {
+            let h = NarrowbandFrameHeader::new(false, id).unwrap();
+            let mut w = BitWriter::new();
+            h.write(&mut w).unwrap();
+            w.pad_to_byte().unwrap();
+            let bytes = w.into_bytes();
+            let (round, _) = NarrowbandFrameHeader::parse_bytes(&bytes).unwrap();
+            assert_eq!(round.mode_id, id);
+            assert_eq!(round.submode, h.submode);
+        }
+    }
+
+    #[test]
+    fn write_emits_exactly_five_bits() {
+        use crate::bitreader::BitWriter;
+        let h = NarrowbandFrameHeader::new(true, 7).unwrap();
+        let mut w = BitWriter::new();
+        h.write(&mut w).unwrap();
+        assert_eq!(w.bits_written(), NARROWBAND_FRAME_PREFIX_BITS);
+    }
+
+    #[test]
+    fn write_emits_high_bit_for_wideband_flag() {
+        use crate::bitreader::BitWriter;
+        let h = NarrowbandFrameHeader::new(true, 0).unwrap();
+        let mut w = BitWriter::new();
+        h.write(&mut w).unwrap();
+        w.pad_to_byte().unwrap();
+        // wb=1, mode=0 → bits "1_0000_000" = 0b1000_0000 = 0x80
+        assert_eq!(w.as_bytes(), &[0x80]);
+    }
+
+    #[test]
+    fn write_masks_mode_id_to_four_bits() {
+        // mode_id high bits above 0x0F should be ignored on emission.
+        // (We can't actually build such a header via `new`, but the
+        // contract holds for any value of the field.)
+        use crate::bitreader::BitWriter;
+        let h = NarrowbandFrameHeader {
+            wideband: false,
+            mode_id: 0xFF, // synthetic — would never arise from `new`
+            submode: Submode::Terminator,
+        };
+        let mut w = BitWriter::new();
+        h.write(&mut w).unwrap();
+        w.pad_to_byte().unwrap();
+        // Only the low 4 bits land: 0_1111_000 = 0b0111_1000 = 0x78
+        assert_eq!(w.as_bytes(), &[0x78]);
     }
 }

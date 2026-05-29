@@ -51,6 +51,22 @@
 //!   and [`WidebandHighBandBody`]. As with round 3 the body lands
 //!   only the raw bit indices — the high-band LSP MSVQ codebook +
 //!   innovation codebook are #969-blocked until staged.
+//! * **Round r187** (this commit) — structured `write` methods
+//!   symmetric to the existing `parse` paths for the three
+//!   framing-level types whose layout is fully defined by the
+//!   manual without any CELP companion-table material:
+//!   [`NarrowbandFrameHeader::write`] emits the 5-bit prefix
+//!   (1-bit wideband flag + 4-bit mode ID per §9.3);
+//!   [`InbandMessage::write`] emits the 4-bit Table 5.1 code +
+//!   1/4/8/16/32/64-bit payload (with the same >32-bit split path
+//!   the parser uses for reserved codes 14 / 15);
+//!   [`CustomInbandMessage::write`] emits the 5-bit `size_bytes`
+//!   per §5.5 + opaque payload bytes from a caller-supplied
+//!   slice. A new [`NarrowbandFrameHeader::new`] constructor is
+//!   the encoder-side counterpart of the round-2 parser's
+//!   reserved-mode rejection. All three writers depend only on
+//!   the round-179 [`BitWriter`] + existing dispatch tables —
+//!   no companion-table material is touched.
 //!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`].

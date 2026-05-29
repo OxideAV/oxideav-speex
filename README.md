@@ -257,19 +257,59 @@ The `BitWriter` itself depends on no companion tables and is
 therefore #969-independent — it slots in below the eventual CELP
 encoder.
 
+**Round r187** (this commit) adds the **structured `write` methods
+symmetric to the existing `parse` paths** for the three framing-level
+types whose layout is fully published in the staged manual without
+any CELP companion-table material:
+
+- `NarrowbandFrameHeader::write` emits the 5-bit prefix (1-bit
+  wideband flag + 4-bit mode ID, MSB-first per §9.3). A new
+  `NarrowbandFrameHeader::new(wideband, mode_id)` constructor
+  dispatches the mode ID through `Submode::for_id` and rejects the
+  reserved range 9..=12 via `FrameError::ReservedMode` — the
+  encoder-side counterpart of the round-2 parser's rejection on
+  the same input.
+- `InbandMessage::write` emits the 4-bit Table 5.1 code followed by
+  the per-row payload width (1 / 4 / 8 / 16 / 32 / 64 bits). The
+  wide path (>32 bits, reserved codes 14 / 15) splits the payload
+  across two `BitWriter::write` calls mirroring the parser's split.
+  Payload bits above the spec'd width are masked off before
+  emission.
+- `CustomInbandMessage::write` emits the 5-bit `size_bytes` field
+  per §5.5 followed by `size_bytes` opaque payload bytes taken from
+  a caller-supplied slice. `size_bytes` is masked to 5 bits so the
+  field width is preserved even if the caller supplies a value
+  above 31.
+
+All three `write` methods are inverse operations of the existing
+`parse` methods. The round-trip invariant — parse(write(value)) ==
+value — is asserted by 17 new unit tests, including a sweep over
+every Table 5.1 code (1..=64 bit payloads, including the wide-path
+split) and over every documented CELP / signalling mode ID with
+both wideband-flag values. An end-to-end "write header + write
+inband message → parse back" test exercises the round-2
+dispatcher against synthetic bytes assembled by the new writers.
+
+The writers depend only on the round-179 `BitWriter`, the round-2
+`Submode::for_id` dispatch, and the round-4 Table 5.1 staging.
+**No** CELP companion-table material is touched.
+
 ### Coverage estimate
 
-~19 % of the Speex codec surface (Ogg stream header + per-frame
+~21 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
 in-band signalling body parser for modes 13 / 14 + typed packet →
 frame iterator composing the above end-to-end + MSB-first
 `BitWriter` covering the encoder's bit-sink side of the symmetry
-with `BitReader`; codebook lookup (narrowband LSP/pitch/innovation
-+ high-band LSP MSVQ/innovation) + LSP→LPC + pitch / innovation
-synthesis + ultra-wideband framing + the encoder's higher layers
-above the bit-sink pending).
+with `BitReader` + structured `write` methods for the three
+framing-level types whose layout is published without any
+companion-table material; codebook lookup (narrowband
+LSP/pitch/innovation + high-band LSP MSVQ/innovation) + LSP→LPC +
+pitch / innovation synthesis + ultra-wideband framing + the CELP
+frame-body writer pending the same companion-table material as
+the body reader).
 
 ### Spec material consulted
 

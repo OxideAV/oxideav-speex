@@ -220,6 +220,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   pre-allocation, and the three reader+writer round-trip invariants.
 - Round r179: 127 tests total (123 unit + 4 integration), up from
   112 in round r165.
+- Round r187: encoder-side `write` methods symmetric to the existing
+  `parse` paths for the framing-level types whose layout is fully
+  defined by the manual without any CELP companion tables:
+  `NarrowbandFrameHeader::write` (5-bit wideband flag + mode ID per
+  §9.3), `InbandMessage::write` (4-bit Table 5.1 code + 1/4/8/16/32/64
+  payload bits, with the same >32-bit split path the parser uses for
+  reserved codes 14/15), and `CustomInbandMessage::write` (5-bit
+  `size_bytes` per §5.5 + opaque payload bytes taken from a
+  caller-supplied slice). All three writers are the inverse operations
+  of the corresponding parsers and pass round-trip tests.
+- Round r187: new `NarrowbandFrameHeader::new(wideband, mode_id)`
+  constructor that dispatches the mode ID through `Submode::for_id`
+  and rejects the reserved range 9..=12 — the encoder-side counterpart
+  of the round-2 parser's reserved-mode rejection.
+- Round r187: 17 new unit tests (140 unit tests total, up from 123
+  in round r179) covering header round-trip for every documented mode
+  ID with both wideband-flag values, the three §5.5 signalling-slot
+  dispatches, exact-5-bit emission, high-bit masking of mode-ID,
+  round-trip for every Table 5.1 in-band code (including the >32-bit
+  split path for reserved codes), payload-bit truncation above the
+  declared width, custom in-band size-zero and size-31 boundary
+  cases, payload-slice over-supply tolerance, and an end-to-end
+  "write header + write inband message → parse back" path that
+  exercises the round-2 dispatcher's reader-side accept against the
+  writer-side emit.
+- Round r187: 144 tests total (140 unit + 4 integration), up from
+  127 in round r179.
 
 ### Erased
 
