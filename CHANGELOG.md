@@ -196,6 +196,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   remain after the terminator.
 - Round r165: 112 tests total (108 unit + 4 integration), up from
   91 in round 5.
+- Round r179: public `BitWriter` MSB-first bit sink — the symmetric
+  companion to `BitReader`, exposing `new()` / `with_capacity()` /
+  `write_bit()` / `write(value, n)` / `pad_to_byte()` /
+  `bits_written()` / `bits_left_in_last_byte()` / `is_byte_aligned()`
+  / `as_bytes()` / `into_bytes()`. Defining contract: the writer
+  produces a buffer the `BitReader` round-trips back to the original
+  `(value, n)` pairs in the same order — proven by three round-trip
+  tests (short curated sequence, per-bit, and 256-step LCG-driven
+  random pattern). `BitError::TooWide(n)` is reused for `n > 32` so
+  the writer's error envelope matches the reader's.
+- Round r179: cfg-test-only `BitPacker` helper that the `packet`
+  module had been using to assemble synthetic Speex packets has been
+  retired in favour of the public `BitWriter`. The conversion is
+  behaviour-preserving — every existing `packet::tests` call site now
+  exercises the same public bit-packing routine an encoder would call.
+- Round r179: 15 new unit tests on `BitWriter` (123 unit tests
+  total, up from 108 in round r165) covering empty-writer state,
+  single-bit MSB-first writes, multi-bit writes, byte-boundary
+  straddling, zero-width no-op, `TooWide` diagnosis, full-`u32`
+  payload, byte-pad-with-zeros, high-bits-above-`n` ignored,
+  `bits_left_in_last_byte()` cursor tracking, `with_capacity()`
+  pre-allocation, and the three reader+writer round-trip invariants.
+- Round r179: 127 tests total (123 unit + 4 integration), up from
+  112 in round r165.
 
 ### Erased
 

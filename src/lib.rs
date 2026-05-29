@@ -68,7 +68,7 @@ mod signalling;
 mod submode;
 mod wideband;
 
-pub use bitreader::{BitError, BitReader};
+pub use bitreader::{BitError, BitReader, BitWriter};
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,

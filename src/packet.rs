@@ -350,62 +350,35 @@ pub fn parse_packet(buf: &[u8]) -> Result<Vec<PacketFrame>, PacketError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitreader::BitReader;
+    use crate::bitreader::{BitReader, BitWriter};
     use crate::signalling::{InbandKind, INBAND_CODE_BITS};
     use crate::submode::Submode;
 
-    // -- Small bit-packing helper for assembling synthetic packets. --
+    // Test helpers — assemble synthetic Speex packet bodies via the
+    // round-179 [`BitWriter`] (the same MSB-first sink the encoder will
+    // eventually consume). Previously these helpers carried a private
+    // `BitPacker` re-implementation of the same logic; that has been
+    // retired in favour of the public writer so the assembly path here
+    // exercises the same code real callers would use.
 
-    /// Tiny MSB-first bit-packer used only inside tests to assemble
-    /// synthetic Speex packet bodies a bit at a time. Mirrors the
-    /// BitReader's bit ordering so packets it builds round-trip.
-    struct BitPacker {
-        buf: Vec<u8>,
-        bits: u32,
-    }
-
-    impl BitPacker {
-        fn new() -> Self {
-            Self {
-                buf: Vec::new(),
-                bits: 0,
-            }
-        }
-
-        fn push(&mut self, value: u64, nbits: u32) {
-            for i in (0..nbits).rev() {
-                let bit = ((value >> i) & 1) as u8;
-                let byte_idx = (self.bits / 8) as usize;
-                let bit_in_byte = 7 - (self.bits % 8);
-                if byte_idx == self.buf.len() {
-                    self.buf.push(0);
-                }
-                self.buf[byte_idx] |= bit << bit_in_byte;
-                self.bits += 1;
-            }
-        }
-
-        fn into_bytes(self) -> Vec<u8> {
-            self.buf
-        }
-    }
-
-    /// Push a narrowband 5-bit prefix (wideband flag + 4-bit mode ID).
-    fn push_prefix(p: &mut BitPacker, wideband: bool, mode: u8) {
-        p.push(u64::from(wideband as u8), 1);
-        p.push(u64::from(mode & 0x0F), 4);
+    /// Convenience wrappers so the existing `push_prefix(&mut p, …)`
+    /// call sites compile unchanged after switching from `BitPacker` to
+    /// `BitWriter`.
+    fn push_prefix(p: &mut BitWriter, wideband: bool, mode: u8) {
+        p.write(u32::from(wideband as u8), 1).unwrap();
+        p.write(u32::from(mode & 0x0F), 4).unwrap();
     }
 
     /// Push a zero-bit body for a given narrowband sub-mode (every bit
     /// of every field is 0 — useful because mode-0 is naturally empty
     /// and other modes can be tested with their "all zero" pattern).
-    fn push_zero_body(p: &mut BitPacker, mode: u8) {
+    fn push_zero_body(p: &mut BitWriter, mode: u8) {
         let s = NarrowbandSubmode::for_id(mode).unwrap();
         let body_bits = u32::from(s.total_bits) - NARROWBAND_FRAME_PREFIX_BITS;
         let mut left = body_bits;
         while left > 0 {
             let chunk = left.min(32);
-            p.push(0, chunk);
+            p.write(0, chunk).unwrap();
             left -= chunk;
         }
     }
@@ -432,11 +405,11 @@ mod tests {
         // Mode 0 frame (5-bit prefix, zero-bit body). Padding fills the
         // remaining 3 bits to a whole byte — should iterate exactly
         // one frame.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 0);
         // 3 padding bits to round to a byte; iterator should treat them
         // as end-of-packet (since <5 bits remain).
-        p.push(0, 3);
+        p.write(0, 3).unwrap();
         let buf = p.into_bytes();
         let mut iter = PacketFrames::new(&buf);
         let f = iter.next().expect("one frame").expect("parses");
@@ -454,11 +427,11 @@ mod tests {
     fn multi_frame_packet_two_silence_then_terminator() {
         // Two mode-0 frames (5 + 5 = 10 bits) + mode-15 terminator
         // (5 bits) = 15 bits → padded to 2 bytes (16 bits) with 1 pad.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 0); // frame 1
         push_prefix(&mut p, false, 0); // frame 2
         push_prefix(&mut p, false, 15); // terminator
-        p.push(0, 1); // pad bit to round to a byte
+        p.write(0, 1).unwrap(); // pad bit to round to a byte
         let buf = p.into_bytes();
 
         let frames = parse_packet(&buf).expect("clean packet");
@@ -479,13 +452,13 @@ mod tests {
         // Frame 2: mode 0 silence. Total = 5 bits.
         // Frame 3: mode 15 terminator. Total = 5 bits.
         // Grand total = 20 bits → 3 bytes (24 bits) with 4 pad.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 14);
-        p.push(0, INBAND_CODE_BITS); // code = 0
-        p.push(1, 1); // value = 1 (enhancement on)
+        p.write(0, INBAND_CODE_BITS).unwrap(); // code = 0
+        p.write(1, 1).unwrap(); // value = 1 (enhancement on)
         push_prefix(&mut p, false, 0);
         push_prefix(&mut p, false, 15);
-        p.push(0, 4); // padding
+        p.write(0, 4).unwrap(); // padding
         let buf = p.into_bytes();
 
         let frames = parse_packet(&buf).expect("clean packet");
@@ -512,12 +485,12 @@ mod tests {
         // Frame 2: mode 0 silence. Total = 5 bits.
         // Terminator: mode 15 = 5 bits. Grand total = 20 bits → 3 bytes
         // with 4 pad.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 13);
-        p.push(0, 5); // size_bytes = 0
+        p.write(0, 5).unwrap(); // size_bytes = 0
         push_prefix(&mut p, false, 0);
         push_prefix(&mut p, false, 15);
-        p.push(0, 4);
+        p.write(0, 4).unwrap();
         let buf = p.into_bytes();
 
         let frames = parse_packet(&buf).expect("clean packet");
@@ -535,9 +508,9 @@ mod tests {
     fn parse_packet_surfaces_reserved_mode_error() {
         // Mode 9 is in §9.3's reserved range; the frame-header parser
         // rejects it.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 9);
-        p.push(0, 3); // pad
+        p.write(0, 3).unwrap(); // pad
         let buf = p.into_bytes();
         let err = parse_packet(&buf).unwrap_err();
         match err {
@@ -550,9 +523,9 @@ mod tests {
     fn parse_packet_surfaces_truncated_body() {
         // Mode 5 (15 kbps) needs 300 bits; give just the 5-bit prefix
         // and one byte of body — far less than required.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 5);
-        p.push(0, 8); // not enough body bits
+        p.write(0, 8).unwrap(); // not enough body bits
         let buf = p.into_bytes();
         let err = parse_packet(&buf).unwrap_err();
         match err {
@@ -565,9 +538,9 @@ mod tests {
     fn iterator_halts_after_error_does_not_yield_more() {
         // Same truncated mode-5 setup — iterator yields exactly one Err
         // then None.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 5);
-        p.push(0, 8);
+        p.write(0, 8).unwrap();
         let buf = p.into_bytes();
         let mut iter = PacketFrames::new(&buf);
         assert!(iter.next().expect("yields error").is_err());
@@ -648,13 +621,13 @@ mod tests {
         // Mode 8 (3.95 kbps, 79 bits/frame): bare 5-bit prefix + 74-bit
         // all-zero body + mode-15 terminator + padding. Make the body
         // all-zero to keep the assembly simple.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 8);
         push_zero_body(&mut p, 8);
         push_prefix(&mut p, false, 15);
         // 79 (mode 8) + 5 (terminator) = 84 bits → 11 bytes (88 bits),
         // 4 pad bits.
-        p.push(0, 4);
+        p.write(0, 4).unwrap();
         let buf = p.into_bytes();
         let frames = parse_packet(&buf).expect("clean");
         assert_eq!(frames.len(), 1);
@@ -670,15 +643,15 @@ mod tests {
         // set, mode 0 (5-bit prefix only, empty body), then high-band
         // prefix (1-bit wb=0 + 3-bit mode=0 → 4 bits), high-band body
         // (mode 0 = zero bits). Total = 5 + 4 = 9 bits, then padding.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, true, 0); // wb=1, mode=0
                                       // narrowband body for mode 0 is 0 bits
                                       // now the high-band 4-bit prefix
-        p.push(0, 1); // hb wideband flag (we just use 0 for silence)
-        p.push(0, 3); // hb mode_id = 0
-                      // hb mode 0 body = 0 bits
+        p.write(0, 1).unwrap(); // hb wideband flag (we just use 0 for silence)
+        p.write(0, 3).unwrap(); // hb mode_id = 0
+                                // hb mode 0 body = 0 bits
         push_prefix(&mut p, false, 15); // terminator
-        p.push(0, 1); // pad to round to bytes
+        p.write(0, 1).unwrap(); // pad to round to bytes
         let buf = p.into_bytes();
 
         let frames = parse_packet(&buf).expect("clean wb-silence packet");
@@ -706,12 +679,12 @@ mod tests {
         // Wideband narrowband prefix with wb=1, mode 0 (empty body),
         // high-band prefix with mode_id = 5 (the reserved-high-rate
         // disposition that has no documented bit budget).
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, true, 0); // wb=1, narrowband mode 0
-        p.push(0, 1); // hb wideband flag
-        p.push(5, 3); // hb mode_id = 5 (reserved-high-rate)
-                      // Pad to byte boundary
-        p.push(0, 7);
+        p.write(0, 1).unwrap(); // hb wideband flag
+        p.write(5, 3).unwrap(); // hb mode_id = 5 (reserved-high-rate)
+                                // Pad to byte boundary
+        p.write(0, 7).unwrap();
         let buf = p.into_bytes();
         let err = parse_packet(&buf).unwrap_err();
         match err {
@@ -722,9 +695,9 @@ mod tests {
 
     #[test]
     fn header_accessor_returns_underlying_prefix() {
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 0);
-        p.push(0, 3);
+        p.write(0, 3).unwrap();
         let buf = p.into_bytes();
         let frames = parse_packet(&buf).unwrap();
         let f = &frames[0];
@@ -735,12 +708,12 @@ mod tests {
     #[test]
     fn iterator_implements_iterator_trait() {
         // Sanity: confirm we can use combinators (filter, count, …).
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 0);
         push_prefix(&mut p, false, 0);
         push_prefix(&mut p, false, 0);
         push_prefix(&mut p, false, 15);
-        p.push(0, 4);
+        p.write(0, 4).unwrap();
         let buf = p.into_bytes();
         let count = PacketFrames::new(&buf).filter(|r| r.is_ok()).count();
         assert_eq!(count, 3);
@@ -763,12 +736,12 @@ mod tests {
         // Total = 5 (prefix) + 4 (code) + 8 (payload) = 17 bits.
         // Mode 15 terminator = 5 bits.
         // Sum = 22 bits → 3 bytes (24 bits), 2 pad bits.
-        let mut p = BitPacker::new();
+        let mut p = BitWriter::new();
         push_prefix(&mut p, false, 14);
-        p.push(8, INBAND_CODE_BITS);
-        p.push(0x41, 8);
+        p.write(8, INBAND_CODE_BITS).unwrap();
+        p.write(0x41, 8).unwrap();
         push_prefix(&mut p, false, 15);
-        p.push(0, 2);
+        p.write(0, 2).unwrap();
         let buf = p.into_bytes();
         let frames = parse_packet(&buf).unwrap();
         assert_eq!(frames.len(), 1);
@@ -784,12 +757,12 @@ mod tests {
     #[test]
     fn bitpacker_round_trips_through_bitreader() {
         // Sanity check on the test helper: pack a known value with
-        // BitPacker, read it back with BitReader, expect equality.
-        let mut p = BitPacker::new();
-        p.push(0b1, 1);
-        p.push(0b1110, 4); // mode_id = 14
-        p.push(0b1000, 4); // code = 8
-        p.push(0x41, 8);
+        // BitWriter, read it back with BitReader, expect equality.
+        let mut p = BitWriter::new();
+        p.write(0b1, 1).unwrap();
+        p.write(0b1110, 4).unwrap(); // mode_id = 14
+        p.write(0b1000, 4).unwrap(); // code = 8
+        p.write(0x41, 8).unwrap();
         let buf = p.into_bytes();
         let mut r = BitReader::new(&buf);
         assert_eq!(r.read(1).unwrap(), 1);

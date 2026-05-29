@@ -226,17 +226,50 @@ underlying primitives already produced; once the CELP codebooks
 land, the variant payloads grow decoded values, but the dispatch
 structure stays.
 
+**Round r179** (this commit) adds the **MSB-first `BitWriter`** —
+the symmetric companion to the round-2 `BitReader`:
+
+- `BitWriter` is the bit sink an encoder needs. It is the inverse
+  operation of `BitReader`: feed it the same `(value, n)` pairs a
+  `BitReader` would emit from a buffer, and the bytes it produces
+  round-trip back through `BitReader` to the same `(value, n)` pairs
+  in the same order. The round-trip invariant is asserted by three
+  tests: a curated short sequence, a per-bit walk, and a 256-step
+  LCG-driven random pattern.
+- API mirrors the reader's: `new()` / `with_capacity(bytes)` /
+  `write_bit(b)` / `write(value, n)` / `bits_written()` /
+  `bits_left_in_last_byte()` / `is_byte_aligned()` / `pad_to_byte()`
+  / `as_bytes()` / `into_bytes()`. The existing `BitError::TooWide(n)`
+  diagnostic is reused for `n > 32` so writer + reader share the
+  same error envelope.
+- The cfg-test `BitPacker` helper that `packet::tests` had been
+  using to assemble synthetic Speex packets is retired in favour of
+  the public `BitWriter`. The conversion is behaviour-preserving;
+  every previously-passing `packet::tests` case now exercises the
+  same public bit-packing routine an encoder would call. This is
+  the first piece of encoder-shaped infrastructure to land in the
+  rebuild.
+- 15 new unit tests on `BitWriter` (123 unit tests total, up from
+  108 in round r165). Test count: 127 (123 unit + 4 integration),
+  up from 112.
+
+The `BitWriter` itself depends on no companion tables and is
+therefore #969-independent — it slots in below the eventual CELP
+encoder.
+
 ### Coverage estimate
 
-~18 % of the Speex codec surface (Ogg stream header + per-frame
+~19 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
 in-band signalling body parser for modes 13 / 14 + typed packet →
-frame iterator composing the above end-to-end; codebook lookup
-(narrowband LSP/pitch/innovation + high-band LSP MSVQ/innovation) +
-LSP→LPC + pitch / innovation synthesis + ultra-wideband framing +
-encoder pending).
+frame iterator composing the above end-to-end + MSB-first
+`BitWriter` covering the encoder's bit-sink side of the symmetry
+with `BitReader`; codebook lookup (narrowband LSP/pitch/innovation
++ high-band LSP MSVQ/innovation) + LSP→LPC + pitch / innovation
+synthesis + ultra-wideband framing + the encoder's higher layers
+above the bit-sink pending).
 
 ### Spec material consulted
 
