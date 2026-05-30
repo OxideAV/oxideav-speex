@@ -6,6 +6,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-speex/releases/tag/v0.0.6) - 2026-05-30
+
+### Other
+
+- r191 fixup: vendor table CSVs into crate, switch include_str paths
+- CELP companion-table accessors (codebooks module)
+- scrub libspeex *_table.c citations in clean-room comments
+- structured write methods symmetric to parse for framing-level types
+- add MSB-first BitWriter, retire test-only BitPacker
+- round r165: typed packet → frame iterator composing rounds 2..r160
+- round 5: wideband high-band sub-mode table + body bit-reader (manual §10.4 / Table 10.1)
+- round 4: §5.5 in-band signalling body parsers (modes 13 + 14)
+- round 3: narrowband CELP frame-body bit-reader (manual §9.1-§9.3 / Table 9.1)
+- round 2: narrowband frame-header + sub-mode table (manual §9.3 / Table 9.1)
+- round 1: Ogg/Speex stream-header packet parser (manual §7.3 Table 7.1)
+- orphan rebuild: clean-room scaffold post 2026-05-19 audit
+
 ### Added
 
 - Round 191: CELP companion-table accessors (`codebooks` module,
