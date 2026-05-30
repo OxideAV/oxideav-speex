@@ -29,7 +29,7 @@
 //!   appends a mode-15 terminator and/or trailing zeros to pad).
 
 use oxideav_speex::{
-    NarrowbandFrameBody, NarrowbandFrameHeader, Submode, NARROWBAND_FRAME_PREFIX_BITS,
+    NarrowbandFrameBody, NarrowbandFrameHeader, NbLspStages, Submode, NARROWBAND_FRAME_PREFIX_BITS,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/nb_440hz_q8.spx");
@@ -169,6 +169,110 @@ fn audio_packets_round_trip_through_narrowband_body_parser() {
         audio.len(),
         "must successfully parse every audio packet"
     );
+}
+
+#[test]
+fn lsp_index_splits_and_reconstructs_for_every_audio_packet() {
+    // Round r194 wiring probe: every real mode-5 (30-bit LSP) frame in
+    // the fixture must produce a non-degenerate per-stage split + a
+    // ten-coefficient Q10 LSP reconstruction. We don't assert specific
+    // PCM-bit-exact values (that requires the LSP→LPC + synthesis path
+    // which lands in later rounds), only structural properties that
+    // hold for any well-formed LSP frame:
+    //
+    //   * The packed `lsp_index` splits into five per-stage 6-bit
+    //     indices, each in 0..64.
+    //   * The reconstruction returns ten coefficients (no panic, no
+    //     None for an in-range 30-bit field).
+    //   * Across many real frames the reconstructed coefficients are
+    //     not all-zero in aggregate — i.e. the staged codebooks are
+    //     contributing actual signal, not silently returning zeros.
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+    let mut nonzero_frames = 0u32;
+    let mut total_frames = 0u32;
+    for (i, pkt) in audio.iter().enumerate() {
+        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header parse");
+        let s = match h.submode {
+            Submode::Celp(s) => s,
+            _ => panic!("packet {}: expected CELP", i),
+        };
+        let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body parse");
+
+        let stages = body.lsp_stages(&s).expect("mode 5 has 30-bit LSP");
+        assert!(stages.stage0 < 64, "packet {} stage0 out of range", i);
+        assert!(stages.low1 < 64, "packet {} low1 out of range", i);
+        assert!(stages.high1 < 64, "packet {} high1 out of range", i);
+        // 30-bit regime → low2 + high2 must both be Some.
+        let low2 = stages.low2.expect("30-bit LSP must carry low2");
+        let high2 = stages.high2.expect("30-bit LSP must carry high2");
+        assert!(low2 < 64, "packet {} low2 out of range", i);
+        assert!(high2 < 64, "packet {} high2 out of range", i);
+
+        let coeffs = body
+            .reconstructed_lsp_q10(&s)
+            .expect("30-bit LSP must reconstruct");
+        assert_eq!(coeffs.len(), 10);
+        if coeffs.iter().any(|&c| c != 0) {
+            nonzero_frames += 1;
+        }
+        total_frames += 1;
+    }
+    assert!(
+        total_frames >= 40,
+        "fixture should contain ≥40 audio frames"
+    );
+    assert!(
+        nonzero_frames * 10 > total_frames * 9,
+        "expected ≥90% of frames to reconstruct non-zero LSPs, got {}/{}",
+        nonzero_frames,
+        total_frames
+    );
+}
+
+#[test]
+fn lsp_stages_are_none_for_silence_mode() {
+    // Direct construction of a silence-mode body: confirm
+    // `lsp_stages` propagates the `LspQuant::None` invariant.
+    use oxideav_speex::{LspQuant, NarrowbandSubmode};
+    let silence = NarrowbandSubmode::for_id(0).unwrap();
+    assert_eq!(silence.lsp, LspQuant::None);
+    // A minimum-byte mode-0 body produces zero indices.
+    let buf = [0u8; 1];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    assert!(body.lsp_stages(&s).is_none());
+    assert!(body.reconstructed_lsp_q10(&s).is_none());
+}
+
+#[test]
+fn lsp_split_round_trip_for_18bit_and_30bit_modes() {
+    // Spot-check the splitter API at both LSP widths. These are
+    // construction-time checks (no fixture needed); they're in the
+    // integration-test file because they exercise the publicly
+    // re-exported `NbLspStages::from_packed`.
+    use oxideav_speex::LspQuant;
+    let s18 = NbLspStages::from_packed((7 << 12) | (11 << 6) | 23, LspQuant::Bits18).unwrap();
+    assert_eq!(s18.stage0, 7);
+    assert_eq!(s18.low1, 11);
+    assert_eq!(s18.high1, 23);
+    assert!(s18.low2.is_none());
+    assert!(s18.high2.is_none());
+
+    let s30 = NbLspStages::from_packed(
+        (1 << 24) | (2 << 18) | (3 << 12) | (4 << 6) | 5,
+        LspQuant::Bits30,
+    )
+    .unwrap();
+    assert_eq!(s30.stage0, 1);
+    assert_eq!(s30.low1, 2);
+    assert_eq!(s30.low2, Some(3));
+    assert_eq!(s30.high1, 4);
+    assert_eq!(s30.high2, Some(5));
 }
 
 #[test]

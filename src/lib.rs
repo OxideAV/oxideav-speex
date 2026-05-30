@@ -81,10 +81,24 @@
 //!   the round-179 [`BitWriter`] + existing dispatch tables —
 //!   no companion-table material was touched at that point.
 //!
+//! * **Round r194** (this commit) — first companion-table → decoder
+//!   pipeline wiring. The 5-stage narrowband LSP-VQ codebooks staged
+//!   in [`codebooks`] now drive a reconstructed
+//!   ten-coefficient LSP frequency vector in a common Q10
+//!   fixed-point format. Given a parsed [`NarrowbandFrameBody`],
+//!   [`NarrowbandFrameBody::reconstructed_lsp_q10`] resolves the
+//!   raw `lsp_index` field into per-stage 6-bit indices and sums
+//!   the contributions per the `.meta`-documented per-stage scaling
+//!   factors (1/256, 1/512, 1/1024). See the new [`lsp`] module for
+//!   the documented bit-stream-stage-ordering convention used to
+//!   split the packed 18-bit / 30-bit LSP field into per-stage
+//!   indices. LSP→LPC conversion, sub-frame interpolation, and
+//!   downstream synthesis filtering stay deferred.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
-//! r191 codebook accessors are independent of the decode/encode
-//! pipeline and just expose typed `&'static [Row]` table slices.
+//! r191 codebook accessors + r194 LSP reconstruction surface typed
+//! intermediate values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
@@ -94,6 +108,7 @@ mod bitreader;
 mod codebooks;
 mod frame;
 mod header;
+mod lsp;
 mod narrowband_body;
 mod packet;
 mod signalling;
@@ -115,6 +130,10 @@ pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS}
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,
     SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN,
+};
+pub use lsp::{
+    reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
+    NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,

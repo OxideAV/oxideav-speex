@@ -6,6 +6,55 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round r194: first companion-table → decoder pipeline wiring. The
+  5-stage narrowband LSP-VQ codebooks staged in `codebooks` now drive
+  a reconstructed ten-coefficient LSP frequency vector in a common
+  Q10 fixed-point format. New `lsp` module exposes
+  `NbLspStages::from_packed(packed, quant)` to split an 18-bit or
+  30-bit packed LSP field into per-stage 6-bit indices, and
+  `reconstruct_q10(stages)` to sum the per-stage codebook
+  contributions with the `.meta`-documented per-stage scaling
+  factors (1/256 → ×4, 1/512 → ×2, 1/1024 → ×1 — common Q10 output
+  unit means each stage contributes by integer multiplication, no
+  rounding direction question). Wired from `NarrowbandFrameBody` as
+  two new methods: `lsp_stages(submode)` and
+  `reconstructed_lsp_q10(submode)`, both returning `None` for the
+  silence mode (mode 0 — no LSP field transmitted).
+- Round r194: 11 new unit tests in `lsp::tests` covering the splitter
+  (silence regime, 18-bit MSB-first split, 30-bit MSB-first split,
+  defensive masking of stray high bits) and the reconstruction
+  (per-stage cross-checks against the staged CSV row 0 values for
+  both 18-bit and 30-bit regimes, linearity-per-stage probe,
+  in-range max-index handling, out-of-range index rejection,
+  end-to-end packed-field round-trip, and a stage-shift-factor
+  self-check against the module-doc table). Three new integration
+  tests in `tests/narrowband_body_fixture.rs` exercise the wiring
+  against the real `speexenc`-encoded fixture: every audio packet
+  (mode 5, 30-bit LSP) splits and reconstructs without panic, the
+  per-stage indices land in 0..64, and ≥ 90 % of frames produce a
+  non-zero coefficient vector (confirming the staged codebooks are
+  contributing actual signal, not silently returning zeros).
+  Silence-mode body returns `None` for both `lsp_stages` and
+  `reconstructed_lsp_q10`.
+
+### Notes
+
+- The bit-stream stage ordering convention used by
+  `NbLspStages::from_packed` (stage 0 in the most-significant 6 bits,
+  followed by `low1`, `low2`, `high1`, `high2` for the 30-bit regime)
+  is not explicitly documented in the in-repo manual / RFC / staged
+  companion. The convention is supported by three signals (coarse
+  stage first matches every multi-stage VQ in the staged CELP
+  family + matches the in-crate wideband 12-bit MSVQ split; the
+  companion table inventory lists stages in this order; the
+  per-stage widths sum exactly to the 18-bit / 30-bit field widths)
+  and is the only place the assumption is encoded — reconstruction
+  consumes the resolved per-stage indices and is independent of the
+  unpack order. See `src/lsp.rs` module docs for the full
+  justification.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-speex/releases/tag/v0.0.6) - 2026-05-30
 
 ### Other

@@ -339,9 +339,39 @@ synthesis, and the encoder-side codebook search remain deferred to
 subsequent rounds — this round ships the *table*, not the codepath
 that consumes it.
 
+**Round r194** (this commit) takes the first companion-table → decoder
+pipeline wiring step: the narrowband LSP-VQ codebooks now drive a
+reconstructed ten-coefficient LSP frequency vector. New `lsp` module
+adds two public entry points:
+
+- `NbLspStages::from_packed(packed, quant)` splits an 18-bit or
+  30-bit packed `lsp_index` field (as parsed by the round-3 body
+  bit-reader) into the per-stage 6-bit codebook indices. The 18-bit
+  regime emits three stages (stage 0 + low1 + high1); the 30-bit
+  regime emits five (adds low2 + high2). Silence mode returns `None`.
+- `reconstruct_q10(stages)` sums the per-stage codebook
+  contributions with the `.meta`-documented per-stage scaling
+  factors (1/256 → ×4, 1/512 → ×2, 1/1024 → ×1) into a common Q10
+  fixed-point ten-coefficient vector. Every stage contribution is a
+  single integer multiplication; no rounding-direction question
+  arises.
+
+Wired from `NarrowbandFrameBody` as `lsp_stages(submode)` +
+`reconstructed_lsp_q10(submode)`. Three integration tests in
+`tests/narrowband_body_fixture.rs` exercise the path against every
+audio packet of the real `speexenc`-encoded fixture (mode 5, 30-bit
+LSP, ≥40 frames). Every frame splits + reconstructs without panic,
+all per-stage indices fall in 0..64, and ≥ 90 % of frames produce a
+non-zero coefficient vector — confirming the codebooks contribute
+actual signal, not silent zeros.
+
+LSP→LPC conversion (Chebyshev root-find on the LSP polynomials), the
+§9.1 sub-frame interpolation between previous + current LSP sets,
+and downstream synthesis filtering stay deferred to later rounds.
+
 ### Coverage estimate
 
-~23 % of the Speex codec surface (Ogg stream header + per-frame
+~25 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -355,7 +385,9 @@ exposing the staged narrowband LSP VQ, 3-tap pitch-gain VQ, six
 narrowband innovation codebooks, the wideband high-band LSP MSVQ
 and high-band innovation codebooks, plus the Q15 LPC analysis
 window / lag window / QMF analysis filter as typed
-`&'static [Row]` slices; LSP→LPC + gain scaling + pitch / innovation
+`&'static [Row]` slices + r194 narrowband LSP-VQ → ten-coefficient
+Q10 LSP reconstruction wired through `NarrowbandFrameBody`; LSP→LPC
++ sub-frame LSP interpolation + gain scaling + pitch / innovation
 synthesis + ultra-wideband framing + the CELP frame-body writer +
 encoder-side codebook search are the remaining pieces).
 
@@ -418,6 +450,20 @@ generation; its output bytes are the test input.
   Table 10.1 columns for modes 5..=10 from the original Speex Codec
   Manual revisions if they are documented anywhere outside the
   libspeex source tree.
+- The bit-stream stage ordering of the narrowband LSP-VQ field
+  (i.e. which of the five 6-bit stage indices appears first in the
+  packed 18-bit / 30-bit field) is not explicitly documented in the
+  in-repo manual / RFC / staged companion. r194's
+  `NbLspStages::from_packed` reads stage 0 from the most-significant
+  6 bits, followed by `low1`, `low2`, `high1`, `high2` for the
+  30-bit regime — the only ordering consistent with (a) coarse stage
+  first matching the in-crate wideband 12-bit MSVQ split, (b) the
+  per-stage widths summing exactly to the 18-bit / 30-bit field
+  widths, and (c) the companion's table-inventory list order. A
+  future docs round can ratify or correct this ordering: the
+  reconstruction in `lsp::reconstruct_q10` consumes the resolved
+  per-stage indices and is independent of the unpack order, so the
+  fix-up is localised to `from_packed`.
 - Ultra-wideband (mode 2 in the Ogg stream header) has no dedicated
   §11 chapter in the staged Speex Codec Manual; only RFC 5574 Table
   2 lists the per-mode bit-rates. The bit-stream packing layout for

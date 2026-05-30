@@ -69,6 +69,8 @@
 //! #969). Until they are, this module stops at the raw bit-index layer.
 
 use crate::bitreader::{BitError, BitReader};
+use crate::codebooks::NB_LSP_ORDER;
+use crate::lsp::{reconstruct_q10, NbLspStages};
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 use core::fmt;
 
@@ -224,6 +226,31 @@ impl NarrowbandFrameBody {
     /// prefix; matches the sub-mode's `total_bits - 5`).
     pub fn body_bits(submode: &NarrowbandSubmode) -> u32 {
         submode.computed_total_bits() - crate::frame::NARROWBAND_FRAME_PREFIX_BITS
+    }
+
+    /// Resolve the raw [`Self::lsp_index`] into per-stage 6-bit
+    /// codebook indices using the documented stage-ordering
+    /// convention (see [`crate::lsp`] module docs). Returns `None`
+    /// for sub-modes that do not transmit an LSP field (mode 0 —
+    /// silence).
+    pub fn lsp_stages(&self, submode: &NarrowbandSubmode) -> Option<NbLspStages> {
+        NbLspStages::from_packed(self.lsp_index, submode.lsp)
+    }
+
+    /// Reconstruct the ten narrowband LSP frequency coefficients in
+    /// Q[`crate::lsp::NB_LSP_OUTPUT_Q`] fixed-point from the parsed
+    /// `lsp_index` field. Returns `None` for sub-modes that do not
+    /// transmit an LSP field (mode 0 — silence).
+    ///
+    /// The reconstruction is the typed lookup + per-stage summation
+    /// described in [`crate::lsp`]; sub-frame interpolation and
+    /// LSP→LPC conversion stay deferred.
+    pub fn reconstructed_lsp_q10(
+        &self,
+        submode: &NarrowbandSubmode,
+    ) -> Option<[i32; NB_LSP_ORDER]> {
+        let stages = self.lsp_stages(submode)?;
+        reconstruct_q10(stages)
     }
 }
 
