@@ -51,7 +51,20 @@
 //!   and [`WidebandHighBandBody`]. As with round 3 the body lands
 //!   only the raw bit indices — the high-band LSP MSVQ codebook +
 //!   innovation codebook are #969-blocked until staged.
-//! * **Round r187** (this commit) — structured `write` methods
+//! * **Round r191** (this commit) — CELP companion-table accessors.
+//!   The clean-room codebook arrays staged under
+//!   `docs/audio/speex/tables/` (LSP VQ stages, 3-tap pitch-gain VQ,
+//!   six narrowband innovation codebooks, the two wideband
+//!   high-band LSP MSVQ stages + two high-band innovation
+//!   codebooks, plus the Q15 LPC analysis window, autocorrelation
+//!   lag window, and QMF analysis filter) are now embedded into
+//!   the crate via [`include_str!`] and parsed on first use into
+//!   typed `&'static [Row]` slices. Dimension constants are
+//!   cross-checked against the existing
+//!   [`NarrowbandSubmode`] bit-budget table. Lookup, scaling, and
+//!   the downstream LSP→LPC / synthesis-filter path stay deferred.
+//!   See [`codebooks`] (re-exported at the crate root).
+//! * **Round r187** — structured `write` methods
 //!   symmetric to the existing `parse` paths for the three
 //!   framing-level types whose layout is fully defined by the
 //!   manual without any CELP companion-table material:
@@ -66,16 +79,19 @@
 //!   the encoder-side counterpart of the round-2 parser's
 //!   reserved-mode rejection. All three writers depend only on
 //!   the round-179 [`BitWriter`] + existing dispatch tables —
-//!   no companion-table material is touched.
+//!   no companion-table material was touched at that point.
 //!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
-//! against `oxideav-core` still return [`Error::NotImplemented`].
+//! against `oxideav-core` still return [`Error::NotImplemented`]; the
+//! r191 codebook accessors are independent of the decode/encode
+//! pipeline and just expose typed `&'static [Row]` table slices.
 
 #![warn(missing_debug_implementations)]
 
 use oxideav_core::RuntimeContext;
 
 mod bitreader;
+mod codebooks;
 mod frame;
 mod header;
 mod narrowband_body;
@@ -85,6 +101,16 @@ mod submode;
 mod wideband;
 
 pub use bitreader::{BitError, BitReader, BitWriter};
+pub use codebooks::{
+    hb_innovation_10_32, hb_innovation_8_128, hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2,
+    innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
+    innovation_8_128, lpc_analysis_window_q15, lpc_lag_window_q15, nb_lsp_high1, nb_lsp_high2,
+    nb_lsp_low1, nb_lsp_low2, nb_lsp_scale, nb_lsp_stage0, pitch_gain_5bit, pitch_gain_7bit,
+    qmf_h0_q15, InnovationShape, NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES,
+    LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN, NB_LSP_ORDER, NB_LSP_SPLIT_HALF,
+    NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS,
+    PITCH_GAIN_COLS, QMF_FILTER_LEN,
+};
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,

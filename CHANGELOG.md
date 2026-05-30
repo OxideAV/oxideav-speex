@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 191: CELP companion-table accessors (`codebooks` module,
+  re-exported at the crate root). Embeds the clean-room
+  `docs/audio/speex/tables/` CSVs via `include_str!` and parses each
+  on first use into typed `&'static [Row]` slices: narrowband LSP VQ
+  stage 0 (64 × 10) + four split-band stages (64 × 5), 5-bit and
+  7-bit 3-tap pitch-gain VQ (32 × 4 / 128 × 4), six narrowband
+  innovation codebooks covering the Table 9.1 shapes
+  (5×64, 5×256, 8×128, 10×16, 10×32, 20×32), wideband high-band LSP
+  MSVQ (2 × 64 × 8 — the 12-bit total matches `wideband.rs`'s raw
+  `lsp_msvq_index`), two high-band innovation codebooks (8×128 +
+  10×32), the 200-sample Q15 LPC analysis window, 11-tap Q15
+  autocorrelation lag window, and 64-tap Q15 QMF analysis filter
+  `h0` used by the wideband split (§10.1). Scaling regimes from the
+  `.meta` sidecars (`LSP_DIV_256` / `Div512` / `Div1024`) are
+  exposed as `NbLspScale` + `nb_lsp_scale(stage)` / `hb_lsp_scale`.
+- Round 191: 16 new dimension self-checks and submode cross-checks
+  in `codebooks::tests` (every accessor is hit so first-use
+  `OnceLock` parsers and assertions run under `cargo test`; codebook
+  row counts are confirmed to equal `1 << bits` for every shape;
+  the 12-bit high-band LSP MSVQ space is asserted to equal
+  64 × 64 = 1 << 12; the 5-bit pitch-gain row 0 is verified to
+  decode to the all-zero "silence" tap after the documented +32
+  bias). Total unit test count rises from 140 to 156.
 - Ogg/Speex stream-header packet parser per *The Speex Codec Manual*
   §7.3 (Table 7.1): `SpeexHeader::parse(buf)` validates the
   `b"Speex   "` magic and decodes all 13 little-endian `int32` fields

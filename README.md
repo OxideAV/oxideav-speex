@@ -294,9 +294,54 @@ The writers depend only on the round-179 `BitWriter`, the round-2
 `Submode::for_id` dispatch, and the round-4 Table 5.1 staging.
 **No** CELP companion-table material is touched.
 
+**Round 191** (this commit) wires the **CELP companion tables**
+into the crate as a typed pure-data surface. The clean-room CSVs
+staged at `docs/audio/speex/tables/` (see the in-repo provenance
+manifest `docs/audio/speex/provenance/01-speex-table-extraction.md`)
+are embedded via `include_str!` and parsed on first use into
+`OnceLock`-backed `&'static [Row]` slices. The public accessors
+shipped this round:
+
+- **Narrowband LSP VQ** (§9.1): `nb_lsp_stage0()` returns the
+  6-bit 64 × 10 stage; `nb_lsp_low1/low2/high1/high2()` return the
+  four 6-bit 64 × 5 split-band stages. `nb_lsp_scale(stage)`
+  returns the documented Q-scale (`Div256` / `Div512` / `Div1024`)
+  the decoder applies before adding the stage's contribution.
+- **3-tap pitch-gain VQ** (§9.2): `pitch_gain_5bit()` (32 × 4) and
+  `pitch_gain_7bit()` (128 × 4) — rows are
+  `[g0, g1, g2, search_aid]`; consumers add the documented
+  `PITCH_GAIN_BIAS` (+32) to each tap before applying.
+- **Narrowband innovation codebooks** (§9.2): six accessors covering
+  every shape Table 9.1 references — `innovation_5_64/_256`,
+  `innovation_8_128`, `innovation_10_16/_32`, `innovation_20_32`.
+- **Wideband high-band LSP MSVQ** (§10.x): `hb_lsp_stage1/stage2()`
+  return the two 6-bit 64 × 8 stages; combined index space
+  `64 × 64 = 2^12` matches the 12-bit `lsp_msvq_index` already
+  surfaced by the round-5 high-band body bit-reader.
+- **Wideband high-band innovation codebooks**: `hb_innovation_8_128`
+  and `hb_innovation_10_32` for the two shapes documented in
+  Table 10.1.
+- **LPC analysis fixtures (Q15)**: `lpc_analysis_window_q15()` (200
+  samples), `lpc_lag_window_q15()` (11 taps), `qmf_h0_q15()` (64-tap
+  QMF analysis filter used by the wideband 0-4 / 4-8 kHz split per
+  §10.1).
+
+Naming follows the role (stage, dimension, regime), not the
+source-side identifier; the `.meta` sidecars preserve the canonical
+names. Sixteen self-checks under `codebooks::tests` verify the
+embedded row counts, cross-check the codebook widths against the
+existing `NarrowbandSubmode` bit budgets, and spot-check fixed
+values (`nb_lsp_stage0()[0]`, `pitch_gain_5bit()[0]`,
+`lpc_lag_window_q15()[0] == 32767`).
+
+Lookup, gain scaling, LSP→LPC conversion, pitch/innovation
+synthesis, and the encoder-side codebook search remain deferred to
+subsequent rounds — this round ships the *table*, not the codepath
+that consumes it.
+
 ### Coverage estimate
 
-~21 % of the Speex codec surface (Ogg stream header + per-frame
+~23 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -305,11 +350,14 @@ frame iterator composing the above end-to-end + MSB-first
 `BitWriter` covering the encoder's bit-sink side of the symmetry
 with `BitReader` + structured `write` methods for the three
 framing-level types whose layout is published without any
-companion-table material; codebook lookup (narrowband
-LSP/pitch/innovation + high-band LSP MSVQ/innovation) + LSP→LPC +
-pitch / innovation synthesis + ultra-wideband framing + the CELP
-frame-body writer pending the same companion-table material as
-the body reader).
+companion-table material + r191 CELP companion-table accessors
+exposing the staged narrowband LSP VQ, 3-tap pitch-gain VQ, six
+narrowband innovation codebooks, the wideband high-band LSP MSVQ
+and high-band innovation codebooks, plus the Q15 LPC analysis
+window / lag window / QMF analysis filter as typed
+`&'static [Row]` slices; LSP→LPC + gain scaling + pitch / innovation
+synthesis + ultra-wideband framing + the CELP frame-body writer +
+encoder-side codebook search are the remaining pieces).
 
 ### Spec material consulted
 
