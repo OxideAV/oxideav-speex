@@ -1,17 +1,18 @@
 //! Speex CELP companion-table data (round 191 scope).
 //!
-//! Wires the staged clean-room tables from
-//! `docs/audio/speex/tables/` into the crate as pure-data accessors.
-//! The tables themselves are factual numeric arrays (codebook entries,
-//! analysis windows, QMF filter taps) — the same arrays a byte-exact
-//! decoder needs in order to invert the §9.1 LSP VQ, the §9.2 pitch /
-//! innovation VQs, and (for wideband) the §10.x high-band MSVQ and
-//! QMF split. The arrays were extracted under the project's
-//! data-only Extractor role and are tracked alongside their
-//! per-table `.meta` sidecars; see
-//! `docs/audio/speex/tables/README.md` and
-//! `docs/audio/speex/provenance/01-speex-table-extraction.md` for
-//! the chain of custody.
+//! Wires the staged clean-room tables (vendored into the crate at
+//! `tables/`, byte-identical to the master copy under
+//! `docs/audio/speex/tables/` in the workspace umbrella) as pure-data
+//! accessors. The tables themselves are factual numeric arrays
+//! (codebook entries, analysis windows, QMF filter taps) — the same
+//! arrays a byte-exact decoder needs in order to invert the §9.1 LSP
+//! VQ, the §9.2 pitch / innovation VQs, and (for wideband) the §10.x
+//! high-band MSVQ and QMF split. The arrays were extracted under
+//! the project's data-only Extractor role and are tracked alongside
+//! their per-table `.meta` sidecars; see `tables/README.md` in the
+//! crate root and
+//! `docs/audio/speex/provenance/01-speex-table-extraction.md` in
+//! the workspace umbrella for the chain of custody.
 //!
 //! ## What this round delivers
 //!
@@ -173,14 +174,11 @@ impl NbLspScale {
     }
 }
 
-const NB_LSP_STAGE0_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/nb-lsp-cdbk-stage0.csv");
-const NB_LSP_LOW1_CSV: &str = include_str!("../../../docs/audio/speex/tables/nb-lsp-cdbk-low1.csv");
-const NB_LSP_LOW2_CSV: &str = include_str!("../../../docs/audio/speex/tables/nb-lsp-cdbk-low2.csv");
-const NB_LSP_HIGH1_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/nb-lsp-cdbk-high1.csv");
-const NB_LSP_HIGH2_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/nb-lsp-cdbk-high2.csv");
+const NB_LSP_STAGE0_CSV: &str = include_str!("../tables/nb-lsp-cdbk-stage0.csv");
+const NB_LSP_LOW1_CSV: &str = include_str!("../tables/nb-lsp-cdbk-low1.csv");
+const NB_LSP_LOW2_CSV: &str = include_str!("../tables/nb-lsp-cdbk-low2.csv");
+const NB_LSP_HIGH1_CSV: &str = include_str!("../tables/nb-lsp-cdbk-high1.csv");
+const NB_LSP_HIGH2_CSV: &str = include_str!("../tables/nb-lsp-cdbk-high2.csv");
 
 static NB_LSP_STAGE0: OnceLock<Vec<[i16; NB_LSP_ORDER]>> = OnceLock::new();
 static NB_LSP_LOW1: OnceLock<Vec<[i16; NB_LSP_SPLIT_HALF]>> = OnceLock::new();
@@ -249,10 +247,8 @@ pub const PITCH_GAIN_7BIT_ENTRIES: usize = 128;
 /// Bias added to stored gain bytes when the decoder applies a row.
 pub const PITCH_GAIN_BIAS: i16 = 32;
 
-const PITCH_GAIN_5BIT_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/pitch-gain-cdbk-5bit.csv");
-const PITCH_GAIN_7BIT_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/pitch-gain-cdbk-7bit.csv");
+const PITCH_GAIN_5BIT_CSV: &str = include_str!("../tables/pitch-gain-cdbk-5bit.csv");
+const PITCH_GAIN_7BIT_CSV: &str = include_str!("../tables/pitch-gain-cdbk-7bit.csv");
 
 static PITCH_GAIN_5BIT: OnceLock<Vec<[i16; PITCH_GAIN_COLS]>> = OnceLock::new();
 static PITCH_GAIN_7BIT: OnceLock<Vec<[i16; PITCH_GAIN_COLS]>> = OnceLock::new();
@@ -292,18 +288,12 @@ pub struct InnovationShape {
     pub entries: u32,
 }
 
-const INNOV_5_64_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv5-64.csv");
-const INNOV_5_256_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv5-256.csv");
-const INNOV_8_128_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv8-128.csv");
-const INNOV_10_16_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv10-16.csv");
-const INNOV_10_32_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv10-32.csv");
-const INNOV_20_32_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/innovation-cdbk-sv20-32.csv");
+const INNOV_5_64_CSV: &str = include_str!("../tables/innovation-cdbk-sv5-64.csv");
+const INNOV_5_256_CSV: &str = include_str!("../tables/innovation-cdbk-sv5-256.csv");
+const INNOV_8_128_CSV: &str = include_str!("../tables/innovation-cdbk-sv8-128.csv");
+const INNOV_10_16_CSV: &str = include_str!("../tables/innovation-cdbk-sv10-16.csv");
+const INNOV_10_32_CSV: &str = include_str!("../tables/innovation-cdbk-sv10-32.csv");
+const INNOV_20_32_CSV: &str = include_str!("../tables/innovation-cdbk-sv20-32.csv");
 
 static INNOV_5_64: OnceLock<Vec<[i16; 5]>> = OnceLock::new();
 static INNOV_5_256: OnceLock<Vec<[i16; 5]>> = OnceLock::new();
@@ -358,10 +348,8 @@ pub const HB_LSP_STAGE_ENTRIES: usize = 64;
 /// High-band LPC order.
 pub const HB_LPC_ORDER: usize = 8;
 
-const HB_LSP_STAGE1_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/hb-lsp-cdbk-stage1.csv");
-const HB_LSP_STAGE2_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/hb-lsp-cdbk-stage2.csv");
+const HB_LSP_STAGE1_CSV: &str = include_str!("../tables/hb-lsp-cdbk-stage1.csv");
+const HB_LSP_STAGE2_CSV: &str = include_str!("../tables/hb-lsp-cdbk-stage2.csv");
 
 static HB_LSP_STAGE1: OnceLock<Vec<[i16; HB_LPC_ORDER]>> = OnceLock::new();
 static HB_LSP_STAGE2: OnceLock<Vec<[i16; HB_LPC_ORDER]>> = OnceLock::new();
@@ -386,10 +374,8 @@ pub const fn hb_lsp_scale(stage: u8) -> Option<NbLspScale> {
     }
 }
 
-const HB_INNOV_8_128_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/hb-innovation-cdbk-sv8-128.csv");
-const HB_INNOV_10_32_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/hb-innovation-cdbk-sv10-32.csv");
+const HB_INNOV_8_128_CSV: &str = include_str!("../tables/hb-innovation-cdbk-sv8-128.csv");
+const HB_INNOV_10_32_CSV: &str = include_str!("../tables/hb-innovation-cdbk-sv10-32.csv");
 
 static HB_INNOV_8_128: OnceLock<Vec<[i16; 8]>> = OnceLock::new();
 static HB_INNOV_10_32: OnceLock<Vec<[i16; 10]>> = OnceLock::new();
@@ -423,11 +409,9 @@ pub const LPC_LAG_WINDOW_LEN: usize = 11;
 /// Length of the QMF analysis filter.
 pub const QMF_FILTER_LEN: usize = 64;
 
-const LPC_WINDOW_Q15_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/lpc-analysis-window-q15.csv");
-const LAG_WINDOW_Q15_CSV: &str =
-    include_str!("../../../docs/audio/speex/tables/lpc-autocorr-lag-window-q15.csv");
-const QMF_H0_Q15_CSV: &str = include_str!("../../../docs/audio/speex/tables/qmf-filter-h0-q15.csv");
+const LPC_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-analysis-window-q15.csv");
+const LAG_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-autocorr-lag-window-q15.csv");
+const QMF_H0_Q15_CSV: &str = include_str!("../tables/qmf-filter-h0-q15.csv");
 
 static LPC_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
 static LAG_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
