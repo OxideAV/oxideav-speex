@@ -286,3 +286,138 @@ fn first_audio_packet_uses_full_5_bit_prefix() {
     let (_, r) = NarrowbandFrameHeader::parse_bytes(pkt0).unwrap();
     assert_eq!(r.consumed_bits(), NARROWBAND_FRAME_PREFIX_BITS);
 }
+
+#[test]
+fn sub_frame_lsp_interpolation_walks_real_audio_stream() {
+    // Round r200 wiring probe: walk the entire fixture frame-by-frame,
+    // threading the previous frame's reconstructed Q10 LSPs into the
+    // current frame's interpolation, and assert structural properties
+    // that hold for any well-formed CELP LSP stream:
+    //
+    //   * Each frame produces exactly 4 sub-frame vectors of 10
+    //     coefficients each.
+    //   * Sub-frame 4 (s=3) equals 4·curr in Q12 for every frame —
+    //     i.e. §9.1's "associated to the 4th sub-frame" property holds
+    //     end-to-end.
+    //   * The first frame's interpolation envelope is flat (all four
+    //     sub-frames equal 4·curr in Q12) — `first_frame` produces no
+    //     transient.
+    //   * After many frames the interpolation envelope is non-flat at
+    //     least some of the time, confirming the previous-frame state
+    //     is actually being used and not silently zeroed.
+    use oxideav_speex::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+
+    let mut prev_lsp_q10: Option<[i32; 10]> = None;
+    let mut frames_walked = 0u32;
+    let mut frames_with_envelope_change = 0u32;
+
+    for (i, pkt) in audio.iter().enumerate() {
+        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header parse");
+        let s = match h.submode {
+            Submode::Celp(s) => s,
+            _ => panic!("packet {}: expected CELP", i),
+        };
+        let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body parse");
+        let curr = body
+            .reconstructed_lsp_q10(&s)
+            .expect("mode 5 must reconstruct LSPs");
+
+        // Build per-sub-frame interpolation — first-frame init if no
+        // previous LSP state available, steady-state otherwise.
+        let interp = match prev_lsp_q10 {
+            None => NbSubFrameLsp::first_frame(&curr),
+            Some(ref prev) => body
+                .interpolated_lsp_q12(&s, prev)
+                .expect("mode 5 must interpolate"),
+        };
+
+        // Sub-frame 4 (s=3) must equal 4·curr in Q12 by §9.1.
+        for (k, &c) in curr.iter().enumerate() {
+            assert_eq!(
+                interp.subframes[3][k],
+                4 * c,
+                "frame {i} sub-frame 4 coeff {k} != 4·curr",
+            );
+        }
+        // Output dimensions.
+        assert_eq!(interp.subframes.len(), NB_LSP_SUBFRAMES_PER_FRAME);
+
+        if prev_lsp_q10.is_none() {
+            // First-frame: every sub-frame must equal 4·curr (flat envelope).
+            for sf in &interp.subframes {
+                for (k, &c) in curr.iter().enumerate() {
+                    assert_eq!(sf[k], 4 * c, "first frame envelope not flat");
+                }
+            }
+        }
+
+        // Track envelope-change frames (steady-state only).
+        if prev_lsp_q10.is_some() {
+            let flat = (0..NB_LSP_SUBFRAMES_PER_FRAME)
+                .all(|si| (0..10).all(|k| interp.subframes[si][k] == 4 * curr[k]));
+            if !flat {
+                frames_with_envelope_change += 1;
+            }
+        }
+
+        prev_lsp_q10 = Some(curr);
+        frames_walked += 1;
+    }
+
+    assert!(frames_walked >= 40, "fixture should have ≥40 frames");
+    // After many frames at least *some* must show a non-flat envelope —
+    // a 440 Hz tone fixture is mostly stationary but each frame's LSP
+    // VQ index differs at least slightly from the previous frame's.
+    assert!(
+        frames_with_envelope_change > 0,
+        "expected at least one steady-state frame to have a non-flat interpolation envelope; got 0 of {} steady-state frames",
+        frames_walked.saturating_sub(1),
+    );
+
+    // Lock the Q-format contract (cheap sanity check against the
+    // crate-public constant, run inside the integration harness so a
+    // future Q-format change can't slip past a re-export rename).
+    assert_eq!(NB_LSP_INTERP_OUTPUT_Q, 12);
+}
+
+#[test]
+fn first_frame_initialisation_matches_steady_state_when_prev_equals_current() {
+    // The `first_frame` constructor must produce the same result as
+    // `new(prev, curr)` when `prev == curr` — that's its definition,
+    // and the fixture round-trip relies on this equivalence for the
+    // stream-start case.
+    use oxideav_speex::NbSubFrameLsp;
+    let packets = lift_ogg_packets(FIXTURE);
+    let pkt0 = &packets[2];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt0).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    let curr = body.reconstructed_lsp_q10(&s).unwrap();
+    let via_first = NbSubFrameLsp::first_frame(&curr);
+    let via_new = NbSubFrameLsp::new(&curr, &curr);
+    assert_eq!(via_first, via_new);
+}
+
+#[test]
+fn interpolated_lsp_q12_returns_none_for_silence_mode() {
+    // Silence sub-mode (mode 0) carries no LSP field; the interpolator
+    // wrapper on `NarrowbandFrameBody` must propagate `None` so the
+    // caller knows to fall back to its own LSP state.
+    use oxideav_speex::NarrowbandSubmode;
+    let silence = NarrowbandSubmode::for_id(0).unwrap();
+    let buf = [0u8; 1];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    let prev = [0i32; 10];
+    assert!(body.interpolated_lsp_q12(&silence, &prev).is_none());
+}

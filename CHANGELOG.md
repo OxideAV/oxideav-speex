@@ -8,6 +8,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r200: narrowband **sub-frame LSP interpolation** per Speex
+  manual §9.1 ("The LSP's are considered to be associated to the 4th
+  sub-frames and the LSP's associated to the first 3 sub-frames are
+  linearly interpolated using the current and previous LSP
+  coefficients"). New `lsp_interp` module exposes
+  `NbSubFrameLsp::new(prev_q10, curr_q10)` returning a
+  `[[i32; 10]; 4]` matrix of per-sub-frame LSP vectors in Q12
+  fixed-point — the unique linear-interpolation weight set
+  `(3·prev + 1·curr)/4`, `(2·prev + 2·curr)/4`,
+  `(1·prev + 3·curr)/4`, `(0·prev + 4·curr)/4 = curr`. Output is
+  emitted in Q12 (Q10 + 2 extra bits from the un-divided weight
+  multiplication) so every interpolation operation is exact integer
+  arithmetic with no rounding direction question for the spec to be
+  silent about. A `first_frame(curr_q10)` constructor handles the
+  stream-start case (prev = curr → flat envelope, no spurious
+  transient). New `NarrowbandFrameBody::interpolated_lsp_q12(submode,
+  prev_q10)` convenience method composes the r194 reconstruction
+  with the r200 sub-frame interpolation; silence mode (mode 0)
+  propagates `None`.
+- Round r200: 15 new tests — 10 unit tests in `lsp_interp::tests`
+  (per-weight verification, Q-format self-check, per-coefficient
+  independence, monotone-envelope-on-monotone-input,
+  first-frame-flatness, negative-coefficient handling, out-of-range
+  subframe accessor) and 3 new integration tests in
+  `tests/narrowband_body_fixture.rs` walking every audio packet of
+  the `speexenc`-encoded fixture frame-by-frame, threading the
+  previous LSP state, and asserting (a) sub-frame 4 equals 4·curr in
+  Q12 for every frame, (b) first-frame envelope is flat, (c) a
+  non-zero number of steady-state frames produce a non-flat envelope
+  (the previous-frame state is actually being used).
+- Round r200 docs: README "Spec gaps noted" entry on the
+  **LSP → LPC conversion algorithm** — manual §9.1 only states the
+  interpolated LSPs are "converted back to the LPC filter Â(z)"
+  without giving the procedure, and the staged companion is silent
+  (its §9 covers raw codebook data; the conversion is algorithmic).
+  Also a docs-gap entry on the first-frame-LSP-initialisation
+  convention used by `NbSubFrameLsp::first_frame`.
+
 - Round r194: first companion-table → decoder pipeline wiring. The
   5-stage narrowband LSP-VQ codebooks staged in `codebooks` now drive
   a reconstructed ten-coefficient LSP frequency vector in a common

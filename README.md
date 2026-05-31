@@ -339,7 +339,7 @@ synthesis, and the encoder-side codebook search remain deferred to
 subsequent rounds — this round ships the *table*, not the codepath
 that consumes it.
 
-**Round r194** (this commit) takes the first companion-table → decoder
+**Round r194** takes the first companion-table → decoder
 pipeline wiring step: the narrowband LSP-VQ codebooks now drive a
 reconstructed ten-coefficient LSP frequency vector. New `lsp` module
 adds two public entry points:
@@ -365,13 +365,62 @@ all per-stage indices fall in 0..64, and ≥ 90 % of frames produce a
 non-zero coefficient vector — confirming the codebooks contribute
 actual signal, not silent zeros.
 
-LSP→LPC conversion (Chebyshev root-find on the LSP polynomials), the
-§9.1 sub-frame interpolation between previous + current LSP sets,
-and downstream synthesis filtering stay deferred to later rounds.
+LSP→LPC conversion, the §9.1 sub-frame interpolation between
+previous + current LSP sets, and downstream synthesis filtering stay
+deferred to later rounds.
+
+**Round r200** (this commit) lands the **narrowband sub-frame LSP
+interpolation** spelt out by the manual §9.1: *"The LSP's are
+considered to be associated to the 4th sub-frames and the LSP's
+associated to the first 3 sub-frames are linearly interpolated using
+the current and previous LSP coefficients."* New `lsp_interp` module
+exposes:
+
+- `NbSubFrameLsp::new(prev_q10, curr_q10)` — given the previous +
+  current frame's reconstructed Q10 LSPs (from r194), produces a
+  `[[i32; 10]; 4]` matrix of per-sub-frame LSP vectors in Q12
+  fixed-point. The four weights are the unique linear-interpolation
+  set: `(3·prev + 1·curr) / 4`, `(2·prev + 2·curr) / 4`,
+  `(1·prev + 3·curr) / 4`, `(0·prev + 4·curr) / 4 = curr`. Output is
+  emitted in Q12 (= Q10 + 2 extra bits from the un-divided weight
+  multiplication), keeping every interpolation operation exact
+  integer arithmetic with no rounding direction question for the
+  spec to be silent about — the downstream LSP→LPC stage can
+  rescale with a single arithmetic shift.
+- `NbSubFrameLsp::first_frame(curr_q10)` — stream-start
+  initialisation. Defines `prev = curr` so every sub-frame's
+  interpolated output equals `curr` in Q12, producing no spurious
+  LSP transient on frame 1. The manual is silent on this case; the
+  separate constructor surfaces the convention explicitly and
+  localises any future docs-gap-fill change to a single function.
+
+A new `NarrowbandFrameBody::interpolated_lsp_q12(submode, prev_q10)`
+convenience method composes the r194 reconstruction with the r200
+sub-frame interpolation in one call. Silence mode (mode 0 — no LSP
+field) propagates `None` so callers know to fall back to their own
+LSP state.
+
+15 new tests cover the interpolation contract: per-sub-frame weight
+verification (1/4 + 3/4, 2/4 + 2/4, 3/4 + 1/4, 4/4), output Q-format
+self-check, per-coefficient independence (perturbing prev[j] only
+moves out[s][j]), monotone-envelope on monotone-input, first-frame
+flatness, negative-coefficient handling, out-of-range subframe
+accessor, and three integration probes against the real
+`speexenc`-encoded fixture — every audio packet's sub-frame 4
+equals 4·curr in Q12, the first-frame envelope is flat, a non-zero
+number of steady-state frames show a non-flat envelope (confirming
+the previous-frame state is actually threaded through, not silently
+zeroed).
+
+LSP → LPC conversion stays deferred — the in-repo manual §9.1 only
+states the interpolated LSPs are *"converted back to the LPC filter
+Â(z)"* and the staged companion is silent on the conversion
+algorithm itself (it covers the table data; the conversion is
+algorithmic). Reported as a docs gap below.
 
 ### Coverage estimate
 
-~25 % of the Speex codec surface (Ogg stream header + per-frame
+~28 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -386,8 +435,10 @@ narrowband innovation codebooks, the wideband high-band LSP MSVQ
 and high-band innovation codebooks, plus the Q15 LPC analysis
 window / lag window / QMF analysis filter as typed
 `&'static [Row]` slices + r194 narrowband LSP-VQ → ten-coefficient
-Q10 LSP reconstruction wired through `NarrowbandFrameBody`; LSP→LPC
-+ sub-frame LSP interpolation + gain scaling + pitch / innovation
+Q10 LSP reconstruction wired through `NarrowbandFrameBody` + r200
+sub-frame LSP linear interpolation (§9.1) producing a
+`[[i32; 10]; 4]` Q12 matrix per frame, walked through every audio
+packet of the fixture; LSP→LPC + gain scaling + pitch / innovation
 synthesis + ultra-wideband framing + the CELP frame-body writer +
 encoder-side codebook search are the remaining pieces).
 
@@ -471,6 +522,27 @@ generation; its output bytes are the test input.
   framing is deferred to a follow-up round once the relevant
   material is staged (likely a triple-band QMF + per-band CELP, but
   the exact bit allocation is a docs gap).
+- **LSP → LPC conversion algorithm.** Manual §9.1 only states the
+  interpolated LSPs are *"converted back to the LPC filter Â(z)"*
+  without giving the conversion procedure (typically a Chebyshev
+  polynomial root-find or sum-of-cosines expansion). The staged
+  `docs/audio/speex/speex-celp-companion.md` is also silent on the
+  conversion algorithm — its §9 explicitly covers raw codebook
+  table data only, while the LSP→LPC conversion is algorithmic
+  (no static lookup array to extract). The r200 sub-frame
+  interpolation lands in Q12 ready for this stage; the conversion
+  itself blocks on a docs round staging either (a) a clean-room
+  algorithmic description of the LSP→LPC procedure used by Speex,
+  or (b) the reference textbook citation (commonly Kabal & Ramachandran
+  1986) sufficient to ground a from-scratch implementation against
+  a documented spec rather than a reference implementation.
+- The first-frame initialisation convention for sub-frame LSP
+  interpolation (whether `prev_q10` should be set to `curr_q10`,
+  to a constant "neutral" LSP vector, or to zero) is not specified
+  in the in-repo manual. r200's `NbSubFrameLsp::first_frame` adopts
+  `prev = curr` so frame 1's envelope is flat and no spurious LSP
+  transient is introduced. A future docs round can override this
+  with a single-function change.
 
 ## License
 

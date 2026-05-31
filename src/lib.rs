@@ -81,7 +81,7 @@
 //!   the round-179 [`BitWriter`] + existing dispatch tables —
 //!   no companion-table material was touched at that point.
 //!
-//! * **Round r194** (this commit) — first companion-table → decoder
+//! * **Round r194** — first companion-table → decoder
 //!   pipeline wiring. The 5-stage narrowband LSP-VQ codebooks staged
 //!   in [`codebooks`] now drive a reconstructed
 //!   ten-coefficient LSP frequency vector in a common Q10
@@ -95,10 +95,36 @@
 //!   indices. LSP→LPC conversion, sub-frame interpolation, and
 //!   downstream synthesis filtering stay deferred.
 //!
+//! * **Round r200** (this commit) — narrowband **sub-frame LSP
+//!   interpolation** per the Speex manual §9.1 ("The LSP's are
+//!   considered to be associated to the 4th sub-frames and the LSP's
+//!   associated to the first 3 sub-frames are linearly interpolated
+//!   using the current and previous LSP coefficients"). The new
+//!   [`lsp_interp`] module takes the previous + current frame's
+//!   reconstructed Q10 LSPs (from r194) and produces a
+//!   `[[i32; 10]; 4]` matrix of per-sub-frame LSP vectors in Q12
+//!   fixed-point — the unique linear-interpolation weight set
+//!   `(3·prev + 1·curr) / 4`, `(2·prev + 2·curr) / 4`,
+//!   `(1·prev + 3·curr) / 4`, `(0·prev + 4·curr) / 4 = curr`. The
+//!   output is emitted in Q12 (not Q10-after-division) so the
+//!   interpolation is exact integer arithmetic with no rounding
+//!   direction choice for the spec to be silent about; the
+//!   downstream LSP→LPC conversion can rescale with a single
+//!   arithmetic shift. A new [`NarrowbandFrameBody::interpolated_lsp_q12`]
+//!   convenience method composes the r194 reconstruction with this
+//!   sub-frame interpolation. A `first_frame` constructor handles
+//!   the stream-start case (prev = curr → no spurious transient).
+//!   LSP→LPC conversion stays deferred — the in-repo Speex manual
+//!   §9.1 + the staged CELP companion are both silent on the
+//!   specific algorithm (the manual only states "converted back to
+//!   the LPC filter Â(z)" without giving the polynomial root-find
+//!   procedure). Reported as a docs gap.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
-//! r191 codebook accessors + r194 LSP reconstruction surface typed
-//! intermediate values but do not yet produce PCM output.
+//! r191 codebook accessors + r194 LSP reconstruction + r200 sub-frame
+//! LSP interpolation surface typed intermediate values but do not yet
+//! produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
@@ -109,6 +135,7 @@ mod codebooks;
 mod frame;
 mod header;
 mod lsp;
+mod lsp_interp;
 mod narrowband_body;
 mod packet;
 mod signalling;
@@ -135,6 +162,7 @@ pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
+pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
     PITCH_PERIOD_MIN,

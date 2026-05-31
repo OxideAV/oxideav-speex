@@ -71,6 +71,7 @@
 use crate::bitreader::{BitError, BitReader};
 use crate::codebooks::NB_LSP_ORDER;
 use crate::lsp::{reconstruct_q10, NbLspStages};
+use crate::lsp_interp::NbSubFrameLsp;
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 use core::fmt;
 
@@ -251,6 +252,29 @@ impl NarrowbandFrameBody {
     ) -> Option<[i32; NB_LSP_ORDER]> {
         let stages = self.lsp_stages(submode)?;
         reconstruct_q10(stages)
+    }
+
+    /// Compose the r194 [`Self::reconstructed_lsp_q10`] with the r200
+    /// sub-frame LSP interpolation (`crate::lsp_interp`) to produce
+    /// one ten-coefficient LSP vector per sub-frame in
+    /// Q[`crate::NB_LSP_INTERP_OUTPUT_Q`] = Q12 fixed-point.
+    ///
+    /// `prev_q10` is the **previous frame's** reconstructed Q10 LSPs
+    /// (caller-managed across frames). For the first frame of a
+    /// stream, see [`NbSubFrameLsp::first_frame`] — pass the current
+    /// frame's LSPs as `prev_q10` to obtain the no-transient
+    /// initialisation.
+    ///
+    /// Returns `None` for sub-modes that transmit no LSP field
+    /// (mode 0 — silence; the manual prescribes no LSP update in
+    /// that case, so the caller must use its own LSP state).
+    pub fn interpolated_lsp_q12(
+        &self,
+        submode: &NarrowbandSubmode,
+        prev_q10: &[i32; NB_LSP_ORDER],
+    ) -> Option<NbSubFrameLsp> {
+        let curr = self.reconstructed_lsp_q10(submode)?;
+        Some(NbSubFrameLsp::new(prev_q10, &curr))
     }
 }
 
