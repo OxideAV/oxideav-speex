@@ -95,7 +95,27 @@
 //!   indices. LSP→LPC conversion, sub-frame interpolation, and
 //!   downstream synthesis filtering stay deferred.
 //!
-//! * **Round r200** (this commit) — narrowband **sub-frame LSP
+//! * **Round r208** (this commit) — narrowband **3-tap pitch-gain VQ
+//!   reconstruction** per Speex manual Eq. 9.1 / companion §2.2. The
+//!   r191 5-bit (32 × 4) and 7-bit (128 × 4) pitch-gain VQ codebooks
+//!   are now resolved through a typed accessor: given a per-sub-frame
+//!   raw VQ index parsed by the round-3 frame-body bit-reader and the
+//!   active sub-mode's [`PitchGainQuant`] regime, the new
+//!   [`pitch_gain`] module returns [`PitchGainTaps`] — the three β tap
+//!   coefficients `(g0, g1, g2)` of the long-term predictor
+//!   convolution `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]`,
+//!   with the documented `+32` codebook bias already applied. Mode 0
+//!   silence (`PitchGainQuant::None`) returns the all-zero
+//!   [`PitchGainTaps::SILENCE`] without consulting any codebook. A
+//!   [`NarrowbandSubFrameIndices::pitch_gain_taps`] convenience
+//!   method wires the lookup off the existing per-sub-frame indices.
+//!   The long-term predictor convolution itself stays deferred — it
+//!   needs the per-sub-frame pitch period (already surfaced by
+//!   [`NarrowbandSubFrameIndices::pitch_period`]) plus the historical
+//!   excitation buffer, which lands once the innovation-codebook
+//!   path is also wired.
+//!
+//! * **Round r200** — narrowband **sub-frame LSP
 //!   interpolation** per the Speex manual §9.1 ("The LSP's are
 //!   considered to be associated to the 4th sub-frames and the LSP's
 //!   associated to the first 3 sub-frames are linearly interpolated
@@ -138,6 +158,7 @@ mod lsp;
 mod lsp_interp;
 mod narrowband_body;
 mod packet;
+mod pitch_gain;
 mod signalling;
 mod submode;
 mod wideband;
@@ -168,6 +189,7 @@ pub use narrowband_body::{
     PITCH_PERIOD_MIN,
 };
 pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
+pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use signalling::{
     inband_code_spec, CustomInbandMessage, InbandCodeSpec, InbandKind, InbandMessage,
     SignallingError, CUSTOM_INBAND_MAX_BYTES, CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS,

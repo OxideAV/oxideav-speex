@@ -421,3 +421,87 @@ fn interpolated_lsp_q12_returns_none_for_silence_mode() {
     let prev = [0i32; 10];
     assert!(body.interpolated_lsp_q12(&silence, &prev).is_none());
 }
+
+#[test]
+fn pitch_gain_taps_resolve_for_every_audio_subframe() {
+    // Round r208 wiring probe: walk every audio frame in the fixture
+    // and assert every sub-frame's 7-bit pitch-gain VQ index resolves
+    // through the new `pitch_gain` module without panic.
+    //
+    // Structural properties:
+    //   * Every sub-frame yields three β tap coefficients (i16).
+    //   * Each tap lands in the documented post-bias signed-byte range
+    //     -96..=159 (signed-byte +32 bias).
+    //   * Across many frames at least *one* sub-frame produces a
+    //     non-zero tap — i.e. the codebook is contributing real
+    //     β coefficients, not a silent all-zero stream.
+    //
+    // Mode 5 (the fixture's sub-mode) uses the 7-bit pitch-gain VQ
+    // per Table 9.1, so every resolution hits `pitch_gain_7bit()`.
+    use oxideav_speex::PITCH_GAIN_TAPS;
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+    let mut total_subframes = 0u32;
+    let mut nonzero_subframes = 0u32;
+    for (i, pkt) in audio.iter().enumerate() {
+        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header parse");
+        let s = match h.submode {
+            Submode::Celp(s) => s,
+            _ => panic!("packet {}: expected CELP", i),
+        };
+        let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body parse");
+        for (sf_idx, sf) in body.subframes.iter().enumerate() {
+            let taps = sf.pitch_gain_taps(&s).unwrap_or_else(|| {
+                panic!(
+                    "packet {} sub-frame {}: pitch_gain_taps returned None",
+                    i, sf_idx
+                )
+            });
+            assert_eq!(taps.taps.len(), PITCH_GAIN_TAPS);
+            for (t_idx, &t) in taps.taps.iter().enumerate() {
+                assert!(
+                    (-96..=159).contains(&t),
+                    "packet {} sub-frame {} tap {}: value {} out of documented +32-bias band",
+                    i,
+                    sf_idx,
+                    t_idx,
+                    t
+                );
+            }
+            if taps.taps.iter().any(|&t| t != 0) {
+                nonzero_subframes += 1;
+            }
+            total_subframes += 1;
+        }
+    }
+    assert!(
+        total_subframes >= 4 * 40,
+        "fixture should have ≥40 frames × 4 sub-frames"
+    );
+    assert!(
+        nonzero_subframes > 0,
+        "expected at least one sub-frame to produce non-zero β taps; got 0 of {} sub-frames",
+        total_subframes
+    );
+}
+
+#[test]
+fn pitch_gain_taps_is_silence_for_mode_0() {
+    // Silence sub-mode (mode 0, `PitchGainQuant::None`) must surface
+    // `PitchGainTaps::SILENCE` (all-zero β taps) regardless of the
+    // defaulted `pitch_gain_index`.
+    use oxideav_speex::{NarrowbandSubmode, PitchGainTaps};
+    let silence = NarrowbandSubmode::for_id(0).unwrap();
+    let buf = [0u8; 1];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    for sf in &body.subframes {
+        let taps = sf.pitch_gain_taps(&silence).unwrap();
+        assert_eq!(taps, PitchGainTaps::SILENCE);
+        assert_eq!(taps.taps, [0, 0, 0]);
+    }
+}

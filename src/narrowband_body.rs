@@ -72,6 +72,7 @@ use crate::bitreader::{BitError, BitReader};
 use crate::codebooks::NB_LSP_ORDER;
 use crate::lsp::{reconstruct_q10, NbLspStages};
 use crate::lsp_interp::NbSubFrameLsp;
+use crate::pitch_gain::{reconstruct as reconstruct_pitch_gain_taps, PitchGainTaps};
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 use core::fmt;
 
@@ -151,6 +152,24 @@ impl NarrowbandSubFrameIndices {
         } else {
             Some(u16::from(self.pitch_index) + PITCH_PERIOD_MIN)
         }
+    }
+
+    /// Resolve the raw [`Self::pitch_gain_index`] into the three β tap
+    /// coefficients of the §9.2 long-term predictor convolution
+    /// `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]` (Manual Eq. 9.1).
+    ///
+    /// Wires the r191 3-tap pitch-gain VQ codebooks through the
+    /// [`crate::pitch_gain`] module's `reconstruct` accessor. For the
+    /// silence sub-mode (`PitchGainQuant::None` — mode 0) the all-zero
+    /// [`PitchGainTaps::SILENCE`] is returned regardless of
+    /// `pitch_gain_index`.
+    ///
+    /// Returns `None` if the parsed index is out of range for the
+    /// active codebook (only possible with a hand-built indices
+    /// struct; the parser caps the index to the sub-mode's field
+    /// width).
+    pub fn pitch_gain_taps(&self, submode: &NarrowbandSubmode) -> Option<PitchGainTaps> {
+        reconstruct_pitch_gain_taps(self.pitch_gain_index, submode.pitch_gain)
     }
 }
 

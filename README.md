@@ -369,7 +369,57 @@ LSP→LPC conversion, the §9.1 sub-frame interpolation between
 previous + current LSP sets, and downstream synthesis filtering stay
 deferred to later rounds.
 
-**Round r200** (this commit) lands the **narrowband sub-frame LSP
+**Round r208** (this commit) lands the **narrowband 3-tap pitch-gain
+VQ reconstruction** that the long-term predictor convolution of
+Speex Manual Eq. 9.1 / CELP companion §2.2 takes as input. The r191
+5-bit (32 × 4) and 7-bit (128 × 4) pitch-gain VQ codebooks now
+resolve through a typed accessor:
+
+- New `pitch_gain` module exposes
+  `reconstruct(index, quant) -> Option<PitchGainTaps>` and the typed
+  `PitchGainTaps { taps: [i16; 3] }` carrying the three β tap
+  coefficients `(g0, g1, g2)` of the §9.2 long-term predictor
+  equation `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]`
+  (Manual Eq. 9.1). The documented `+32` codebook bias is applied
+  in this module so callers receive ready-to-use β values; column 3
+  (`search_aid`) is an encoder-only term and is dropped.
+- `PitchGainQuant::None` (mode 0, silence) returns the all-zero
+  `PitchGainTaps::SILENCE` constant without consulting any codebook
+  — the silence sub-mode carries no pitch-gain field on the wire.
+- `PitchGainQuant::Vq5Bit` resolves through `pitch_gain_5bit()`
+  (low-bit-rate modes per the companion: ≤ 11 kbps narrowband);
+  `PitchGainQuant::Vq7Bit` resolves through `pitch_gain_7bit()`
+  (higher-rate modes ≥ 15 kbps).
+- New `NarrowbandSubFrameIndices::pitch_gain_taps(submode)`
+  convenience method wires the lookup off the existing per-sub-frame
+  raw `pitch_gain_index` produced by the round-3 frame-body
+  bit-reader.
+- 12 new unit tests in `pitch_gain::tests` (silence-quant
+  ignores-index, 5-bit row-0 = documented silence after bias, 5-bit
+  row-1 matches the staged CSV with bias, 7-bit row-0 matches the
+  staged CSV with bias, 5-bit max-index = 31, 7-bit max-index = 127,
+  out-of-range index rejection, full-range acceptance for both
+  codebooks, search-aid column dropped, +32 bias is applied
+  consistently across every row of both codebooks, SILENCE constant
+  matches 5-bit row 0, post-bias values fit in the documented
+  `-96..=159` signed-byte+bias band).
+- 2 new integration tests in
+  `tests/narrowband_body_fixture.rs` walk every audio packet of the
+  `speexenc`-encoded fixture (mode 5 → 7-bit pitch-gain VQ): every
+  sub-frame's resolved β taps fall in the documented post-bias
+  range; at least one sub-frame produces non-zero β coefficients
+  (confirming the codebook is contributing actual β values, not a
+  silent zero stream). A second test exercises the silence-mode
+  path against a hand-built mode-0 frame.
+
+The long-term predictor convolution itself remains deferred — it
+needs both the per-sub-frame pitch period (already surfaced by
+`NarrowbandSubFrameIndices::pitch_period`) AND the historical
+excitation buffer state `e[·]`. The excitation buffer lands once
+the innovation-codebook lookup is also wired (then the excitation
+`e[n] = p[n] + c[n]` can be assembled per companion §2.3).
+
+**Round r200** lands the **narrowband sub-frame LSP
 interpolation** spelt out by the manual §9.1: *"The LSP's are
 considered to be associated to the 4th sub-frames and the LSP's
 associated to the first 3 sub-frames are linearly interpolated using
@@ -420,7 +470,7 @@ algorithmic). Reported as a docs gap below.
 
 ### Coverage estimate
 
-~28 % of the Speex codec surface (Ogg stream header + per-frame
+~30 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -438,8 +488,14 @@ window / lag window / QMF analysis filter as typed
 Q10 LSP reconstruction wired through `NarrowbandFrameBody` + r200
 sub-frame LSP linear interpolation (§9.1) producing a
 `[[i32; 10]; 4]` Q12 matrix per frame, walked through every audio
-packet of the fixture; LSP→LPC + gain scaling + pitch / innovation
-synthesis + ultra-wideband framing + the CELP frame-body writer +
+packet of the fixture + r208 narrowband 3-tap pitch-gain VQ
+reconstruction (Manual Eq. 9.1 / companion §2.2) resolving
+per-sub-frame VQ indices into typed `[i16; 3]` β tap triples with
+the `+32` codebook bias applied, wired through
+`NarrowbandSubFrameIndices::pitch_gain_taps` and exercised against
+every audio sub-frame of the fixture; LSP→LPC + long-term predictor
+convolution + innovation-codebook lookup + excitation buffer state
++ ultra-wideband framing + the CELP frame-body writer +
 encoder-side codebook search are the remaining pieces).
 
 ### Spec material consulted
@@ -543,6 +599,19 @@ generation; its output bytes are the test input.
   `prev = curr` so frame 1's envelope is flat and no spurious LSP
   transient is introduced. A future docs round can override this
   with a single-function change.
+- **Pitch-gain β Q-format.** The staged 3-tap pitch-gain VQ
+  codebook (`docs/audio/speex/tables/pitch-gain-cdbk-{5,7}bit`)
+  carries the gain bytes as `i8` values offset by `+32` (decoder
+  bias) but neither the in-repo manual §8.3/§9.2 nor the staged
+  `docs/audio/speex/speex-celp-companion.md` §2.2 commits to a
+  documented fixed-point Q-format for the post-bias β values
+  themselves (a Q6 = `β / 64` convention is widely used in CELP
+  literature but the in-repo material does not state it). r208's
+  `pitch_gain::reconstruct` surfaces the post-bias triple as raw
+  signed integers, leaving the Q-format choice to the downstream
+  long-term-predictor step. A future docs round should clarify
+  the documented β scale so the LTP convolution can pin the
+  scaling without a guess.
 
 ## License
 

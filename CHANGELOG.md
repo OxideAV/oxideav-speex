@@ -8,6 +8,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r208: narrowband **3-tap pitch-gain VQ reconstruction** per
+  Speex Manual Eq. 9.1 / CELP companion §2.2. New `pitch_gain` module
+  exposes `reconstruct(index, quant) -> Option<PitchGainTaps>` and
+  the typed `PitchGainTaps { taps: [i16; 3] }` carrying the three
+  β tap coefficients `(g0, g1, g2)` of the long-term predictor
+  equation `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]` with the
+  documented `+32` codebook bias applied. `PitchGainQuant::None`
+  (mode 0, silence) returns the all-zero `PitchGainTaps::SILENCE`
+  constant; the 5-bit codebook (32 entries) handles the low-bit-rate
+  modes, the 7-bit codebook (128 entries) handles the higher-rate
+  modes. Column 3 (`search_aid`) is an encoder-only term and is
+  dropped. New `NarrowbandSubFrameIndices::pitch_gain_taps(submode)`
+  convenience method wires the lookup off the existing per-sub-frame
+  raw `pitch_gain_index`.
+- Round r208: 12 new unit tests in `pitch_gain::tests` (silence-quant
+  ignores-index; 5-bit row 0 yields the documented `(0, 0, 0)`
+  silence taps after bias; 5-bit row 1 and 7-bit row 0 match the
+  staged CSV with bias applied; 5-bit max-index = 31; 7-bit
+  max-index = 127; out-of-range indices return `None`; both
+  codebooks accept their full valid range; search-aid column is
+  dropped from output; +32 bias applied consistently across every
+  row of both codebooks; SILENCE constant equals 5-bit row 0; every
+  post-bias value falls in `-96..=159`). 2 new integration tests in
+  `tests/narrowband_body_fixture.rs` walk every audio packet of the
+  `speexenc`-encoded fixture and confirm every sub-frame's β taps
+  resolve, at least one sub-frame produces non-zero β coefficients,
+  and the silence-mode wrapper returns SILENCE for a hand-built
+  mode-0 frame. Total tests: 193 unit + 12 integration = 205, up
+  from 193 unit + 8 integration = 201 after r200.
+- Round r208 docs: README "Spec gaps noted" entry on the
+  **pitch-gain β Q-format**. The staged 3-tap pitch-gain VQ tables
+  carry the gain bytes biased (`+32`) but neither the in-repo
+  manual nor the CELP companion documents a fixed-point Q-format
+  for the post-bias β values themselves (Q6 is widely used in CELP
+  literature but in-repo material does not commit to it).
+  `pitch_gain::reconstruct` surfaces post-bias raw integers,
+  leaving the scaling choice to the downstream long-term predictor.
+
 - Round r200: narrowband **sub-frame LSP interpolation** per Speex
   manual §9.1 ("The LSP's are considered to be associated to the 4th
   sub-frames and the LSP's associated to the first 3 sub-frames are
