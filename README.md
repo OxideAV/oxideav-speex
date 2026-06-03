@@ -468,7 +468,7 @@ states the interpolated LSPs are *"converted back to the LPC filter
 algorithm itself (it covers the table data; the conversion is
 algorithmic). Reported as a docs gap below.
 
-**Round r214** (this commit) lands the **wideband high-band LSP MSVQ
+**Round r214** lands the **wideband high-band LSP MSVQ
 reconstruction** — the high-band counterpart to r194's narrowband
 LSP-VQ reconstruction. The two-stage 6-bit MSVQ codebooks staged at
 `docs/audio/speex/tables/hb-lsp-cdbk-stage{1,2}` (already wired into
@@ -531,9 +531,78 @@ explicitly state whether the high-band LSPs participate in the
 same r200-style four-way linear interpolation as the narrowband
 LSPs (recorded as a docs gap below).
 
+**Round r220** (this commit) lands the **narrowband innovation
+sub-vector lookup primitive + per-mode dispatcher** for the two
+modes whose codebook binding is grounded by the staged material
+(Speex Codec Manual §9.2 + CELP companion §2.3). New `innovation`
+module exposes:
+
+- `InnovationCodebook` — an enum selecting one of the six
+  documented codebook shapes (`Sv5_64`, `Sv5_256`, `Sv8_128`,
+  `Sv10_16`, `Sv10_32`, `Sv20_32`). Each variant carries its
+  `sub_vector_len()` (5 / 8 / 10 / 20 samples), `index_bits()`
+  (4 / 5 / 6 / 7 / 8 bits) and `entries()`
+  (16 / 32 / 64 / 128 / 256).
+- `sub_vector(codebook, index)` returns the `&'static [i16]`
+  slice of sub-vector samples from the staged CSV, or `None` on
+  an out-of-range index.
+- `InnovationMapping::for_mode(submode)` is the per-mode
+  dispatcher. Surfaces `Silence` for mode 0,
+  `Documented { codebook, count }` for modes 6 (8 × `Sv5_256`)
+  and 8 (2 × `Sv20_32`), and `Undocumented` for modes
+  1 / 2 / 3 / 4 / 5 / 7 (see docs gap below).
+- `decode_subframe(submode, innovation_vq_index)` decodes the
+  40-sample fixed-codebook sub-vector `c[n]` for one CELP
+  sub-frame by walking `count` successive `index_bits`-wide
+  chunks off the raw `innovation_vq_index` MSB-first (the same
+  order the parser read them into the `u128`) and concatenating
+  the per-chunk sub-vector lookups. Mode 0 (silence) returns the
+  all-zero vector; documented modes return the concatenated
+  lookups; undocumented modes return `InnovationError::Undocumented`.
+- New `NarrowbandSubFrameIndices::innovation_sub_vector(submode)`
+  convenience method wires the dispatcher off the existing
+  per-sub-frame `innovation_vq_index` produced by the round-3
+  frame-body bit-reader.
+
+17 new unit tests in `innovation::tests` (224 unit tests total,
+up from 207 in r214): per-codebook dimensions match the staged
+`.meta` sidecars; every codebook's row 0 resolves and the slice
+contents match the underlying `codebooks::innovation_*` accessor;
+out-of-range indices return `None` for every codebook;
+`InnovationMapping::for_mode` dispatches mode 0 to `Silence`,
+modes 6 and 8 to `Documented`, and modes 1 / 2 / 3 / 4 / 5 / 7
+to `Undocumented`; documented mappings satisfy
+`sub_vector_len * count == 40 samples` and
+`index_bits * count == innovation_vq_bits` for both bound modes;
+`decode_subframe` returns the all-zero sub-vector for silence,
+`Undocumented` for the seven unbound modes, and the two- /
+eight-sub-vector concatenation for modes 8 / 6 against synthetic
+packed indices; MSB-first index extraction confirmed by single-
+non-zero-sub-vector packed indices landing the right row at the
+right sample offset; both documented modes accept their max
+codebook index without panic.
+
+2 new integration tests in `tests/narrowband_body_fixture.rs`
+(`innovation_dispatcher_is_undocumented_for_mode_5_fixture` and
+`innovation_subvector_for_silence_mode_is_all_zero`): every
+sub-frame of every audio packet of the real `speexenc`-encoded
+mode-5 fixture surfaces `InnovationError::Undocumented` (pinning
+the README docs-gap entry for mode 5 — when a future docs round
+binds mode 5, this test goes red and the expected behaviour can
+be updated in one place); the silence path returns the all-zero
+40-sample vector.
+
+This is the **first round to expose the fixed-codebook sub-vector
+samples** the §9.2 / companion §2.3 final excitation
+`e[n] = p[n] + c[n]` equation needs for `c[n]`. The fixed-codebook
+gain scaling (`g_frame × g_subf`), the excitation buffer state,
+the long-term predictor convolution itself, and the per-mode
+codebook binding for modes 1 / 2 / 3 / 4 / 5 / 7 all remain
+deferred.
+
 ### Coverage estimate
 
-~30 % of the Speex codec surface (Ogg stream header + per-frame
+~33 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -561,11 +630,20 @@ two-stage 6-bit MSVQ → eight-coefficient Q10 LSP reconstruction
 (§10.1 / companion §9) wired through
 `WidebandHighBandBody::reconstructed_lsp_q10`, exercised via
 synthetic mode-0..=4 packets through the public `BitWriter` +
-parse-and-reconstruct round-trip; LSP→LPC + long-term predictor
-convolution + innovation-codebook lookup + excitation buffer state
-+ high-band sub-frame LSP interpolation + ultra-wideband framing +
-the CELP frame-body writer + encoder-side codebook search are the
-remaining pieces).
+parse-and-reconstruct round-trip + r220 narrowband innovation
+sub-vector lookup primitive + per-mode dispatcher
+(`InnovationMapping::for_mode` surfacing `Silence` for mode 0,
+`Documented` for modes 6 (8 × `Sv5_256`) and 8 (2 × `Sv20_32`),
+`Undocumented` for the other seven), wired through
+`NarrowbandSubFrameIndices::innovation_sub_vector`, exercised
+against synthetic mode-6 / mode-8 packed indices and against
+every audio sub-frame of the real mode-5 fixture (the latter
+pinning the `Undocumented` dispatch entry); LSP→LPC + long-term
+predictor convolution + fixed-codebook gain scaling +
+per-mode codebook binding for modes 1 / 2 / 3 / 4 / 5 / 7 +
+excitation buffer state + high-band sub-frame LSP interpolation
++ ultra-wideband framing + the CELP frame-body writer +
+encoder-side codebook search are the remaining pieces).
 
 ### Spec material consulted
 
@@ -691,6 +769,31 @@ generation; its output bytes are the test input.
   high-band sub-frame interpolation module blocks on a docs round
   clarifying whether the high band uses the same scheme, a different
   one, or no interpolation at all.
+- **Per-mode innovation codebook binding.** Speex Codec Manual §9.2
+  documents the bit-budget per sub-frame for every Table 9.1 mode
+  but only binds the codebook-shape choice to a specific
+  innovation-codebook table for two modes via the worked examples
+  in CELP companion §2.3 (mode 6 → `Sv5_256`; mode 8 → `Sv20_32`).
+  Modes 1 / 2 / 3 / 4 / 5 / 7 have multiple bit-budget-consistent
+  decompositions across the six available codebook shapes (e.g.
+  mode 3's 20 bits/sub-frame admit both 4 × `Sv10_32` and other
+  splittings), so the per-mode binding cannot be uniquely pinned
+  from the staged material alone. r220's
+  `InnovationMapping::for_mode` surfaces `Documented` for the two
+  bound modes and `Undocumented` for the other seven; the
+  per-sub-frame decode path (`NarrowbandSubFrameIndices::innovation_sub_vector`)
+  returns `InnovationError::Undocumented` for the unbound modes.
+  Closing this gap needs a docs round staging the per-mode
+  codebook binding (one extra row of the Table 9.1 commentary per
+  mode would suffice).
+- **Fixed-codebook gain Q-format.** Manual §9.2 mentions the
+  frame-level innovation gain `g_frame` and the per-sub-frame
+  correction `g_subf` but neither commits to a documented
+  fixed-point Q-format for the gain magnitudes nor describes the
+  exact rule combining them with the codebook sub-vector samples.
+  r220 surfaces the codebook samples as raw `i16`; the
+  fixed-codebook gain reconstruction stays deferred behind the
+  same docs-staging step as the LSP→LPC algorithm.
 - **High-band coefficient count.** Manual §10.1 prose says *"we use
   only 12 bits to encode the high-band LSP's using a multi-stage
   vector quantizer (MSVQ). The first level quantizes the 10

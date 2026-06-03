@@ -505,3 +505,63 @@ fn pitch_gain_taps_is_silence_for_mode_0() {
         assert_eq!(taps.taps, [0, 0, 0]);
     }
 }
+
+#[test]
+fn innovation_dispatcher_is_undocumented_for_mode_5_fixture() {
+    // Round r220 wiring probe: the staged `docs/audio/speex/` material
+    // grounds the per-mode innovation codebook binding only for modes 6
+    // and 8 (CELP companion §2.3). Mode 5 — the fixture's mode — falls
+    // in the documented-bit-budget-only band, so the dispatcher must
+    // surface `InnovationError::Undocumented` for every sub-frame of
+    // every audio packet. This pins the README docs-gap entry: when a
+    // future docs round binds mode 5, this test goes red and the
+    // expected behaviour can be updated in one place.
+    use oxideav_speex::InnovationError;
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+    let mut total = 0u32;
+    for (i, pkt) in audio.iter().enumerate() {
+        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header");
+        let s = match h.submode {
+            Submode::Celp(s) => s,
+            _ => panic!("packet {i}: expected CELP"),
+        };
+        assert_eq!(s.mode_id, 5);
+        let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body");
+        for (sf_idx, sf) in body.subframes.iter().enumerate() {
+            let r = sf.innovation_sub_vector(&s);
+            assert_eq!(
+                r,
+                Err(InnovationError::Undocumented),
+                "packet {i} sf {sf_idx}: mode-5 dispatch should be Undocumented"
+            );
+            total += 1;
+        }
+    }
+    assert!(
+        total >= 4 * 40,
+        "fixture must have ≥40 frames × 4 sub-frames"
+    );
+}
+
+#[test]
+fn innovation_subvector_for_silence_mode_is_all_zero() {
+    // Mode 0 (silence) carries no innovation field; the dispatcher
+    // must surface the all-zero 40-sample c[n] vector regardless of
+    // the (defaulted-to-zero) `innovation_vq_index`.
+    use oxideav_speex::{NarrowbandSubmode, SUBFRAME_SAMPLES};
+    let silence = NarrowbandSubmode::for_id(0).unwrap();
+    let buf = [0u8; 1];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    assert_eq!(silence.mode_id, 0);
+    for sf in &body.subframes {
+        let v = sf.innovation_sub_vector(&silence).unwrap();
+        assert_eq!(v.len(), SUBFRAME_SAMPLES);
+        assert!(v.iter().all(|&x| x == 0));
+    }
+}

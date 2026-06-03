@@ -70,6 +70,9 @@
 
 use crate::bitreader::{BitError, BitReader};
 use crate::codebooks::NB_LSP_ORDER;
+use crate::innovation::{
+    decode_subframe as decode_innovation_subframe, InnovationError, SUBFRAME_SAMPLES,
+};
 use crate::lsp::{reconstruct_q10, NbLspStages};
 use crate::lsp_interp::NbSubFrameLsp;
 use crate::pitch_gain::{reconstruct as reconstruct_pitch_gain_taps, PitchGainTaps};
@@ -170,6 +173,24 @@ impl NarrowbandSubFrameIndices {
     /// width).
     pub fn pitch_gain_taps(&self, submode: &NarrowbandSubmode) -> Option<PitchGainTaps> {
         reconstruct_pitch_gain_taps(self.pitch_gain_index, submode.pitch_gain)
+    }
+
+    /// Resolve the raw [`Self::innovation_vq_index`] into the 40-sample
+    /// fixed-codebook sub-vector `c[n]` for this sub-frame, wiring the
+    /// r191 narrowband innovation codebooks through the per-mode
+    /// dispatcher documented in [`crate::innovation`].
+    ///
+    /// Mode 0 (silence) returns the all-zero vector; modes 6 / 8 return
+    /// the concatenated sub-vector lookup; modes whose per-mode
+    /// codebook binding is not yet documented in the staged
+    /// `docs/audio/speex/` material return
+    /// [`InnovationError::Undocumented`] (see the README for the
+    /// recorded docs gap).
+    pub fn innovation_sub_vector(
+        &self,
+        submode: &NarrowbandSubmode,
+    ) -> Result<[i16; SUBFRAME_SAMPLES], InnovationError> {
+        decode_innovation_subframe(submode, self.innovation_vq_index)
     }
 }
 

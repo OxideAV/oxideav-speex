@@ -8,6 +8,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r220: narrowband **innovation sub-vector lookup primitive +
+  per-mode dispatcher** for the two modes whose codebook binding is
+  grounded by the staged material (Speex Codec Manual §9.2 + CELP
+  companion §2.3). New `innovation` module exposes
+  `InnovationCodebook` selecting one of the six documented
+  sub-vector codebook shapes (`Sv5_64` / `Sv5_256` / `Sv8_128` /
+  `Sv10_16` / `Sv10_32` / `Sv20_32`), `sub_vector(codebook, index)`
+  returning the `&'static [i16]` slice for one row,
+  `InnovationMapping::for_mode(submode)` dispatching mode 0 to
+  `Silence`, modes 6 (8 × `Sv5_256`) and 8 (2 × `Sv20_32`) to
+  `Documented`, and modes 1 / 2 / 3 / 4 / 5 / 7 to `Undocumented`,
+  plus `decode_subframe(submode, innovation_vq_index)` decoding the
+  40-sample fixed-codebook `c[n]` sub-vector for one CELP sub-frame
+  by concatenating `count` MSB-first sub-vector lookups off the
+  raw `innovation_vq_index` field. New
+  `NarrowbandSubFrameIndices::innovation_sub_vector(submode)`
+  convenience method wires the dispatcher off the existing
+  per-sub-frame `innovation_vq_index`. Public re-exports
+  `InnovationCodebook`, `InnovationError`, `InnovationMapping`,
+  `decode_innovation_subframe`, `innovation_sub_vector`,
+  `SUBFRAME_SAMPLES`. 17 new unit tests in `innovation::tests`
+  (224 unit total, up from 207 in r214) + 2 new integration tests
+  in `tests/narrowband_body_fixture.rs`
+  (`innovation_dispatcher_is_undocumented_for_mode_5_fixture`,
+  `innovation_subvector_for_silence_mode_is_all_zero`).
 - Round r214: wideband **high-band LSP MSVQ reconstruction** per
   Speex Manual §10.1 / CELP companion §9. New `hb_lsp` module
   exposes `HbLspStages::from_packed(lsp_index, submode)` splitting

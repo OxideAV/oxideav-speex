@@ -140,7 +140,25 @@
 //!   the LPC filter Â(z)" without giving the polynomial root-find
 //!   procedure). Reported as a docs gap.
 //!
-//! * **Round r214** (this commit) — wideband **high-band LSP MSVQ
+//! * **Round r220** (this commit) — narrowband **innovation sub-vector
+//!   lookup primitive + per-mode dispatcher** for the two modes whose
+//!   codebook binding is grounded by the staged material (Speex Codec
+//!   Manual §9.2 + CELP companion §2.3 worked examples). The new
+//!   [`innovation`] module exposes [`InnovationCodebook`] selecting one
+//!   of the six documented sub-vector codebook shapes (5 / 8 / 10 / 20
+//!   sample sub-vectors at 4 / 5 / 6 / 7 / 8 bits per index),
+//!   [`innovation_sub_vector`] returning the `&'static [i16]` slice for
+//!   one row, [`InnovationMapping::for_mode`] dispatching mode 0 to
+//!   `Silence`, modes 6 and 8 to `Documented`, and the rest to
+//!   `Undocumented`, plus [`decode_innovation_subframe`] decoding the
+//!   40-sample fixed-codebook `c[n]` sub-vector for one CELP sub-frame
+//!   by concatenating `count` MSB-first sub-vector lookups off the
+//!   `innovation_vq_index` field. Wired off
+//!   [`NarrowbandSubFrameIndices::innovation_sub_vector`]. Per-mode
+//!   binding for modes 1 / 2 / 3 / 4 / 5 / 7 stays deferred behind a
+//!   docs gap.
+//!
+//! * **Round r214** — wideband **high-band LSP MSVQ
 //!   reconstruction** per Speex manual §10.1 / companion §9. The
 //!   r191 two-stage 6-bit MSVQ codebooks (`hb_lsp_stage1`,
 //!   `hb_lsp_stage2`; 64 × 8 each) now resolve through a typed
@@ -181,6 +199,7 @@ mod codebooks;
 mod frame;
 mod hb_lsp;
 mod header;
+mod innovation;
 mod lsp;
 mod lsp_interp;
 mod narrowband_body;
@@ -209,6 +228,10 @@ pub use hb_lsp::{
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,
     SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN,
+};
+pub use innovation::{
+    decode_subframe as decode_innovation_subframe, sub_vector as innovation_sub_vector,
+    InnovationCodebook, InnovationError, InnovationMapping, SUBFRAME_SAMPLES,
 };
 pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
