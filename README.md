@@ -468,6 +468,69 @@ states the interpolated LSPs are *"converted back to the LPC filter
 algorithm itself (it covers the table data; the conversion is
 algorithmic). Reported as a docs gap below.
 
+**Round r214** (this commit) lands the **wideband high-band LSP MSVQ
+reconstruction** — the high-band counterpart to r194's narrowband
+LSP-VQ reconstruction. The two-stage 6-bit MSVQ codebooks staged at
+`docs/audio/speex/tables/hb-lsp-cdbk-stage{1,2}` (already wired into
+[`codebooks`] in r191) now resolve through a typed accessor:
+
+- New `hb_lsp` module exposes
+  `HbLspStages::from_packed(lsp_index, submode) -> Option<HbLspStages>`
+  splitting the 12-bit packed `lsp_index` already surfaced by
+  `WidebandHighBandBody::lsp_index` into per-stage 6-bit indices —
+  top 6 bits → stage 1 (level-1 codebook), bottom 6 bits → stage 2
+  (residual codebook). The ordering convention is the one already
+  documented on `WidebandHighBandBody::lsp_index` and matches §10.1
+  *"The first level quantizes the 10 coefficients with 6 bits and
+  the error is then quantized using 6 bits, too."*
+- `reconstruct_q10(stages) -> Option<[i32; 8]>` sums the two staged
+  codebook rows with the `.meta`-documented per-stage decoder
+  scaling (`hb-lsp-cdbk-stage1` 1/256 → ×4, `hb-lsp-cdbk-stage2`
+  1/512 → ×2) into a common Q10 fixed-point eight-coefficient LSP
+  vector. The Q10 choice matches r194's narrowband convention so
+  both bands speak the same downstream Q-format — the eventual
+  LSP→LPC stage can consume either band with identical arithmetic.
+- The high-band LPC order is **8**, not 10 (`HB_LPC_ORDER` =  8 in
+  `codebooks`, since r191) — the manual's *"10 coefficients"* prose
+  in §10.1 is reconciled by the companion §9 / `.meta` sidecar
+  `order=8`.
+- New `WidebandHighBandBody::lsp_stages(submode)` and
+  `WidebandHighBandBody::reconstructed_lsp_q10(submode)` convenience
+  methods wire the new module off the existing parsed body,
+  mirroring r194's narrowband `NarrowbandFrameBody::lsp_stages` /
+  `reconstructed_lsp_q10`. Silence mode (high-band mode 0 —
+  `submode.lsp_bits == 0`) propagates `None` so callers know to
+  fall back to their own high-band LSP state.
+
+12 new unit tests under `hb_lsp::tests`: silence-mode rejection;
+MSB-first packing round-trip over the full 64 × 64 = 4096-point
+index space; 12-bit index-mask saturation; eight-coefficient
+output length matches `HB_LPC_ORDER`; stage 1 and stage 2
+contributions independently isolated via difference tests; the
+exhaustive 4096-point scan never panics and stays bounded by 762
+at maximum-index reconstruction (the documented Q10 envelope);
+out-of-range stage 1 / stage 2 indices return `None`; from_packed
+→ reconstruct matches the direct path; `HB_LSP_OUTPUT_Q` equals
+`NB_LSP_OUTPUT_Q`; `HB_LSP_PACKED_BITS` matches every documented
+sub-mode's `lsp_bits` field.
+
+4 new integration tests in `tests/hb_lsp_reconstruction.rs` build
+synthetic high-band bodies via the public `BitWriter` (with a
+32-bit-chunked zero-bit helper for the 80-bit mode-4 excitation
+VQ), parse them through `WidebandHighBandBody::parse`, and verify
+the new accessor matches the direct path for a synthesised mode-2
+packet; silence-mode 0 yields `None`; round-trip succeeds for
+every documented mode 1..=4 (covering the 20 / 40 / 80-bit
+excitation-VQ fields).
+
+As with r194 / r200 / r208 this round stops at the LSP-vector
+layer. The high-band LSP → LPC conversion is still deferred (same
+algorithmic gap as the narrowband path). High-band sub-frame LSP
+interpolation is also deferred — the in-repo manual §10 does not
+explicitly state whether the high-band LSPs participate in the
+same r200-style four-way linear interpolation as the narrowband
+LSPs (recorded as a docs gap below).
+
 ### Coverage estimate
 
 ~30 % of the Speex codec surface (Ogg stream header + per-frame
@@ -493,10 +556,16 @@ reconstruction (Manual Eq. 9.1 / companion §2.2) resolving
 per-sub-frame VQ indices into typed `[i16; 3]` β tap triples with
 the `+32` codebook bias applied, wired through
 `NarrowbandSubFrameIndices::pitch_gain_taps` and exercised against
-every audio sub-frame of the fixture; LSP→LPC + long-term predictor
+every audio sub-frame of the fixture + r214 wideband high-band
+two-stage 6-bit MSVQ → eight-coefficient Q10 LSP reconstruction
+(§10.1 / companion §9) wired through
+`WidebandHighBandBody::reconstructed_lsp_q10`, exercised via
+synthetic mode-0..=4 packets through the public `BitWriter` +
+parse-and-reconstruct round-trip; LSP→LPC + long-term predictor
 convolution + innovation-codebook lookup + excitation buffer state
-+ ultra-wideband framing + the CELP frame-body writer +
-encoder-side codebook search are the remaining pieces).
++ high-band sub-frame LSP interpolation + ultra-wideband framing +
+the CELP frame-body writer + encoder-side codebook search are the
+remaining pieces).
 
 ### Spec material consulted
 
@@ -612,6 +681,27 @@ generation; its output bytes are the test input.
   long-term-predictor step. A future docs round should clarify
   the documented β scale so the LTP convolution can pin the
   scaling without a guess.
+- **High-band sub-frame LSP interpolation rule.** The in-repo manual
+  §10 covers the high-band frame layout (Table 10.1) and the 2-stage
+  6-bit MSVQ structure (§10.1) but does not state whether the
+  high-band LSPs participate in the same r200-style four-way linear
+  interpolation as the narrowband LSPs over sub-frames 1..=3 (§9.1).
+  r214 lands the per-frame high-band LSP reconstruction
+  (`WidebandHighBandBody::reconstructed_lsp_q10`); the equivalent
+  high-band sub-frame interpolation module blocks on a docs round
+  clarifying whether the high band uses the same scheme, a different
+  one, or no interpolation at all.
+- **High-band coefficient count.** Manual §10.1 prose says *"we use
+  only 12 bits to encode the high-band LSP's using a multi-stage
+  vector quantizer (MSVQ). The first level quantizes the 10
+  coefficients with 6 bits"* — but the staged
+  `docs/audio/speex/tables/hb-lsp-cdbk-stage1.meta` (and
+  `speex-celp-companion.md` §9) records `order=8` and the codebook
+  arrays are 64 × 8. r214 follows the table dimensions
+  (`HB_LPC_ORDER = 8`); the §10.1 "10 coefficients" wording appears
+  to be an editorial slip carried over from the narrowband LPC order
+  description in §9.1. A docs round can ratify the 8-coefficient
+  high-band LPC order or surface a contradiction.
 
 ## License
 

@@ -8,6 +8,51 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r214: wideband **high-band LSP MSVQ reconstruction** per
+  Speex Manual §10.1 / CELP companion §9. New `hb_lsp` module
+  exposes `HbLspStages::from_packed(lsp_index, submode)` splitting
+  the 12-bit packed `lsp_index` already surfaced by
+  `WidebandHighBandBody::lsp_index` into per-stage 6-bit indices
+  (top 6 bits → stage 1 / level-1 codebook, bottom 6 bits → stage 2
+  / residual codebook), plus
+  `reconstruct_q10(stages) -> Option<[i32; 8]>` summing the two
+  staged codebook rows with the `.meta`-documented per-stage
+  scaling (`hb-lsp-cdbk-stage1` 1/256 → ×4, `hb-lsp-cdbk-stage2`
+  1/512 → ×2) into a common Q10 fixed-point eight-coefficient LSP
+  vector (matching r194's narrowband Q-format so both bands speak
+  the same downstream format). Silence mode (high-band mode 0 —
+  `submode.lsp_bits == 0`) returns `None`. New
+  `WidebandHighBandBody::lsp_stages(submode)` and
+  `WidebandHighBandBody::reconstructed_lsp_q10(submode)` convenience
+  methods wire the new module off the existing parsed body,
+  mirroring r194's `NarrowbandFrameBody::reconstructed_lsp_q10`
+  for the high band.
+- Round r214: public re-exports `reconstruct_hb_lsp_q10`,
+  `HbLspStages`, `HB_LSP_INDEX_MASK`, `HB_LSP_OUTPUT_Q`,
+  `HB_LSP_PACKED_BITS`, `HB_LSP_STAGE_BITS` (the existing
+  `HB_LSP_STAGE_ENTRIES` + `HB_LPC_ORDER` from r191 cover the
+  underlying dimensions). 12 new unit tests in `hb_lsp::tests`
+  (silence-mode rejection; MSB-first packing round-trip over the
+  full 64×64 index space; 12-bit index-mask saturation; eight-
+  coefficient output length matches `HB_LPC_ORDER`; stage 1 +
+  stage 2 contributions isolated via difference tests; full 4096-
+  point exhaustive scan never panics and stays bounded by 762 in
+  Q10; out-of-range stage 1 / stage 2 indices return `None`;
+  from_packed → reconstruct matches direct path; `HB_LSP_OUTPUT_Q`
+  equals `NB_LSP_OUTPUT_Q`; `HB_LSP_PACKED_BITS` matches every
+  documented submode's `lsp_bits`).
+- Round r214: 4 new integration tests in
+  `tests/hb_lsp_reconstruction.rs` build synthetic high-band
+  bodies via the public `BitWriter` (with a 32-bit-chunked
+  zero-bit helper for the 80-bit mode-4 excitation VQ), parse
+  them through `WidebandHighBandBody::parse`, and verify the new
+  accessor matches the direct path for a synthesised mode-2
+  packet; silence-mode 0 yields `None`; round-trip succeeds for
+  every documented mode 1..=4 (covering the 20 / 40 / 80-bit
+  excitation-VQ fields); and the Q10 dynamic range is bounded by
+  762 at maximum-index reconstruction. 223 tests total
+  (207 unit + 16 integration), up from 207 in r208.
+
 - Round r208: narrowband **3-tap pitch-gain VQ reconstruction** per
   Speex Manual Eq. 9.1 / CELP companion §2.2. New `pitch_gain` module
   exposes `reconstruct(index, quant) -> Option<PitchGainTaps>` and

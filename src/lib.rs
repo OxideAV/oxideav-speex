@@ -140,11 +140,37 @@
 //!   the LPC filter Â(z)" without giving the polynomial root-find
 //!   procedure). Reported as a docs gap.
 //!
+//! * **Round r214** (this commit) — wideband **high-band LSP MSVQ
+//!   reconstruction** per Speex manual §10.1 / companion §9. The
+//!   r191 two-stage 6-bit MSVQ codebooks (`hb_lsp_stage1`,
+//!   `hb_lsp_stage2`; 64 × 8 each) now resolve through a typed
+//!   accessor: given the 12-bit packed `lsp_index` field already
+//!   surfaced by [`WidebandHighBandBody::lsp_index`] (round-r160)
+//!   plus the resolved sub-mode, the new [`hb_lsp`] module returns
+//!   an eight-coefficient Q10 fixed-point LSP frequency vector —
+//!   matching the r194 narrowband Q-format so both bands speak the
+//!   same downstream Q-format. [`HbLspStages::from_packed`] splits
+//!   the packed field into per-stage 6-bit indices (top 6 bits →
+//!   level-1 codebook, bottom 6 bits → level-2 residual codebook);
+//!   [`hb_lsp::reconstruct_q10`] sums the two staged contributions
+//!   with the `.meta`-documented per-stage scaling (`1/256` → ×4
+//!   and `1/512` → ×2). New
+//!   [`WidebandHighBandBody::lsp_stages`] and
+//!   [`WidebandHighBandBody::reconstructed_lsp_q10`] convenience
+//!   methods wire the new module off the existing parsed body,
+//!   mirroring r194's narrowband path. Silence mode 0 propagates
+//!   `None`. High-band LSP→LPC conversion + the equivalent
+//!   r200-style sub-frame interpolation rule (if any) stay
+//!   deferred — the in-repo manual §10 is silent on whether the
+//!   high band uses the same interpolation scheme as the
+//!   narrowband or none at all.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
-//! r191 codebook accessors + r194 LSP reconstruction + r200 sub-frame
-//! LSP interpolation surface typed intermediate values but do not yet
-//! produce PCM output.
+//! r191 codebook accessors + r194 narrowband LSP reconstruction +
+//! r200 sub-frame LSP interpolation + r208 pitch-gain VQ
+//! reconstruction + r214 high-band LSP MSVQ reconstruction surface
+//! typed intermediate values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
@@ -153,6 +179,7 @@ use oxideav_core::RuntimeContext;
 mod bitreader;
 mod codebooks;
 mod frame;
+mod hb_lsp;
 mod header;
 mod lsp;
 mod lsp_interp;
@@ -175,6 +202,10 @@ pub use codebooks::{
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+pub use hb_lsp::{
+    reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
+    HB_LSP_PACKED_BITS, HB_LSP_STAGE_BITS,
+};
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,
     SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN,

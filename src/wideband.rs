@@ -341,6 +341,38 @@ impl WidebandHighBandBody {
     pub fn body_bits(submode: &WidebandHighBandSubmode) -> u32 {
         submode.computed_total_bits() - HIGH_BAND_FRAME_PREFIX_BITS
     }
+
+    /// Split this frame's packed 12-bit [`Self::lsp_index`] into the
+    /// per-stage 6-bit MSVQ indices ([`crate::hb_lsp::HbLspStages`]),
+    /// using the sub-mode to detect the silence-mode skip
+    /// (`submode.lsp_bits == 0` → `None`). Mirrors r194's
+    /// [`crate::NarrowbandFrameBody::lsp_stages`] for the narrowband
+    /// path.
+    pub fn lsp_stages(
+        &self,
+        submode: &WidebandHighBandSubmode,
+    ) -> Option<crate::hb_lsp::HbLspStages> {
+        crate::hb_lsp::HbLspStages::from_packed(self.lsp_index, submode)
+    }
+
+    /// Reconstruct the eight high-band LSP frequency coefficients in
+    /// Q[`crate::hb_lsp::HB_LSP_OUTPUT_Q`] fixed-point format from the
+    /// packed [`Self::lsp_index`] + the sub-mode dispatch. Returns
+    /// `None` for high-band sub-modes that skip the LSP field
+    /// (mode 0 / silence).
+    ///
+    /// The reconstruction is the typed lookup + per-stage summation
+    /// implemented in [`crate::hb_lsp::reconstruct_q10`]; this method
+    /// is the symmetric companion to r194's
+    /// [`crate::NarrowbandFrameBody::reconstructed_lsp_q10`] for the
+    /// high band.
+    pub fn reconstructed_lsp_q10(
+        &self,
+        submode: &WidebandHighBandSubmode,
+    ) -> Option<[i32; crate::codebooks::HB_LPC_ORDER]> {
+        let stages = self.lsp_stages(submode)?;
+        crate::hb_lsp::reconstruct_q10(stages)
+    }
 }
 
 /// Parsed wideband high-band frame header (the 4-bit prefix: 1-bit
