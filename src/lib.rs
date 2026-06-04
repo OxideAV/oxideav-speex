@@ -207,19 +207,43 @@
 //!   high band uses the same interpolation scheme as the
 //!   narrowband or none at all.
 //!
+//! * **Round r234** (this commit) — narrowband **adaptive-codebook
+//!   (long-term predictor) index resolution + excitation history
+//!   buffer**. Spec basis: Speex Codec Manual §9.2 Eq. 9.1
+//!   `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]` plus the
+//!   explicit excitation-repeat rule for short pitches:
+//!   *"when the pitch is smaller than the sub-frame size, we repeat
+//!   the excitation at a period T. For example, when `n − T + 1 ≥ 0`,
+//!   we use `n − 2T + 1` instead."* The new [`adaptive_codebook`]
+//!   module exposes [`resolve_lookback`] (the typed repeat-rule
+//!   helper), [`sample_lookback_indices`] (per-sample three-tap
+//!   offsets), [`subframe_lookback_indices`] (a
+//!   `[[i32; 3]; 40]` matrix per pitch period), plus the typed
+//!   [`ExcitationBuffer`] holding the
+//!   [`EXCITATION_HISTORY_LEN`] = 145 past samples the deepest
+//!   conformant tap (`e[n − T − 1]` at `n = 0`, `T = 144`) reads.
+//!   The module is **Q-format-agnostic** by design — the gain
+//!   multiplication `g·e[k]` is deferred until the documented β
+//!   Q-format pin (see [`crate::pitch_gain`] module docs for the
+//!   recorded gap), so the index resolution + buffer state machine
+//!   land independently and the eventual long-term-predictor sum
+//!   can pin its scaling in a single follow-up round.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
 //! r200 sub-frame LSP interpolation + r208 pitch-gain VQ
 //! reconstruction + r214 high-band LSP MSVQ reconstruction +
 //! r220 narrowband innovation sub-vector dispatch + r230 high-band
-//! innovation sub-vector dispatch surface typed intermediate values
-//! but do not yet produce PCM output.
+//! innovation sub-vector dispatch + r234 adaptive-codebook index
+//! resolution + excitation history buffer surface typed intermediate
+//! values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
 use oxideav_core::RuntimeContext;
 
+mod adaptive_codebook;
 mod bitreader;
 mod codebooks;
 mod frame;
@@ -236,6 +260,10 @@ mod signalling;
 mod submode;
 mod wideband;
 
+pub use adaptive_codebook::{
+    resolve_lookback, sample_lookback_indices, subframe_lookback_indices, ExcitationBuffer,
+    ExcitationError, ADAPTIVE_CODEBOOK_TAPS, EXCITATION_HISTORY_LEN, TAP_PITCH_OFFSETS,
+};
 pub use bitreader::{BitError, BitReader, BitWriter};
 pub use codebooks::{
     hb_innovation_10_32, hb_innovation_8_128, hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2,

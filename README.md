@@ -685,6 +685,86 @@ sub-frame LSP interpolation rule (still unbound by the staged
 material), the per-mode codebook binding for mode 4, and ultra-
 wideband framing all remain deferred.
 
+**Round r234** (this commit) lands the **narrowband
+adaptive-codebook (long-term predictor) index resolution +
+excitation history buffer**. Spec basis is Speex Codec Manual §9.2:
+
+> Eq. 9.1: `ea[n] = g0·e[n − T − 1] + g1·e[n − T] + g2·e[n − T + 1]`
+
+followed by the explicit excitation-repeat rule for short pitches:
+
+> *"It is worth noting that when the pitch is smaller than the
+> sub-frame size, we repeat the excitation at a period T. For
+> example, when `n − T + 1 ≥ 0`, we use `n − 2T + 1` instead."*
+
+(CELP companion §2.2 paraphrases the same rule.) The new
+`adaptive_codebook` module exposes:
+
+- `EXCITATION_HISTORY_LEN` = 145 — the historical-buffer length
+  sufficient for the deepest conformant tap (`e[n − T − 1]` at
+  `n = 0`, `T = PITCH_PERIOD_MAX = 144`).
+- `TAP_PITCH_OFFSETS` = `[-1, 0, 1]` — the §9.2 Eq. 9.1 per-tap
+  pitch-relative offsets for `g0, g1, g2`.
+- `resolve_lookback(k, t)` — the typed repeat-rule helper.
+  Iterates `k ← k − T` while `k ≥ 0`, returning the first `k` that
+  lies strictly in the historical region (`k < 0`).
+- `sample_lookback_indices(n, t)` — for one output sample position
+  `n` within a 40-sample sub-frame, returns the three substituted
+  lookback offsets `[k0, k1, k2]` (each strictly negative).
+- `subframe_lookback_indices(t)` — the `[[i32; 3]; 40]` matrix for
+  one entire 40-sample CELP sub-frame.
+- `ExcitationBuffer` — typed rolling history of the last
+  `EXCITATION_HISTORY_LEN` samples of the emitted excitation
+  `e[·]`. Initialises all-zero (stream-start), supports `push`,
+  `extend_from_slice`, and `lookup(k)` using the negative-offset
+  addressing convention matching the manual's `e[n − k]` notation
+  (`lookup(-1)` is the most recently pushed sample).
+- `ExcitationError` — typed errors for non-historical offsets
+  (`k ≥ 0`) and out-of-history reads (`-k > history length`).
+
+22 new unit tests in `adaptive_codebook::tests` (266 unit tests
+total, up from 244 in r230): `resolve_lookback` is identity for
+`k < 0`; the manual's worked example `(n, T) = (22, 17) → k = 6 →
+−11` and the boundary case `n = T − 1 → 0 → −T` pin the substitution;
+iteration for very-short pitch (one and two `T`-steps); every
+sample-position × pitch-period pair in
+`(0..40) × [17, 144]` produces strictly-negative lookbacks for all
+three taps; the matrix `subframe_lookback_indices(t)` matches the
+per-sample function row-by-row; for `T ≥ 41` no substitution
+occurs and the matrix equals the raw `(n − T − 1, n − T, n − T + 1)`
+offsets; every resolved lookback is within the
+`EXCITATION_HISTORY_LEN`-sample window; `ExcitationBuffer`
+starts all-zero, accepts `push` / `extend_from_slice` ordered
+correctly, returns the most recently pushed sample at offset −1,
+rolls through the full window without information loss, wraps
+around evicting the oldest entries, rejects non-historical and
+out-of-history offsets with the typed errors; the public
+constants `EXCITATION_HISTORY_LEN`, `TAP_PITCH_OFFSETS`,
+`ADAPTIVE_CODEBOOK_TAPS` pin the documented derivation.
+
+The module is **Q-format-agnostic** by design. The gain
+multiplication `gj · e[kj]` is deferred: the post-bias β triple
+from `crate::pitch_gain::reconstruct` is surfaced as raw signed
+integers in codebook units (Q-format is a recorded docs gap on
+`pitch_gain`), so committing to a multiplication-output Q-format
+here would propagate the ambiguity. Keeping the buffer + index
+resolution at the integer-offset layer means the eventual
+long-term-predictor sum can pin its scaling in a single
+follow-up round without re-deriving the index arithmetic.
+
+This is the **first round to expose a typed historical
+excitation buffer state machine for Speex narrowband**. The
+sub-frame final-excitation composition `e[n] = p[n] + c[n]`
+(§8.4) still needs the gain-scaled adaptive contribution `p[n]`
+(blocked on the pitch-gain Q-format gap above) plus the
+gain-scaled fixed-codebook contribution (blocked on the
+fixed-codebook gain `g_frame × g_subf` scalar quantiser, which
+is documented in CELP companion §9 as "computed, not a lookup
+array" — the quantiser algorithm itself is the remaining
+algorithmic gap). The high-band sub-band-CELP path never
+consults this module since §10.2 explicitly states *"there's no
+pitch prediction for the high-band"*.
+
 ### Coverage estimate
 
 ~35 % of the Speex codec surface (Ogg stream header + per-frame
@@ -731,12 +811,18 @@ high-band innovation sub-vector dispatcher
 for mode 4), wired through
 `WidebandHighBandBody::hb_innovation_sub_vector`, exercised
 against synthetic mode-2 / mode-3 / mode-4 packets built through
-the public `BitWriter`; LSP→LPC + long-term predictor
-convolution + fixed-codebook gain scaling + per-mode codebook
-binding for narrowband modes 1 / 2 / 3 / 4 / 5 / 7 and high-band
-mode 4 + excitation buffer state + high-band sub-frame LSP
-interpolation + ultra-wideband framing + the CELP frame-body
-writer + encoder-side codebook search are the remaining pieces).
+the public `BitWriter` + r234 narrowband adaptive-codebook
+(long-term predictor) index resolution + excitation history
+buffer (§9.2 Eq. 9.1 + the documented repeat-rule for short
+pitches) surfacing `resolve_lookback`, `sample_lookback_indices`,
+`subframe_lookback_indices`, plus the typed 145-sample
+`ExcitationBuffer` with negative-offset addressing matching the
+manual's `e[n − k]` notation; LSP→LPC + the gain-scaled
+long-term predictor sum + fixed-codebook gain scaling + per-mode
+codebook binding for narrowband modes 1 / 2 / 3 / 4 / 5 / 7 and
+high-band mode 4 + high-band sub-frame LSP interpolation +
+ultra-wideband framing + the CELP frame-body writer + the
+encoder-side codebook search are the remaining pieces).
 
 ### Spec material consulted
 

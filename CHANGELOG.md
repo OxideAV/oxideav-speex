@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r234: narrowband **adaptive-codebook (long-term predictor)
+  index resolution + excitation history buffer** per Speex Codec
+  Manual §9.2 Eq. 9.1 (`ea[n] = g0·e[n − T − 1] + g1·e[n − T] +
+  g2·e[n − T + 1]`) and the documented excitation-repeat rule for
+  short pitches (*"when the pitch is smaller than the sub-frame
+  size, we repeat the excitation at a period T. For example, when
+  `n − T + 1 ≥ 0`, we use `n − 2T + 1` instead"*). New
+  `adaptive_codebook` module exposes the typed index-arithmetic
+  helpers `resolve_lookback(k, t)` (iterates the documented
+  `k ← k − T` substitution while `k ≥ 0`), `sample_lookback_indices(n, t)`
+  (per-sample three-tap offsets, strictly negative), and
+  `subframe_lookback_indices(t)` (a `[[i32; 3]; 40]` matrix per
+  pitch period), plus the typed `ExcitationBuffer` rolling buffer
+  of the last `EXCITATION_HISTORY_LEN = 145` samples of the
+  emitted excitation `e[·]`, with `push` / `extend_from_slice` /
+  `lookup(k)` (negative-offset addressing matching the manual's
+  `e[n − k]` notation) + typed `ExcitationError` variants for
+  non-historical and out-of-history offsets. Public constants
+  `EXCITATION_HISTORY_LEN`, `ADAPTIVE_CODEBOOK_TAPS = 3`, and
+  `TAP_PITCH_OFFSETS = [-1, 0, 1]` pin the documented derivation.
+  Public re-exports `resolve_lookback`, `sample_lookback_indices`,
+  `subframe_lookback_indices`, `ExcitationBuffer`,
+  `ExcitationError`, `ADAPTIVE_CODEBOOK_TAPS`,
+  `EXCITATION_HISTORY_LEN`, `TAP_PITCH_OFFSETS`. 22 new unit tests
+  in `adaptive_codebook::tests` (266 unit total, up from 244 in
+  r230). Module is **Q-format-agnostic** by design — the gain
+  multiplication `gj · e[kj]` is deferred until the documented
+  β Q-format pin (see `pitch_gain` module docs for the recorded
+  gap), so the index resolution + buffer state machine land
+  independently and the eventual long-term-predictor sum can pin
+  its scaling in a single follow-up round.
+
 - Round r230: wideband **high-band innovation sub-vector lookup
   primitive + per-mode dispatcher** mirroring r220's narrowband path
   for the sub-band-CELP high band (Speex Codec Manual §10.3 + Table
