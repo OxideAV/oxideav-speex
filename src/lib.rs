@@ -158,6 +158,30 @@
 //!   binding for modes 1 / 2 / 3 / 4 / 5 / 7 stays deferred behind a
 //!   docs gap.
 //!
+//! * **Round r230** (this commit) — wideband **high-band innovation
+//!   sub-vector lookup primitive + per-mode dispatcher** mirroring
+//!   r220's narrowband [`innovation`] path for the sub-band-CELP
+//!   high band. Spec basis: Speex Codec Manual §10.3 *"the encoding
+//!   of the high-band excitation is done in a way similar to that
+//!   of the narrowband innovation"*, Table 10.1's per-sub-frame
+//!   `excitation_vq_bits` widths (0 / 0 / 20 / 40 / 80 for modes
+//!   0..=4), and the two staged high-band codebook shapes in
+//!   `docs/audio/speex/tables/README.md`. The new [`hb_innovation`]
+//!   module exposes [`HbInnovationCodebook`] selecting between
+//!   `HbSv8_128` (8-sample × 7-bit index + 1-bit sign, 128 entries)
+//!   and `HbSv10_32` (10-sample × 5-bit, 32 entries),
+//!   [`hb_innovation_sub_vector`] returning the `&'static [i16]`
+//!   slice for one row, [`HbInnovationMapping::for_mode`]
+//!   dispatching modes 0 / 1 to `Silence`, mode 2 to `Documented`
+//!   (4 × `HbSv10_32`), mode 3 to `Documented` (5 × `HbSv8_128`
+//!   with per-sub-vector sign), mode 4 to `Undocumented` (no
+//!   unique decomposition over the staged inventory), plus
+//!   [`decode_hb_subframe`] decoding the 40-sample fixed-codebook
+//!   excitation sub-vector for one high-band CELP sub-frame. Wired
+//!   off [`WidebandHighBandBody::hb_innovation_sub_vector`].
+//!   High-band fixed-codebook gain scaling + excitation buffer
+//!   state + mode-4 codebook binding stay deferred.
+//!
 //! * **Round r214** — wideband **high-band LSP MSVQ
 //!   reconstruction** per Speex manual §10.1 / companion §9. The
 //!   r191 two-stage 6-bit MSVQ codebooks (`hb_lsp_stage1`,
@@ -187,8 +211,10 @@
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
 //! r200 sub-frame LSP interpolation + r208 pitch-gain VQ
-//! reconstruction + r214 high-band LSP MSVQ reconstruction surface
-//! typed intermediate values but do not yet produce PCM output.
+//! reconstruction + r214 high-band LSP MSVQ reconstruction +
+//! r220 narrowband innovation sub-vector dispatch + r230 high-band
+//! innovation sub-vector dispatch surface typed intermediate values
+//! but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
@@ -197,6 +223,7 @@ use oxideav_core::RuntimeContext;
 mod bitreader;
 mod codebooks;
 mod frame;
+mod hb_innovation;
 mod hb_lsp;
 mod header;
 mod innovation;
@@ -221,6 +248,10 @@ pub use codebooks::{
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+pub use hb_innovation::{
+    decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
+    HbInnovationMapping, HB_SUBFRAME_SAMPLES,
+};
 pub use hb_lsp::{
     reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
     HB_LSP_PACKED_BITS, HB_LSP_STAGE_BITS,

@@ -373,6 +373,34 @@ impl WidebandHighBandBody {
         let stages = self.lsp_stages(submode)?;
         crate::hb_lsp::reconstruct_q10(stages)
     }
+
+    /// Decode the fixed-codebook excitation sub-vector for one
+    /// high-band sub-frame (`sub_idx` in `0..4`) from its packed
+    /// `excitation_vq_index` field and the sub-mode dispatch. Returns
+    /// the 40-sample `[i16; 40]` sub-vector (sign-adjusted for
+    /// [`crate::HbInnovationCodebook::HbSv8_128`]; raw codebook
+    /// samples for [`crate::HbInnovationCodebook::HbSv10_32`]).
+    ///
+    /// For modes 0 and 1 (no excitation-VQ field on the wire) returns
+    /// the all-zero sub-vector; for mode 4 returns
+    /// [`crate::HbInnovationError::Undocumented`] since the staged
+    /// material does not pin a unique codebook decomposition. See
+    /// [`crate::hb_innovation`] module docs for the binding
+    /// derivation.
+    ///
+    /// Symmetric to r220's narrowband
+    /// [`crate::NarrowbandSubFrameIndices::innovation_sub_vector`].
+    pub fn hb_innovation_sub_vector(
+        &self,
+        submode: &WidebandHighBandSubmode,
+        sub_idx: usize,
+    ) -> Result<
+        [i16; crate::hb_innovation::HB_SUBFRAME_SAMPLES],
+        crate::hb_innovation::HbInnovationError,
+    > {
+        let sf = &self.subframes[sub_idx];
+        crate::hb_innovation::decode_hb_subframe(submode, sf.excitation_vq_index)
+    }
 }
 
 /// Parsed wideband high-band frame header (the 4-bit prefix: 1-bit

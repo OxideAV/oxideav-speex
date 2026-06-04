@@ -8,6 +8,39 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r230: wideband **high-band innovation sub-vector lookup
+  primitive + per-mode dispatcher** mirroring r220's narrowband path
+  for the sub-band-CELP high band (Speex Codec Manual §10.3 + Table
+  10.1 + CELP companion §9 / `tables/README.md`). New `hb_innovation`
+  module exposes `HbInnovationCodebook` selecting between the two
+  documented high-band codebook shapes (`HbSv8_128` — 8-sample × 7-bit
+  index + 1-bit sign, 128 entries; `HbSv10_32` — 10-sample × 5-bit,
+  32 entries), `hb_innovation_sub_vector(codebook, index)` returning
+  the `&'static [i16]` slice for one row, `HbInnovationMapping::for_mode`
+  dispatching modes 0 and 1 to `Silence`, mode 2 to `Documented` (4 ×
+  `HbSv10_32`), mode 3 to `Documented` (5 × `HbSv8_128` with sign bit),
+  and mode 4 to `Undocumented`, plus `decode_hb_subframe(submode,
+  excitation_vq_index)` decoding the 40-sample fixed-codebook
+  excitation sub-vector for one high-band CELP sub-frame by
+  concatenating `count` MSB-first slot lookups (each slot being a 7-bit
+  index + 1-bit sign for `HbSv8_128` or a 5-bit index for `HbSv10_32`)
+  off the raw `excitation_vq_index` field, with the sign bit (when
+  present) negating the looked-up sub-vector element-wise. New
+  `WidebandHighBandBody::hb_innovation_sub_vector(submode, sub_idx)`
+  convenience method wires the dispatcher off the existing
+  per-sub-frame `excitation_vq_index`. Public re-exports
+  `HbInnovationCodebook`, `HbInnovationError`, `HbInnovationMapping`,
+  `decode_hb_subframe`, `hb_innovation_sub_vector`,
+  `HB_SUBFRAME_SAMPLES`. 20 new unit tests in `hb_innovation::tests`
+  (244 unit total, up from 224 in r220) + 6 new integration tests in
+  `tests/hb_innovation_dispatch.rs`
+  (`parse_then_dispatch_matches_direct_path_for_mode_2_body`,
+  `parse_then_dispatch_matches_direct_path_for_mode_3_body`,
+  `silence_modes_return_all_zero_sub_vector`,
+  `mode_4_dispatcher_is_undocumented_with_full_excitation_vq_field`,
+  `dispatcher_for_every_documented_mode_satisfies_bit_budget`,
+  `codebook_row_zero_for_each_shape_is_accessible_through_public_api`).
+
 - Round r220: narrowband **innovation sub-vector lookup primitive +
   per-mode dispatcher** for the two modes whose codebook binding is
   grounded by the staged material (Speex Codec Manual §9.2 + CELP

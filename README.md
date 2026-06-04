@@ -600,9 +600,94 @@ the long-term predictor convolution itself, and the per-mode
 codebook binding for modes 1 / 2 / 3 / 4 / 5 / 7 all remain
 deferred.
 
+**Round r230** (this commit) lands the **wideband high-band
+innovation sub-vector lookup primitive + per-mode dispatcher** —
+mirroring r220's narrowband path for the sub-band-CELP high band.
+Spec basis is Speex Codec Manual §10.3 *"the encoding of the
+high-band excitation is done in a way similar to that of the
+narrowband innovation"*, the Table 10.1 per-sub-frame
+`excitation_vq_bits` widths (`0 / 0 / 20 / 40 / 80` for modes
+`0..=4`), and the two staged high-band codebook shapes documented in
+`docs/audio/speex/speex-celp-companion.md` §9 plus
+`docs/audio/speex/tables/README.md`. New `hb_innovation` module
+exposes:
+
+- `HbInnovationCodebook` — selector for one of the two documented
+  high-band codebook shapes: `HbSv8_128` (8-sample × 7-bit index +
+  1-bit sign, 128 entries) and `HbSv10_32` (10-sample × 5-bit,
+  32 entries). Variants carry `sub_vector_len()`, `index_bits()`,
+  `has_sign_bit()`, `slot_bits()` (= `index_bits + 1` for
+  `HbSv8_128`), and `entries()`.
+- `hb_innovation_sub_vector(codebook, index)` returns the
+  `&'static [i16]` row slice from the staged CSV.
+- `HbInnovationMapping::for_mode(submode)` is the per-mode
+  dispatcher. Surfaces `Silence` for modes 0 and 1 (no excitation-VQ
+  field on the wire), `Documented { codebook, count }` for modes 2
+  (4 × `HbSv10_32` — 4 × 5-bit indices × 10 samples = 20 bits, 40
+  samples) and 3 (5 × `HbSv8_128` — 5 × (7-bit index + 1-bit sign)
+  × 8 samples = 40 bits, 40 samples), and `Undocumented` for
+  mode 4 (80 bits / sub-frame with no documented unique
+  decomposition over the staged inventory).
+- `decode_hb_subframe(submode, excitation_vq_index)` decodes the
+  40-sample fixed-codebook high-band excitation sub-vector for one
+  CELP sub-frame by walking `count` successive `slot_bits`-wide
+  chunks off the raw `excitation_vq_index` MSB-first, splitting
+  each slot into its `index_bits` prefix + optional 1-bit sign
+  suffix, looking up each index against the dispatched codebook,
+  applying the sign (negating element-wise when set), and
+  concatenating the resulting sub-vectors into a single
+  40-element vector.
+- New `WidebandHighBandBody::hb_innovation_sub_vector(submode,
+  sub_idx)` convenience method wires the dispatcher off the
+  existing per-sub-frame `excitation_vq_index` produced by the
+  round-r160 high-band body bit-reader.
+
+20 new unit tests in `hb_innovation::tests` (244 unit tests total,
+up from 224 in r220): per-codebook dimensions match the staged
+`.meta` sidecars (sample count, index bits, sign-bit presence, slot
+width, entry count); both codebooks resolve row 0 against the
+underlying `codebooks::hb_innovation_*` accessor; out-of-range
+indices return `None`; per-mode dispatcher resolves modes 0 / 1 to
+`Silence`, mode 2 to `Documented { HbSv10_32, 4 }`, mode 3 to
+`Documented { HbSv8_128, 5 }`, mode 4 to `Undocumented`; documented
+mappings satisfy `sub_vector_len * count == 40 samples` and
+`slot_bits * count == excitation_vq_bits`; `decode_hb_subframe`
+returns the all-zero sub-vector for silence modes,
+`HbInnovationError::Undocumented` for mode 4, and the
+four-sub-vector (mode 2) / five-sub-vector (mode 3) concatenation
+against synthetic packed indices; sign-bit handling exercised with
+cleared, set, mixed, and max-index patterns; MSB-first index
+extraction confirmed by single-non-zero-sub-vector packed indices
+landing the right row at the right sample offset.
+
+6 new integration tests in `tests/hb_innovation_dispatch.rs`:
+synthetic wideband high-band bodies built via the public
+`BitWriter` for modes 2 and 3, parsed through
+`WidebandHighBandBody::parse`, and verified to yield the same
+40-sample output via the new convenience method as via the
+direct `decode_hb_subframe` call against the synthesised
+`excitation_vq_index` field; silence-mode bodies (modes 0 / 1)
+produce the all-zero sub-vector for every sub-frame; a conforming
+mode-4 body produces `HbInnovationError::Undocumented` for every
+sub-frame (pinning the docs-gap entry for mode 4 — when a future
+docs round binds mode 4, this test goes red and the expected
+behaviour can be updated in one place); the per-mode-bit-budget
+invariant `slot_bits * count == excitation_vq_bits` is checked
+through the public API for every documented mode.
+
+This is the **first round to expose the fixed-codebook sub-vector
+samples for the wideband high band**, the §10.3 high-band
+excitation `c[n]` equivalent (no long-term predictor contribution
+since §10.2 explicitly states *"no pitch prediction is used in the
+high band"*). The high-band fixed-codebook gain scaling
+(`g_frame × g_subf`), the excitation buffer state, the high-band
+sub-frame LSP interpolation rule (still unbound by the staged
+material), the per-mode codebook binding for mode 4, and ultra-
+wideband framing all remain deferred.
+
 ### Coverage estimate
 
-~33 % of the Speex codec surface (Ogg stream header + per-frame
+~35 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -638,12 +723,20 @@ sub-vector lookup primitive + per-mode dispatcher
 `NarrowbandSubFrameIndices::innovation_sub_vector`, exercised
 against synthetic mode-6 / mode-8 packed indices and against
 every audio sub-frame of the real mode-5 fixture (the latter
-pinning the `Undocumented` dispatch entry); LSP→LPC + long-term
-predictor convolution + fixed-codebook gain scaling +
-per-mode codebook binding for modes 1 / 2 / 3 / 4 / 5 / 7 +
-excitation buffer state + high-band sub-frame LSP interpolation
-+ ultra-wideband framing + the CELP frame-body writer +
-encoder-side codebook search are the remaining pieces).
+pinning the `Undocumented` dispatch entry) + r230 wideband
+high-band innovation sub-vector dispatcher
+(`HbInnovationMapping::for_mode` surfacing `Silence` for modes
+0 / 1, `Documented` for mode 2 (4 × `HbSv10_32`) and mode 3
+(5 × `HbSv8_128` with per-sub-vector sign bit), `Undocumented`
+for mode 4), wired through
+`WidebandHighBandBody::hb_innovation_sub_vector`, exercised
+against synthetic mode-2 / mode-3 / mode-4 packets built through
+the public `BitWriter`; LSP→LPC + long-term predictor
+convolution + fixed-codebook gain scaling + per-mode codebook
+binding for narrowband modes 1 / 2 / 3 / 4 / 5 / 7 and high-band
+mode 4 + excitation buffer state + high-band sub-frame LSP
+interpolation + ultra-wideband framing + the CELP frame-body
+writer + encoder-side codebook search are the remaining pieces).
 
 ### Spec material consulted
 
@@ -794,6 +887,41 @@ generation; its output bytes are the test input.
   r220 surfaces the codebook samples as raw `i16`; the
   fixed-codebook gain reconstruction stays deferred behind the
   same docs-staging step as the LSP→LPC algorithm.
+- **High-band per-mode innovation codebook binding (mode 4).**
+  Speex Codec Manual §10.3 states the high-band excitation is
+  *"coded in a way similar to that of the narrowband innovation"*
+  but does not explicitly bind each Table 10.1 mode to a specific
+  high-band codebook. Modes 0 and 1 carry `excitation_vq_bits = 0`
+  (no VQ field, silence / gain-only); modes 2 (20 bits) and 3 (40
+  bits) have unique decompositions over the staged inventory
+  (`hb-innovation-cdbk-sv10-32` 5-bit × 10-sample and
+  `hb-innovation-cdbk-sv8-128` 7-bit + sign × 8-sample
+  respectively), but mode 4 (80 bits / sub-frame) admits no
+  bit-budget-AND-sample-count-consistent decomposition over the
+  two documented codebook shapes alone — `4 × 10 = 40` samples
+  and `5 × 8 = 40` samples are the only sub-vector-length
+  constraints that hit the 40-sample sub-frame from the staged
+  shapes, but `4 × slot = 80` requires `slot = 20` and `5 × slot
+  = 80` requires `slot = 16`, neither matching the documented
+  index widths (5 / 8). r230's `HbInnovationMapping::for_mode`
+  surfaces `Documented` for modes 2 / 3 and `Undocumented` for
+  mode 4; the per-sub-frame decode path
+  (`WidebandHighBandBody::hb_innovation_sub_vector`) returns
+  `HbInnovationError::Undocumented` for mode 4. Closing this gap
+  needs a docs round either staging mode 4's per-mode binding
+  (likely a third high-band codebook shape or a known
+  sub-vector concatenation rule) or amending Table 10.1.
+- **High-band fixed-codebook sign-bit ordering for `HbSv8_128`.**
+  The staged `docs/audio/speex/tables/README.md` describes the
+  `hb-innovation-cdbk-sv8-128` shape as *"7-bit + sign"* but does
+  not state which order the index and sign bits occupy within a
+  sub-vector slot on the wire. r230's `decode_hb_subframe` reads
+  the 7-bit index in the high-order bits of the 8-bit slot and the
+  1-bit sign in the LSB — the only ordering consistent with the
+  README's left-to-right *"7-bit + sign"* notation and the parser's
+  MSB-first packing convention. A docs round can ratify or correct
+  this ordering; the fix-up is localised to a single shift in
+  `decode_hb_subframe`.
 - **High-band coefficient count.** Manual §10.1 prose says *"we use
   only 12 bits to encode the high-band LSP's using a multi-stage
   vector quantizer (MSVQ). The first level quantizes the 10
