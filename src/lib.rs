@@ -249,6 +249,22 @@
 //!   land independently and the eventual long-term-predictor sum
 //!   can pin its scaling in a single follow-up round.
 //!
+//! * **Round r244** (this commit) — narrowband **raw excitation
+//!   composition primitive** composing r241 + r220 into the per-sub-frame
+//!   `[i32; 40]` raw-integer evaluation of Speex Codec Manual §8.4 /
+//!   CELP companion §2.3 `e[n] = p[n] + c[n]` where `p[n] = ea[n]` is
+//!   the r241 adaptive-codebook contribution and `c[n]` is the r220
+//!   innovation sub-vector. The new [`excitation`] module exposes
+//!   [`raw_excitation_subframe`] (whole sub-frame batch) and
+//!   [`raw_excitation_sample`] (per-sample helper) returning the raw
+//!   widening sum `ea[n] + i32::from(c[n])` — Q-format-agnostic by
+//!   design, matching the r234 / r241 convention. The fixed-codebook
+//!   gain composition + the saturating `i32 → i16` buffer-push step +
+//!   the final Q-format pin stay deferred behind the documented
+//!   pitch-gain Q-format gap (see the [`adaptive_contribution`] module
+//!   docs) and the CELP companion §9 fixed-codebook gain scalar
+//!   quantiser gap.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -257,8 +273,9 @@
 //! r220 narrowband innovation sub-vector dispatch + r230 high-band
 //! innovation sub-vector dispatch + r234 adaptive-codebook index
 //! resolution + excitation history buffer + r241 adaptive-codebook
-//! contribution sum surface typed intermediate values but do not yet
-//! produce PCM output.
+//! contribution sum + r244 raw excitation composition primitive
+//! surface typed intermediate values but do not yet produce PCM
+//! output.
 
 #![warn(missing_debug_implementations)]
 
@@ -268,6 +285,7 @@ mod adaptive_codebook;
 mod adaptive_contribution;
 mod bitreader;
 mod codebooks;
+mod excitation;
 mod frame;
 mod hb_innovation;
 mod hb_lsp;
@@ -300,6 +318,7 @@ pub use codebooks::{
     NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS,
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
+pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,

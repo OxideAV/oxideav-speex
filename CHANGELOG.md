@@ -8,6 +8,47 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r244: narrowband **raw excitation composition primitive**
+  composing r241 + r220 into the per-sub-frame `[i32; 40]` raw-integer
+  evaluation of Speex Codec Manual §8.4 / CELP companion §2.3
+  `e[n] = p[n] + c[n]` where `p[n] = ea[n]` is the r241 adaptive-codebook
+  contribution and `c[n]` is the r220 fixed-codebook (innovation)
+  sub-vector. New `excitation` module exposes
+  `raw_excitation_subframe(ea, c)` (whole sub-frame batch over
+  `[i32; 40] + [i16; 40]`) and `raw_excitation_sample(n, ea_n, c_n)`
+  (per-sample helper) returning the per-sample widening sum
+  `ea[n] + i32::from(c[n])`. The output is **Q-format-agnostic** by
+  design — both inputs are raw integer values (post-bias gain integers
+  times `i16` historical samples on the r241 side; raw `i16` codebook
+  entries on the r220 side), so the per-sample sum stays in the same
+  raw integer units. Headroom argument: `|ea[n]| + |c[n]|` is bounded
+  by `1.6 × 10⁷ + 3.3 × 10⁴ ≈ 1.6 × 10⁷`, well below `i32::MAX ≈
+  2.1 × 10⁹`, so the `i32 + i32` accumulator stays in range across
+  the entire `[17, 144]` pitch range and the full post-bias gain
+  envelope. Stream-start behaviour is inherited from r241: with the
+  all-zero default `ExcitationBuffer` from r234 the r241 `ea` term is
+  identically zero, so the composed `e_raw` follows the first-frame
+  innovation sub-vector verbatim (the documented "no spurious
+  transient" envelope). New public constant `RAW_EXCITATION_SAMPLES`
+  restating `40` at the composition layer. Public re-exports
+  `raw_excitation_subframe`, `raw_excitation_sample`,
+  `RAW_EXCITATION_SAMPLES`. 12 new unit tests in `excitation::tests`
+  (290 lib tests total, up from 278 in r241): both-zero → zero,
+  zero-`ea` → widened-`c`, zero-`c` → `ea` exact, linearity in `ea`,
+  pointwise pin matching the documented formula, per-sample vs batch
+  agreement, stream-start envelope follows mode-6 documented dispatch
+  innovation only (eight-sub-vector `Sv5_256` walk), silence
+  sub-mode → all-zero envelope, headroom argument at the analytic
+  bounds with `checked_add` proofs, hand-summed worked example
+  (`out[0] = 1_007`, `out[1] = -503`, `out[39] = 12_300`),
+  negation-commutation algebra invariant, and the mode-8 `Sv20_32`
+  documented dispatch + non-trivial 150-sample buffer → element-wise
+  composition check. The fixed-codebook gain composition (CELP
+  companion §9 open-loop scalar quantiser) + saturating
+  `i32 → i16` buffer-push step + final Q-format pin stay deferred
+  behind the documented pitch-gain Q-format gap (see the
+  `adaptive_contribution` module docs).
+
 - Round r241: narrowband **adaptive-codebook contribution sum**
   composing r208 + r234 into the closed-form per-sub-frame
   `[i32; 40]` evaluation of Speex Codec Manual §9.2 Eq. 9.1

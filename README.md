@@ -757,6 +757,77 @@ gap recorded in the CELP companion §9). The high-band sub-band-CELP
 path still never consults this module since §10.2 explicitly states
 *"there's no pitch prediction for the high-band"*.
 
+**Round r244** (this commit) lands the **narrowband raw excitation
+composition primitive** composing r241 (`ea[n]` adaptive-codebook
+contribution) and r220 (`c[n]` innovation sub-vector) into the
+per-sub-frame `[i32; 40]` raw-integer evaluation of Speex Manual
+§8.4 / CELP companion §2.3 `e[n] = p[n] + c[n]` where `p[n] = ea[n]`.
+The new `excitation` module exposes:
+
+- `raw_excitation_subframe(&ea, &c)` — whole sub-frame batch over
+  `[i32; 40] + [i16; 40]` returning the per-sample widening sum
+  `ea[n] + i32::from(c[n])` as a `[i32; 40]` vector.
+- `raw_excitation_sample(n, ea_n, c_n)` — per-sample helper for
+  callers walking one position at a time; result matches the
+  corresponding element of the batch routine.
+- `RAW_EXCITATION_SAMPLES` — public restating of the `40`-sample
+  per-sub-frame dimension at the composition layer.
+
+The output `e_raw[n]` is in **Q-format-agnostic raw integer units**.
+Both inputs are raw integer values (r241's `ea` is a raw integer
+dot product of post-bias gain integers with `i16` historical
+samples; r220's `c` is the raw `i16` sub-vector entry off the
+staged codebook), so the per-sample sum stays in the same raw
+integer units. The downstream Q-format pin remains a single
+arithmetic shift over the whole `[i32; 40]` vector. Headroom
+proof: `|ea[n]| + |c[n]| ≤ 1.6 × 10⁷ + 3.3 × 10⁴ ≈ 1.6 × 10⁷`,
+well below `i32::MAX ≈ 2.1 × 10⁹`, so the `i32 + i32` accumulator
+remains in range across the entire `[17, 144]` pitch range and
+the full post-bias gain envelope.
+
+Stream-start behaviour is inherited from r241: with the all-zero
+default `ExcitationBuffer` from r234, r241's `ea` term is
+identically zero across the sub-frame, so the composed `e_raw[n]`
+follows the first-frame innovation sub-vector verbatim (the
+documented "no spurious transient" envelope).
+
+12 new unit tests in `excitation::tests` (290 lib tests total,
+up from 278 in r241):
+
+- Both inputs zero → output identically zero.
+- Zero `ea` → output equals widened `c` (`i16 → i32` cast holds).
+- Zero `c` → output equals `ea` exactly with no widening loss.
+- Linearity in `ea`: `raw(ea1 + ea2, c) == raw(ea1, c) + raw(ea2, 0)`.
+- Pointwise pin: every output element equals the documented
+  per-sample formula `ea[n] + i32::from(c[n])`.
+- Per-sample helper vs batch agreement across the whole sub-frame.
+- Stream-start composition: mode-6 `Documented` dispatch
+  (8 × `Sv5_256` walk against a packed test index) + empty
+  buffer + non-trivial taps `(60, 70, 80)` → r241 `ea` is
+  verifiably all-zero and the composed envelope equals widened
+  `c` verbatim.
+- Silence mode (`NARROWBAND_SUBMODES[0]`) → both terms zero →
+  composed envelope identically zero.
+- Headroom argument exercised with `checked_add` on the analytic
+  positive and negative envelope bounds.
+- Hand-summed worked example: pinned `out[0] = 1_007`,
+  `out[1] = -503`, `out[39] = 12_300`, with the untouched
+  middle indices held at zero.
+- Negation commutation: `raw(-ea, -c)[n] == -raw(ea, c)[n]`.
+- Non-trivial buffer state + mode-8 `Documented` dispatch
+  (`Sv20_32`, two sub-vectors) → element-wise composition holds
+  end-to-end.
+
+The fixed-codebook gain composition (CELP companion §9 open-loop
+`g_frame × g_subf` scalar quantiser) + the saturating
+`i32 → i16` buffer-push step + the final Q-format pin stay
+deferred behind the documented pitch-gain Q-format gap (see the
+`adaptive_contribution` module docs). The high-band sub-band-CELP
+path still never consults this module since §10.2 explicitly
+states *"there's no pitch prediction for the high-band"*; the
+high-band excitation is the `c[n]` term alone, handled by
+`decode_hb_subframe` once the high-band gain composition lands.
+
 **Round r234** landed the **narrowband
 adaptive-codebook (long-term predictor) index resolution +
 excitation history buffer**. Spec basis is Speex Codec Manual §9.2:
@@ -839,7 +910,7 @@ pitch prediction for the high-band"*.
 
 ### Coverage estimate
 
-~35 % of the Speex codec surface (Ogg stream header + per-frame
+~36 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -889,7 +960,23 @@ buffer (§9.2 Eq. 9.1 + the documented repeat-rule for short
 pitches) surfacing `resolve_lookback`, `sample_lookback_indices`,
 `subframe_lookback_indices`, plus the typed 145-sample
 `ExcitationBuffer` with negative-offset addressing matching the
-manual's `e[n − k]` notation; LSP→LPC + the gain-scaled
+manual's `e[n − k]` notation + r241 narrowband adaptive-codebook
+contribution sum composing the r208 3-tap pitch-gain VQ
+reconstruction with the r234 index resolution + excitation buffer
+into the per-sub-frame `[i32; 40]` Q-format-agnostic evaluation
+of Eq. 9.1 `ea[n] = g0·e[n − T − 1] + g1·e[n − T] + g2·e[n − T + 1]`
+via `adaptive_contribution_subframe(pitch_period, taps, &buffer)` +
+r244 narrowband raw excitation composition primitive composing
+r241 `ea[n]` with r220 `c[n]` into a per-sub-frame `[i32; 40]`
+raw-integer `e_raw[n] = ea[n] + i32::from(c[n])` evaluation of
+§8.4 / companion §2.3 `e[n] = p[n] + c[n]` via
+`raw_excitation_subframe(&ea, &c)`, exercised across both-zero,
+zero-`ea` / zero-`c`, linearity in `ea`, pointwise pin, per-sample
+vs batch agreement, stream-start envelope follows mode-6 documented
+dispatch innovation only, silence sub-mode → all-zero envelope,
+analytic headroom proof, hand-summed worked example, negation
+commutation algebra, and the mode-8 documented dispatch +
+non-trivial buffer composition; LSP→LPC + the gain-scaled
 long-term predictor sum + fixed-codebook gain scaling + per-mode
 codebook binding for narrowband modes 1 / 2 / 3 / 4 / 5 / 7 and
 high-band mode 4 + high-band sub-frame LSP interpolation +
