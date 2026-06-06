@@ -207,9 +207,29 @@
 //!   high band uses the same interpolation scheme as the
 //!   narrowband or none at all.
 //!
-//! * **Round r234** (this commit) — narrowband **adaptive-codebook
+//! * **Round r241** (this commit) — narrowband **adaptive-codebook
+//!   contribution sum** composing r208 + r234 into the per-sub-frame
+//!   `[i32; 40]` evaluation of Speex Manual §9.2 Eq. 9.1
+//!   `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]`. The new
+//!   [`adaptive_contribution`] module exposes
+//!   [`adaptive_contribution_subframe`] (whole sub-frame batch) and
+//!   [`adaptive_contribution_sample`] (per-sample helper) returning
+//!   the raw integer dot product of the post-bias gain triple with
+//!   the three substituted historical samples — no Q-format scaling,
+//!   no rounding, no widening shift. Output is in Q-format-agnostic
+//!   raw integer units in `i32` (documented headroom: ≤ 3 × 159 ×
+//!   `i16::MAX` ≈ 1.6e7, well below `i32::MAX`). Stream-start case is
+//!   handled implicitly by the all-zero default [`ExcitationBuffer`]
+//!   from r234 — every historical lookup returns `0`, yielding an
+//!   all-zero contribution and the documented "no spurious transient"
+//!   envelope at stream start. The downstream `e[n] = p[n] + c[n]`
+//!   composition + the Q-format choice for `p[n] = ea[n]` stay
+//!   deferred behind the documented pitch-gain Q-format gap (see the
+//!   [`pitch_gain`] module docs).
+//!
+//! * **Round r234** — narrowband **adaptive-codebook
 //!   (long-term predictor) index resolution + excitation history
-//!   buffer**. Spec basis: Speex Codec Manual §9.2 Eq. 9.1
+//!   buffer**, Q-format-agnostic by design. Spec basis: Speex Codec Manual §9.2 Eq. 9.1
 //!   `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]` plus the
 //!   explicit excitation-repeat rule for short pitches:
 //!   *"when the pitch is smaller than the sub-frame size, we repeat
@@ -236,14 +256,16 @@
 //! reconstruction + r214 high-band LSP MSVQ reconstruction +
 //! r220 narrowband innovation sub-vector dispatch + r230 high-band
 //! innovation sub-vector dispatch + r234 adaptive-codebook index
-//! resolution + excitation history buffer surface typed intermediate
-//! values but do not yet produce PCM output.
+//! resolution + excitation history buffer + r241 adaptive-codebook
+//! contribution sum surface typed intermediate values but do not yet
+//! produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
 use oxideav_core::RuntimeContext;
 
 mod adaptive_codebook;
+mod adaptive_contribution;
 mod bitreader;
 mod codebooks;
 mod frame;
@@ -263,6 +285,9 @@ mod wideband;
 pub use adaptive_codebook::{
     resolve_lookback, sample_lookback_indices, subframe_lookback_indices, ExcitationBuffer,
     ExcitationError, ADAPTIVE_CODEBOOK_TAPS, EXCITATION_HISTORY_LEN, TAP_PITCH_OFFSETS,
+};
+pub use adaptive_contribution::{
+    adaptive_contribution_sample, adaptive_contribution_subframe, AdaptiveContributionError,
 };
 pub use bitreader::{BitError, BitReader, BitWriter};
 pub use codebooks::{

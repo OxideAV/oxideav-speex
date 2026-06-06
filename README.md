@@ -685,7 +685,79 @@ sub-frame LSP interpolation rule (still unbound by the staged
 material), the per-mode codebook binding for mode 4, and ultra-
 wideband framing all remain deferred.
 
-**Round r234** (this commit) lands the **narrowband
+**Round r241** (this commit) lands the **narrowband
+adaptive-codebook contribution sum** composing r208 (`PitchGainTaps`
+reconstruction) and r234 (`ExcitationBuffer` + index resolution)
+into the per-sub-frame `[i32; 40]` evaluation of Speex Manual §9.2
+Eq. 9.1 `ea[n] = g0·e[n − T − 1] + g1·e[n − T] + g2·e[n − T + 1]`.
+The new `adaptive_contribution` module exposes:
+
+- `adaptive_contribution_subframe(pitch_period, taps, &buffer)` —
+  returns the whole `[i32; 40]` sub-frame vector. Range-checks the
+  pitch period against the §9.2 `[PITCH_PERIOD_MIN, PITCH_PERIOD_MAX]
+  = [17, 144]` range; resolves each output sample's three substituted
+  lookbacks via `sample_lookback_indices`; reads each historical
+  sample via `ExcitationBuffer::lookup`; accumulates the
+  Q-format-agnostic integer dot product
+  `Σ taps[j] · e[lookbacks[j]]` into an `i32`.
+- `adaptive_contribution_sample(n, pitch_period, taps, &buffer)` —
+  per-sample helper for callers that walk one output position at a
+  time (e.g. an encoder's analysis-by-synthesis loop). Result
+  matches the corresponding element of the batch routine.
+- `AdaptiveContributionError` — typed `PitchOutOfRange { period }`
+  for out-of-spec pitch, and `Buffer(ExcitationError)` for the
+  underlying buffer-lookup paths (unreachable for an in-spec
+  pitch).
+
+The output `ea[n]` is in **Q-format-agnostic raw integer units**.
+Each `taps[j] · e[lookbacks[j]]` product is an integer × integer
+multiplication; the sum is well-defined regardless of any
+Q-format choice. Output headroom: with the documented `+32`-biased
+gain range `-96 ..= 159` and `i16` excitation samples
+(`|e| ≤ i16::MAX = 32767`), each per-tap product fits in
+`159 × 32767 ≈ 5.2 million`, and the three-tap sum fits in
+`3 × 5.2e6 ≈ 1.6e7` — both well below `i32::MAX ≈ 2.1e9`. The
+documented Q-format choice for the multiplication output is
+recorded as a docs gap on `pitch_gain`; downstream code can pick
+its convention with a single arithmetic shift over the whole
+`[i32; 40]` vector.
+
+12 new unit tests in `adaptive_contribution::tests` (278 unit
+tests total, up from 266 in r234): the empty default buffer +
+non-trivial taps produce all-zero contributions (the documented
+"no spurious transient" envelope at stream start); silence taps
+`[0; 3]` produce all-zero regardless of buffer content; the pitch
+range check rejects every value outside `[17, 144]`; a constant
+buffer + single-tap pin yields `g1 · constant` for every output
+position; the worked example for `T = 50, taps = (2, 5, 3)` with a
+diagnostic buffer where `lookup(-k) = -k` matches the analytic
+`ea[0] = -499`, `ea[1] = -489`, `ea[39] = -109`; the per-sample
+helper agrees with the per-sub-frame batch for every `(period, n)`
+in a wide sweep; the short-pitch `T = 17` case exercises the
+§9.2 repeat rule across the sub-frame and the pinned `ea[0] = 698`
+arithmetic checks out; the `i32` headroom argument is recomputed
+analytically; the stream-start zero envelope is pinned for the
+extreme tap triples `(-96, -96, -96)`, `(159, 159, 159)`,
+`(0, 159, -96)` across the full pitch range; linearity in the
+gain triple (`scale taps by s → contribution scales by s`) and
+in the buffer (`scale samples by s → contribution scales by s`)
+hold pointwise; an integration smoke test composes
+`reconstruct_pitch_gain` (r208) + a non-trivial historical buffer
++ the new module and pins `ea[0] = 300` for taps decoded from
+codebook index 1 of the 5-bit table.
+
+This is the **first round to compose the r208 + r234 primitives
+into a closed-form computation**. The final-excitation composition
+`e[n] = p[n] + c[n]` (§8.4) is now one step away: it needs the
+post-Q-format `p[n] = ea[n]` (an arithmetic shift over the
+`[i32; 40]` output once the pitch-gain Q-format gap is filled)
+plus the gain-scaled fixed-codebook contribution `c[n]` (still
+blocked on the `g_frame × g_subf` scalar-quantiser algorithm
+gap recorded in the CELP companion §9). The high-band sub-band-CELP
+path still never consults this module since §10.2 explicitly states
+*"there's no pitch prediction for the high-band"*.
+
+**Round r234** landed the **narrowband
 adaptive-codebook (long-term predictor) index resolution +
 excitation history buffer**. Spec basis is Speex Codec Manual §9.2:
 
@@ -723,7 +795,7 @@ followed by the explicit excitation-repeat rule for short pitches:
   (`k ≥ 0`) and out-of-history reads (`-k > history length`).
 
 22 new unit tests in `adaptive_codebook::tests` (266 unit tests
-total, up from 244 in r230): `resolve_lookback` is identity for
+at r234, up from 244 in r230): `resolve_lookback` is identity for
 `k < 0`; the manual's worked example `(n, T) = (22, 17) → k = 6 →
 −11` and the boundary case `n = T − 1 → 0 → −T` pin the substitution;
 iteration for very-short pitch (one and two `T`-steps); every

@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r241: narrowband **adaptive-codebook contribution sum**
+  composing r208 + r234 into the closed-form per-sub-frame
+  `[i32; 40]` evaluation of Speex Codec Manual §9.2 Eq. 9.1
+  (`ea[n] = g0·e[n − T − 1] + g1·e[n − T] + g2·e[n − T + 1]`). New
+  `adaptive_contribution` module exposes
+  `adaptive_contribution_subframe(pitch_period, taps, &buffer)` (whole
+  sub-frame batch) and `adaptive_contribution_sample(n, pitch_period,
+  taps, &buffer)` (per-sample helper); for every output position the
+  three substituted lookbacks are resolved via
+  `sample_lookback_indices` (r234) and three historical samples are
+  read off the `ExcitationBuffer` (r234), then accumulated as the raw
+  integer dot product `Σ taps[j] · e[lookbacks[j]]` into an `i32`. The
+  output is **Q-format-agnostic**: each `g · e` is an integer ×
+  integer product so the sum is well-defined without committing to a
+  Q-format choice (any downstream scaling is a single arithmetic shift
+  over the whole `[i32; 40]` vector). Stream-start behaviour is
+  inherited from the all-zero default buffer (the documented
+  "no spurious transient" envelope drops out for free). New
+  `AdaptiveContributionError` variants `PitchOutOfRange { period }`
+  (refuses an out-of-spec `[17, 144]` pitch) and `Buffer(ExcitationError)`
+  (unreachable for an in-spec pitch but surfaced for diagnostics).
+  Public re-exports `adaptive_contribution_subframe`,
+  `adaptive_contribution_sample`, `AdaptiveContributionError`. 12 new
+  unit tests in `adaptive_contribution::tests` (278 unit total, up
+  from 266 in r234): empty-buffer-yields-zero, silence-taps-yield-zero,
+  pitch-range rejection, constant-buffer pin, the hand-computed worked
+  example `ea[0] = -499` / `ea[1] = -489` / `ea[39] = -109` for
+  `T = 50, taps = (2, 5, 3)`, agreement between batch and per-sample
+  paths across the full pitch range, short-pitch repeat-rule pin
+  `ea[0] = 698` for `T = 17`, analytic `i32` headroom argument, the
+  stream-start zero envelope for the extreme tap triples
+  `(-96, -96, -96)` / `(159, 159, 159)` / `(0, 159, -96)`, linearity
+  in the gain triple and in the buffer pointwise, and an integration
+  smoke test composing `reconstruct_pitch_gain` + a non-trivial
+  buffer to pin `ea[0] = 300` for codebook index 1 of the 5-bit
+  table. The downstream `e[n] = p[n] + c[n]` final-excitation
+  composition stays deferred behind the `pitch_gain` Q-format gap
+  and the fixed-codebook gain scalar-quantiser gap recorded in CELP
+  companion §9.
 - Round r234: narrowband **adaptive-codebook (long-term predictor)
   index resolution + excitation history buffer** per Speex Codec
   Manual §9.2 Eq. 9.1 (`ea[n] = g0·e[n − T − 1] + g1·e[n − T] +
