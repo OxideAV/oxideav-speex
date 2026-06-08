@@ -757,7 +757,102 @@ gap recorded in the CELP companion §9). The high-band sub-band-CELP
 path still never consults this module since §10.2 explicitly states
 *"there's no pitch prediction for the high-band"*.
 
-**Round r244** (this commit) lands the **narrowband raw excitation
+**Round r261** (this commit) lands the **narrowband fixed-codebook
+gain index composition primitive** surfacing the Speex Manual §9.2 /
+CELP companion §2.3 product structure `fixed-codebook gain = g_frame
+× g_subf` at the typed-index layer. The new `fixed_codebook_gain`
+module composes the round-3-parsed frame-level OL excitation-gain
+index (5-bit field, modes 1..=8) with each sub-frame's
+innovation-gain correction index (0 / 1 / 3-bit per Table 9.1) into
+a single typed pair per sub-frame:
+
+- `FrameInnovationGainIndex` — typed wrapper over the 5-bit
+  frame-level field with a `Silence` variant for mode 0 (field
+  absent).
+- `SubFrameInnovationGainCorrection` — typed wrapper over the
+  per-sub-frame correction with an `Absent` variant for the
+  0-bit-budget modes 0, 2, 8.
+- `FixedCodebookGainIndices` — typed pair `(frame, subframe)` of
+  the two factors, plus `is_absent()` (silence-mode short-circuit)
+  and `wire_bit_budget()` (`5+0 / 5+1 / 5+3 / 0+0`).
+- `fixed_codebook_gain_indices(body, submode)` returns
+  `[FixedCodebookGainIndices; 4]` per frame.
+- `NarrowbandFrameBody::fixed_codebook_gain_indices(submode)`
+  convenience method wires the composition off the existing parsed
+  body, mirroring the r194 / r200 / r208 / r220 wiring pattern.
+
+The numeric `g_frame × g_subf` reconstruction is **gap-blocked**
+behind the CELP companion §9 *"computed, not a lookup array"*
+open-loop scalar quantiser note (see the "Items NOT extracted"
+subsection — there is no static gain table to consult; the
+quantiser algorithm itself is the documented gap). This primitive
+surfaces only the **algebra** of the index composition, matching
+the r234 / r241 / r244 Q-format-agnostic design pattern: each step
+lands an index-only primitive that the eventual Q-format pin
+commutes through with a single arithmetic scaling step.
+
+The new `pub const SUBFRAMES_PER_FRAME: usize = 4` in
+`crate::submode` is the `usize`-typed companion of the existing
+`NarrowbandSubmode::SUBFRAMES_PER_FRAME: u32` constant (kept `u32`
+for the bit-budget arithmetic in `computed_total_bits`).
+
+15 new unit tests in `fixed_codebook_gain::tests` (305 lib tests,
+up from 290 in r244):
+
+- Mode 0 (silence) composes as `(Silence, Absent)` everywhere; the
+  `is_absent()` predicate flags each sub-frame.
+- Mode 1 / 3 / 4 surface `(Indexed(31), OneBit(0..=1))` with
+  `wire_bit_budget() == 6`.
+- Mode 2 surfaces `(Indexed(17), Absent)` (frame factor present,
+  correction absent) with `wire_bit_budget() == 5`; the
+  `is_absent()` predicate is `false` (only the correction is
+  absent, not the composed pair).
+- Mode 5 / 6 / 7 surface `(Indexed, ThreeBit(0..=7))` with
+  `wire_bit_budget() == 8`.
+- Mode 8 (3.95 kbps special) surfaces `(Indexed(7), Absent)` with
+  `wire_bit_budget() == 5`.
+- Every documented mode 0..=8 hits the in-spec budget pair
+  `(0 | 5, 0 | 1 | 3)`; no mode uses a 2-bit budget in either
+  factor.
+- Out-of-range sub-frame slot (`>= 4`) returns `None`.
+- Hand-built non-conforming sub-mode budgets (frame = 2, correction
+  = 2) are rejected with `None`.
+- `wire_bit_budget()` decomposes additively into the two factors
+  across the documented 4-element set.
+- Display impls render the human-readable surface (`"OL Exc gain
+  index N"`, `"3-bit Innovation gain index M"`, `"… × …"`).
+- `raw_index()` helpers return `None` for `Silence` / `Absent`
+  variants and the embedded integer otherwise.
+- 5-bit frame field covers `0..=31` end-to-end with no boundary
+  overflow.
+- Batch helper `fixed_codebook_gain_indices` matches per-sub-frame
+  `FixedCodebookGainIndices::from_body` calls.
+- `is_absent()` tracks the frame factor only (mode 2's
+  `(Indexed, Absent)` is NOT absent for the composition's purposes
+  — the frame-level factor is still present).
+
+Plus 2 new integration tests in `tests/narrowband_body_fixture.rs`:
+
+- `fixed_codebook_gain_indices_compose_for_every_audio_packet` —
+  every audio sub-frame of the mode-5 fixture composes as
+  `(Indexed(0..=31), ThreeBit(0..=7))` with the wire bit budget
+  pinned to `5 + 3 = 8`, the frame-level index varying across
+  packets (not constant), and at least one non-zero 3-bit
+  correction across the stream (i.e. the encoder is exercising the
+  correction field).
+- `fixed_codebook_gain_indices_for_silence_mode_is_absent` —
+  silence-mode body composes as `(Silence, Absent)` for every
+  sub-frame with `is_absent() == true`.
+
+The downstream `g_frame × g_subf` magnitude reconstruction module
+will land in a follow-up round once a docs round stages the
+open-loop scalar quantiser specification (the staged manual /
+companion describe the structure but not the quantiser curve).
+The high-band path follows Table 10.1's simpler structure (one
+per-sub-frame `Excitation gain` field with no frame-level factor,
+so the composition reduces to a single index) and lives separately.
+
+**Round r244** lands the **narrowband raw excitation
 composition primitive** composing r241 (`ea[n]` adaptive-codebook
 contribution) and r220 (`c[n]` innovation sub-vector) into the
 per-sub-frame `[i32; 40]` raw-integer evaluation of Speex Manual
@@ -910,7 +1005,7 @@ pitch prediction for the high-band"*.
 
 ### Coverage estimate
 
-~36 % of the Speex codec surface (Ogg stream header + per-frame
+~39 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -970,18 +1065,24 @@ r244 narrowband raw excitation composition primitive composing
 r241 `ea[n]` with r220 `c[n]` into a per-sub-frame `[i32; 40]`
 raw-integer `e_raw[n] = ea[n] + i32::from(c[n])` evaluation of
 §8.4 / companion §2.3 `e[n] = p[n] + c[n]` via
-`raw_excitation_subframe(&ea, &c)`, exercised across both-zero,
-zero-`ea` / zero-`c`, linearity in `ea`, pointwise pin, per-sample
-vs batch agreement, stream-start envelope follows mode-6 documented
-dispatch innovation only, silence sub-mode → all-zero envelope,
-analytic headroom proof, hand-summed worked example, negation
-commutation algebra, and the mode-8 documented dispatch +
-non-trivial buffer composition; LSP→LPC + the gain-scaled
-long-term predictor sum + fixed-codebook gain scaling + per-mode
-codebook binding for narrowband modes 1 / 2 / 3 / 4 / 5 / 7 and
-high-band mode 4 + high-band sub-frame LSP interpolation +
-ultra-wideband framing + the CELP frame-body writer + the
-encoder-side codebook search are the remaining pieces).
+`raw_excitation_subframe(&ea, &c)` + r261 narrowband fixed-codebook
+gain index composition primitive surfacing the §9.2 / companion
+§2.3 product structure `fixed-codebook gain = g_frame × g_subf` at
+the typed-index layer via `FrameInnovationGainIndex` (5-bit field
++ silence variant) × `SubFrameInnovationGainCorrection` (0/1/3-bit
+field + absent variant) composed into a typed
+`FixedCodebookGainIndices` pair per sub-frame, wired through
+`NarrowbandFrameBody::fixed_codebook_gain_indices(submode)` and
+exercised against synthetic mode-0/1/2/5/8 bodies + every audio
+sub-frame of the real mode-5 fixture (frame-level index varies
+across packets and at least one non-zero 3-bit correction across
+the stream); LSP→LPC + the gain-scaled long-term predictor sum +
+the §9 open-loop fixed-codebook scalar-quantiser magnitude
+reconstruction + per-mode codebook binding for narrowband modes
+1 / 2 / 3 / 4 / 5 / 7 and high-band mode 4 + high-band sub-frame
+LSP interpolation + ultra-wideband framing + the CELP frame-body
+writer + the encoder-side codebook search are the remaining
+pieces).
 
 ### Spec material consulted
 

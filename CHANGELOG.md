@@ -8,6 +8,50 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r261: narrowband **fixed-codebook gain index composition
+  primitive** surfacing the Speex Codec Manual §9.2 / CELP companion
+  §2.3 product structure `fixed-codebook gain = g_frame × g_subf` at
+  the typed-index layer. New `fixed_codebook_gain` module exposes
+  `FrameInnovationGainIndex` (typed wrapper over the 5-bit frame-level
+  OL excitation-gain field with a `Silence` variant for mode 0),
+  `SubFrameInnovationGainCorrection` (typed wrapper over the 0 / 1 /
+  3-bit per-sub-frame correction with an `Absent` variant for the
+  0-bit-budget modes 0, 2, 8), and the composed `FixedCodebookGainIndices`
+  pair. `fixed_codebook_gain_indices(body, submode)` returns
+  `[FixedCodebookGainIndices; 4]` per frame; a new
+  `NarrowbandFrameBody::fixed_codebook_gain_indices(submode)`
+  convenience method wires it off the existing parsed body. Helpers:
+  `FixedCodebookGainIndices::is_absent()` (silence-mode short-circuit),
+  `wire_bit_budget()` (per-pair `5+0 / 5+1 / 5+3 / 0+0` budget pinning
+  the spec's per-mode footprint), `from_body(body, submode, sub_idx)`
+  (single-sub-frame helper). The numeric `g_frame × g_subf`
+  reconstruction is gap-blocked behind the CELP companion §9
+  "computed, not a lookup array" open-loop scalar quantiser note; this
+  primitive surfaces only the algebra of the index composition,
+  matching the r234 / r241 / r244 Q-format-agnostic design pattern.
+  Public re-exports: `fixed_codebook_gain_indices`,
+  `FixedCodebookGainIndices`, `FrameInnovationGainIndex`,
+  `SubFrameInnovationGainCorrection`, `FRAME_OL_EXC_GAIN_BITS`,
+  `FRAME_OL_EXC_GAIN_ENTRIES`. New `pub const SUBFRAMES_PER_FRAME:
+  usize = 4` in `crate::submode` for index-typed callers (mirrors the
+  existing `NarrowbandSubmode::SUBFRAMES_PER_FRAME: u32` used in the
+  bit-budget arithmetic). 15 new unit tests in
+  `fixed_codebook_gain::tests` (305 lib tests, up from 290 in r244):
+  mode-0 silence flags absent everywhere, mode-1 1-bit correction
+  surface, mode-2 frame factor present + correction absent, mode-5
+  3-bit correction surface, mode-8 special low-bitrate pattern, every
+  documented mode 0..=8 hits the in-spec budget pair `(0|5, 0|1|3)`,
+  out-of-range sub-frame slot returns `None`, hand-built non-conforming
+  budgets rejected, wire-bit-budget decomposes into the two factors,
+  Display strings, `raw_index` helpers, 5-bit field covers `0..=31`,
+  batch matches per-position helper, `is_absent()` tracks frame factor
+  only (not the correction). Plus 2 new integration tests in
+  `tests/narrowband_body_fixture.rs`: every audio sub-frame of the
+  mode-5 fixture composes as `(Indexed(0..=31), ThreeBit(0..=7))` with
+  varying frame-level indices and at least one non-zero correction;
+  silence-mode body composes as `(Silence, Absent)` for every
+  sub-frame.
+
 - Round r244: narrowband **raw excitation composition primitive**
   composing r241 + r220 into the per-sub-frame `[i32; 40]` raw-integer
   evaluation of Speex Codec Manual §8.4 / CELP companion §2.3

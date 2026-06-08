@@ -249,12 +249,12 @@
 //!   land independently and the eventual long-term-predictor sum
 //!   can pin its scaling in a single follow-up round.
 //!
-//! * **Round r244** (this commit) — narrowband **raw excitation
-//!   composition primitive** composing r241 + r220 into the per-sub-frame
-//!   `[i32; 40]` raw-integer evaluation of Speex Codec Manual §8.4 /
-//!   CELP companion §2.3 `e[n] = p[n] + c[n]` where `p[n] = ea[n]` is
-//!   the r241 adaptive-codebook contribution and `c[n]` is the r220
-//!   innovation sub-vector. The new [`excitation`] module exposes
+//! * **Round r244** — narrowband **raw excitation composition primitive**
+//!   composing r241 + r220 into the per-sub-frame `[i32; 40]`
+//!   raw-integer evaluation of Speex Codec Manual §8.4 / CELP companion
+//!   §2.3 `e[n] = p[n] + c[n]` where `p[n] = ea[n]` is the r241
+//!   adaptive-codebook contribution and `c[n]` is the r220 innovation
+//!   sub-vector. The new [`excitation`] module exposes
 //!   [`raw_excitation_subframe`] (whole sub-frame batch) and
 //!   [`raw_excitation_sample`] (per-sample helper) returning the raw
 //!   widening sum `ea[n] + i32::from(c[n])` — Q-format-agnostic by
@@ -265,6 +265,28 @@
 //!   docs) and the CELP companion §9 fixed-codebook gain scalar
 //!   quantiser gap.
 //!
+//! * **Round r261** (this commit) — narrowband **fixed-codebook gain
+//!   index composition primitive** surfacing the Speex Codec Manual
+//!   §9.2 / CELP companion §2.3 product structure
+//!   `fixed-codebook gain = g_frame × g_subf` at the typed-index layer.
+//!   The new [`fixed_codebook_gain`] module exposes
+//!   [`FrameInnovationGainIndex`] (typed wrapper over the 5-bit
+//!   frame-level OL excitation-gain field with a [`FrameInnovationGainIndex::Silence`]
+//!   variant for mode 0),
+//!   [`SubFrameInnovationGainCorrection`] (typed wrapper over the
+//!   0 / 1 / 3-bit per-sub-frame correction field with an
+//!   [`SubFrameInnovationGainCorrection::Absent`] variant for the
+//!   0-bit-budget modes 0, 2, 8), and the composed
+//!   [`FixedCodebookGainIndices`] pair. A [`fixed_codebook_gain_indices`]
+//!   helper produces `[FixedCodebookGainIndices; 4]` per frame; a
+//!   [`NarrowbandFrameBody::fixed_codebook_gain_indices`] convenience
+//!   method wires it off the existing parsed body. The numeric
+//!   `g_frame × g_subf` reconstruction is gap-blocked behind the CELP
+//!   companion §9 "computed, not a lookup array" open-loop scalar
+//!   quantiser note; this primitive surfaces the algebra of the
+//!   composition at the index layer, leaving the Q-format / quantiser
+//!   pin for a future docs round.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -273,9 +295,9 @@
 //! r220 narrowband innovation sub-vector dispatch + r230 high-band
 //! innovation sub-vector dispatch + r234 adaptive-codebook index
 //! resolution + excitation history buffer + r241 adaptive-codebook
-//! contribution sum + r244 raw excitation composition primitive
-//! surface typed intermediate values but do not yet produce PCM
-//! output.
+//! contribution sum + r244 raw excitation composition primitive +
+//! r261 fixed-codebook gain index composition primitive surface typed
+//! intermediate values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
 
@@ -286,6 +308,7 @@ mod adaptive_contribution;
 mod bitreader;
 mod codebooks;
 mod excitation;
+mod fixed_codebook_gain;
 mod frame;
 mod hb_innovation;
 mod hb_lsp;
@@ -319,6 +342,10 @@ pub use codebooks::{
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
+pub use fixed_codebook_gain::{
+    fixed_codebook_gain_indices, FixedCodebookGainIndices, FrameInnovationGainIndex,
+    SubFrameInnovationGainCorrection, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
+};
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,

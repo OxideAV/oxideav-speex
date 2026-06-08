@@ -565,3 +565,103 @@ fn innovation_subvector_for_silence_mode_is_all_zero() {
         assert!(v.iter().all(|&x| x == 0));
     }
 }
+
+#[test]
+fn fixed_codebook_gain_indices_compose_for_every_audio_packet() {
+    // Round r261 wiring probe: every audio packet of the mode-5
+    // narrowband fixture composes the typed §9.2 / CELP companion §2.3
+    // fixed-codebook gain index pair without panic.
+    //
+    // Mode 5 budgets (Table 9.1): 5-bit frame OL Exc gain × 3-bit
+    // per-sub-frame innovation gain. Both factors must surface as the
+    // "present" enum variants for every sub-frame of every audio packet.
+    use oxideav_speex::{FrameInnovationGainIndex, SubFrameInnovationGainCorrection};
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+    let mut total_subframes = 0u32;
+    let mut frame_index_range = (u8::MAX, 0u8);
+    let mut nonzero_correction = 0u32;
+    for (i, pkt) in audio.iter().enumerate() {
+        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header parse");
+        let s = match h.submode {
+            Submode::Celp(s) => s,
+            _ => panic!("packet {i}: expected CELP"),
+        };
+        assert_eq!(s.mode_id, 5);
+        assert_eq!(s.ol_exc_gain_bits, 5);
+        assert_eq!(s.innovation_gain_bits, 3);
+        let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body parse");
+        let composed = body
+            .fixed_codebook_gain_indices(&s)
+            .expect("mode-5 budgets in spec");
+        for (sf_idx, slot) in composed.iter().enumerate() {
+            // Frame factor is always present in mode 5 (5-bit field).
+            let frame_idx = match slot.frame {
+                FrameInnovationGainIndex::Indexed(i) => i,
+                FrameInnovationGainIndex::Silence => {
+                    panic!("packet {i} sf {sf_idx}: mode 5 frame factor must be present")
+                }
+            };
+            assert!(frame_idx < 32, "5-bit OL Exc gain index must fit in 0..=31");
+            frame_index_range.0 = frame_index_range.0.min(frame_idx);
+            frame_index_range.1 = frame_index_range.1.max(frame_idx);
+            // Per-sub-frame correction must be 3-bit for mode 5.
+            let sub_idx = match slot.subframe {
+                SubFrameInnovationGainCorrection::ThreeBit(i) => i,
+                other => panic!("packet {i} sf {sf_idx}: expected ThreeBit, got {:?}", other),
+            };
+            assert!(sub_idx < 8, "3-bit Innovation gain index must fit in 0..=7");
+            if sub_idx != 0 {
+                nonzero_correction += 1;
+            }
+            assert_eq!(slot.wire_bit_budget(), 5 + 3);
+            assert!(!slot.is_absent());
+            total_subframes += 1;
+        }
+    }
+    assert!(
+        total_subframes >= 4 * 40,
+        "fixture must have ≥40 frames × 4 sub-frames"
+    );
+    // The recorded fixture is a 440 Hz tone; the encoder should pick a
+    // non-trivial 5-bit OL Exc gain index across the stream and at least
+    // one non-zero 3-bit correction.
+    assert!(
+        frame_index_range.0 != frame_index_range.1,
+        "expected the frame-level OL Exc gain index to vary across packets ({} = {} everywhere)",
+        frame_index_range.0,
+        frame_index_range.1,
+    );
+    assert!(
+        nonzero_correction > 0,
+        "expected at least one non-zero 3-bit innovation-gain correction across {} sub-frames",
+        total_subframes
+    );
+}
+
+#[test]
+fn fixed_codebook_gain_indices_for_silence_mode_is_absent() {
+    // Mode 0 (silence) carries neither OL Exc gain nor innovation
+    // gain — every per-sub-frame composed pair must flag `is_absent`.
+    use oxideav_speex::{
+        FrameInnovationGainIndex, NarrowbandSubmode, SubFrameInnovationGainCorrection,
+    };
+    let silence = NarrowbandSubmode::for_id(0).unwrap();
+    let buf = [0u8; 1];
+    let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
+    let s = match h.submode {
+        Submode::Celp(s) => s,
+        _ => unreachable!(),
+    };
+    let body = NarrowbandFrameBody::parse(&mut r, &s).unwrap();
+    assert_eq!(silence.mode_id, 0);
+    let composed = body
+        .fixed_codebook_gain_indices(&silence)
+        .expect("silence budgets {0,0} in spec");
+    for slot in &composed {
+        assert!(slot.is_absent());
+        assert_eq!(slot.frame, FrameInnovationGainIndex::Silence);
+        assert_eq!(slot.subframe, SubFrameInnovationGainCorrection::Absent);
+        assert_eq!(slot.wire_bit_budget(), 0);
+    }
+}

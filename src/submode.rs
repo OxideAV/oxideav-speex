@@ -113,6 +113,12 @@ pub struct NarrowbandSubmode {
     pub total_bits: u16,
 }
 
+/// Number of CELP sub-frames per narrowband frame (`= 4`), in `usize`
+/// for indexing convenience. Mirrors [`NarrowbandSubmode::SUBFRAMES_PER_FRAME`]
+/// (which is `u32` for the bit-budget arithmetic in
+/// [`NarrowbandSubmode::computed_total_bits`]).
+pub const SUBFRAMES_PER_FRAME: usize = 4;
+
 impl NarrowbandSubmode {
     /// Number of CELP sub-frames per frame (constant 4 for narrowband
     /// per §9.1: "subdivided in 4 sub-frames of 5 ms each").

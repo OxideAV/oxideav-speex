@@ -316,6 +316,24 @@ impl NarrowbandFrameBody {
         let curr = self.reconstructed_lsp_q10(submode)?;
         Some(NbSubFrameLsp::new(prev_q10, &curr))
     }
+
+    /// Compose the typed §9.2 / CELP companion §2.3 fixed-codebook gain
+    /// index pair `(g_frame_index, g_subf_index)` for every sub-frame
+    /// of this frame. See [`crate::fixed_codebook_gain`] for the
+    /// composition's spec basis and Q-format gap.
+    ///
+    /// Returns `None` only if the sub-mode's per-field bit budgets
+    /// fall outside the {0, 5} × {0, 1, 3} set documented in Table 9.1
+    /// (hand-built non-conforming sub-modes); for all nine documented
+    /// modes the composition succeeds.
+    pub fn fixed_codebook_gain_indices(
+        &self,
+        submode: &NarrowbandSubmode,
+    ) -> Option<
+        [crate::fixed_codebook_gain::FixedCodebookGainIndices; crate::submode::SUBFRAMES_PER_FRAME],
+    > {
+        crate::fixed_codebook_gain::fixed_codebook_gain_indices(self, submode)
+    }
 }
 
 /// Read up to 128 bits as a `u128`, chunked through the 32-bit
