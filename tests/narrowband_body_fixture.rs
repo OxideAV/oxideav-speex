@@ -507,19 +507,21 @@ fn pitch_gain_taps_is_silence_for_mode_0() {
 }
 
 #[test]
-fn innovation_dispatcher_is_undocumented_for_mode_5_fixture() {
-    // Round r220 wiring probe: the staged `docs/audio/speex/` material
-    // grounds the per-mode innovation codebook binding only for modes 6
-    // and 8 (CELP companion §2.3). Mode 5 — the fixture's mode — falls
-    // in the documented-bit-budget-only band, so the dispatcher must
-    // surface `InnovationError::Undocumented` for every sub-frame of
-    // every audio packet. This pins the README docs-gap entry: when a
-    // future docs round binds mode 5, this test goes red and the
-    // expected behaviour can be updated in one place.
-    use oxideav_speex::InnovationError;
+fn innovation_subvector_decodes_for_mode_5_fixture() {
+    // r277: the r220-era `Undocumented` pin for mode 5 is retired — the
+    // staged per-codebook innovation bit-rate annotations
+    // (`docs/audio/speex/tables/*.meta` + tables README) bind mode 5's
+    // 48-bit/sub-frame field (× 200 = 9600 bps) to 8 × `Sv5_64`
+    // (6-bit index, 5-sample sub-vector). Every sub-frame of every
+    // audio packet of the real `speexenc`-encoded mode-5 fixture must
+    // now decode into a 40-sample c[n] vector, and the per-sub-vector
+    // lookups must match a manual MSB-first walk of the raw 48-bit
+    // `innovation_vq_index` field against the staged codebook.
+    use oxideav_speex::{innovation_5_64, SUBFRAME_SAMPLES};
     let packets = lift_ogg_packets(FIXTURE);
     let audio = &packets[2..];
     let mut total = 0u32;
+    let mut nonzero_subframes = 0u32;
     for (i, pkt) in audio.iter().enumerate() {
         let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt).expect("header");
         let s = match h.submode {
@@ -529,18 +531,35 @@ fn innovation_dispatcher_is_undocumented_for_mode_5_fixture() {
         assert_eq!(s.mode_id, 5);
         let body = NarrowbandFrameBody::parse(&mut r, &s).expect("body");
         for (sf_idx, sf) in body.subframes.iter().enumerate() {
-            let r = sf.innovation_sub_vector(&s);
-            assert_eq!(
-                r,
-                Err(InnovationError::Undocumented),
-                "packet {i} sf {sf_idx}: mode-5 dispatch should be Undocumented"
-            );
+            let c = sf
+                .innovation_sub_vector(&s)
+                .unwrap_or_else(|e| panic!("packet {i} sf {sf_idx}: {e}"));
+            assert_eq!(c.len(), SUBFRAME_SAMPLES);
+            // Cross-check against a manual MSB-first walk of the raw
+            // packed field: 8 successive 6-bit indices into Sv5_64.
+            for sv in 0..8usize {
+                let shift = (7 - sv) as u32 * 6;
+                let idx = ((sf.innovation_vq_index >> shift) & 0x3f) as usize;
+                let row = &innovation_5_64()[idx];
+                assert_eq!(
+                    &c[sv * 5..sv * 5 + 5],
+                    &row[..],
+                    "packet {i} sf {sf_idx} sub-vector {sv}"
+                );
+            }
+            if c.iter().any(|&x| x != 0) {
+                nonzero_subframes += 1;
+            }
             total += 1;
         }
     }
     assert!(
         total >= 4 * 40,
         "fixture must have ≥40 frames × 4 sub-frames"
+    );
+    assert!(
+        nonzero_subframes > 0,
+        "expected at least one sub-frame with non-zero innovation; got 0 of {total}"
     );
 }
 

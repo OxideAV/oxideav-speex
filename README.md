@@ -911,6 +911,65 @@ unchanged when the LSP + excitation-VQ fields are flipped from
 all-zeros to all-ones (the primitive reads only the gain field).
 347 tests total (318 unit + 29 integration), up from 331.
 
+**Round r277** (this commit) lands the **narrowband per-mode
+innovation codebook binding for modes 2 / 3 / 4 / 5** — retiring
+the r220 `Undocumented` dispatch for four of the six previously
+unbound modes. The grounding the r220 round overlooked is the
+staged per-codebook **innovation bit-rate annotation**: every
+fixed-codebook CSV's `.meta` sidecar
+(`docs/audio/speex/tables/innovation-cdbk-*.meta`, `role:` field)
+and the staged `tables/README.md` inventory record the innovation
+bit-rate each codebook serves, and Table 9.1's per-sub-frame
+"Innovation VQ" row converts directly to that rate
+(`bits/sub-frame × 4 sub-frames / 20 ms = bits × 200 bps`):
+
+- mode 2: 16 bits → 3 200 bps → 4 × `Sv10_16` (4-bit × 10-sample)
+- mode 3: 20 bits → 4 000 bps → 4 × `Sv10_32` (5-bit × 10-sample)
+- mode 4: 35 bits → 7 000 bps → 5 × `Sv8_128` (7-bit × 8-sample)
+- mode 5: 48 bits → 9 600 bps → 8 × `Sv5_64` (6-bit × 5-sample)
+
+Each binding is unique (exactly one staged codebook is annotated
+at each rate), satisfies both `index_bits × count ==
+innovation_vq_bits` and `sub_vector_len × count == 40` samples,
+and cross-checks against Table 9.2's composite bit-rates (e.g.
+mode 3 = 8 000 bps total carrying the 4 000 bps innovation
+stream). `InnovationMapping::for_mode` now surfaces `Documented`
+for modes 2 / 3 / 4 / 5 / 6 / 8; only mode 1 (0-bit VQ field —
+the vocoder excitation-*generation* rule is unstaged) and mode 7
+(96 bits → 19 200 bps, a rate no staged codebook is annotated
+with and with no single-shape decomposition over the staged
+inventory) remain `Undocumented` (see the narrowed docs-gap entry
+below).
+
+This flips the **real `speexenc`-encoded mode-5 fixture from
+`Undocumented` to actual innovation decode**: the rewritten
+integration test
+(`innovation_subvector_decodes_for_mode_5_fixture` — the r220
+docs-gap pin designed to go red on exactly this event) now decodes
+every sub-frame of every audio packet into its 40-sample `c[n]`
+vector, cross-checks each of the 8 per-sub-frame lookups against a
+manual MSB-first walk of the raw 48-bit `innovation_vq_index`
+field, and asserts a non-zero innovation stream. 8 new unit tests
+in `innovation::tests` (326 lib tests, up from 318): the four new
+mode bindings; the bit-rate-annotation arithmetic
+(`bits × 200 == annotated bps`) for every documented mode;
+mode-5 / mode-4 / mode-3 / mode-2 multi-sub-vector concatenation
+against synthetic packed indices; mode-5 MSB-first extraction;
+max-index resolution for all four new modes; the `Undocumented`
+set narrowed to modes 1 / 7. The r234 `resolve_lookback`
+doc-example is also promoted from an ignored snippet to a
+compiled+run doc-test. 356 tests total (326 unit + 29 integration
++ 1 doc), up from 347.
+
+The **prime r277 candidate — the NB/HB excitation-gain magnitude
+path — remains DOCS-GAP-blocked**: `docs/` (pulled this round,
+already up to date at `439edd3`) contains no open-loop scalar gain
+quantiser specification; the staged `tables/README.md` "Not
+extracted" subsection and companion §9 record the quantiser as
+*computed, not a lookup array* without giving the curve. The
+r261 / r269 typed-index primitives stay the frontier for that
+path.
+
 **Round r244** lands the **narrowband raw excitation
 composition primitive** composing r241 (`ea[n]` adaptive-codebook
 contribution) and r220 (`c[n]` innovation sub-vector) into the
@@ -1096,11 +1155,14 @@ parse-and-reconstruct round-trip + r220 narrowband innovation
 sub-vector lookup primitive + per-mode dispatcher
 (`InnovationMapping::for_mode` surfacing `Silence` for mode 0,
 `Documented` for modes 6 (8 × `Sv5_256`) and 8 (2 × `Sv20_32`),
-`Undocumented` for the other seven), wired through
+extended in r277 to modes 2 (4 × `Sv10_16`), 3 (4 × `Sv10_32`),
+4 (5 × `Sv8_128`) and 5 (8 × `Sv5_64`) via the staged
+per-codebook innovation bit-rate annotations, `Undocumented` for
+modes 1 / 7), wired through
 `NarrowbandSubFrameIndices::innovation_sub_vector`, exercised
-against synthetic mode-6 / mode-8 packed indices and against
-every audio sub-frame of the real mode-5 fixture (the latter
-pinning the `Undocumented` dispatch entry) + r230 wideband
+against synthetic packed indices for every documented mode and
+against every audio sub-frame of the real mode-5 fixture (decoded
+end-to-end with a manual MSB-first cross-check) + r230 wideband
 high-band innovation sub-vector dispatcher
 (`HbInnovationMapping::for_mode` surfacing `Silence` for modes
 0 / 1, `Documented` for mode 2 (4 × `HbSv10_32`) and mode 3
@@ -1144,8 +1206,8 @@ against synthetic mode-0..=4 bodies built via the public
 `BitWriter`; LSP→LPC + the gain-scaled long-term predictor sum +
 the §9 open-loop fixed-codebook scalar-quantiser magnitude
 reconstruction (narrowband pair and high-band single-index alike) +
-per-mode codebook binding for narrowband modes
-1 / 2 / 3 / 4 / 5 / 7 and high-band mode 4 + high-band sub-frame
+per-mode excitation handling for narrowband modes
+1 / 7 and high-band mode 4 + high-band sub-frame
 LSP interpolation + ultra-wideband framing + the CELP frame-body
 writer + the encoder-side codebook search are the remaining
 pieces).
@@ -1274,23 +1336,26 @@ generation; its output bytes are the test input.
   high-band sub-frame interpolation module blocks on a docs round
   clarifying whether the high band uses the same scheme, a different
   one, or no interpolation at all.
-- **Per-mode innovation codebook binding.** Speex Codec Manual §9.2
-  documents the bit-budget per sub-frame for every Table 9.1 mode
-  but only binds the codebook-shape choice to a specific
-  innovation-codebook table for two modes via the worked examples
-  in CELP companion §2.3 (mode 6 → `Sv5_256`; mode 8 → `Sv20_32`).
-  Modes 1 / 2 / 3 / 4 / 5 / 7 have multiple bit-budget-consistent
-  decompositions across the six available codebook shapes (e.g.
-  mode 3's 20 bits/sub-frame admit both 4 × `Sv10_32` and other
-  splittings), so the per-mode binding cannot be uniquely pinned
-  from the staged material alone. r220's
-  `InnovationMapping::for_mode` surfaces `Documented` for the two
-  bound modes and `Undocumented` for the other seven; the
-  per-sub-frame decode path (`NarrowbandSubFrameIndices::innovation_sub_vector`)
-  returns `InnovationError::Undocumented` for the unbound modes.
-  Closing this gap needs a docs round staging the per-mode
-  codebook binding (one extra row of the Table 9.1 commentary per
-  mode would suffice).
+- **Per-mode excitation handling for narrowband modes 1 and 7.**
+  r277 closed the r220 per-mode innovation-binding gap for modes
+  2 / 3 / 4 / 5 via the staged per-codebook innovation bit-rate
+  annotations (`docs/audio/speex/tables/innovation-cdbk-*.meta`
+  `role:` fields + the `tables/README.md` inventory), which
+  uniquely pin one codebook per Table 9.1 "Innovation VQ" budget
+  (`bits × 200 bps`). Two modes remain unbound:
+  * **Mode 1** (2.15 kbps vocoder) carries `innovation_vq_bits =
+    0` — no VQ field on the wire — yet is not silent (Table 9.2:
+    "mostly comfort noise"). The excitation-*generation* rule (how
+    `c[n]` is synthesised without a codebook index) is not in the
+    staged material.
+  * **Mode 7** (24.6 kbps) carries 96 bits/sub-frame → 19 200 bps,
+    a rate no staged codebook is annotated with, and 96 bits admit
+    no `index_bits × count` + 40-sample-consistent decomposition
+    over a single staged shape. A multi-stage/concatenated scheme
+    is plausible but undocumented.
+  `InnovationMapping::for_mode` surfaces `Undocumented` for these
+  two; closing the gap needs a docs round staging mode 1's vocoder
+  excitation rule and mode 7's innovation structure.
 - **Fixed-codebook gain Q-format.** Manual §9.2 mentions the
   frame-level innovation gain `g_frame` and the per-sub-frame
   correction `g_subf` but neither commits to a documented

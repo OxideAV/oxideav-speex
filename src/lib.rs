@@ -155,8 +155,8 @@
 //!   by concatenating `count` MSB-first sub-vector lookups off the
 //!   `innovation_vq_index` field. Wired off
 //!   [`NarrowbandSubFrameIndices::innovation_sub_vector`]. Per-mode
-//!   binding for modes 1 / 2 / 3 / 4 / 5 / 7 stays deferred behind a
-//!   docs gap.
+//!   binding for modes 1 / 2 / 3 / 4 / 5 / 7 stayed deferred behind a
+//!   docs gap until r277 narrowed it to modes 1 / 7 (see below).
 //!
 //! * **Round r230** (this commit) — wideband **high-band innovation
 //!   sub-vector lookup primitive + per-mode dispatcher** mirroring
@@ -303,6 +303,22 @@
 //!   documented "computed, not a lookup array" open-loop scalar
 //!   quantiser note (`tables/README.md` "Not extracted").
 //!
+//! * **Round r277** (this commit) — narrowband **per-mode innovation
+//!   codebook binding for modes 2 / 3 / 4 / 5**. The staged
+//!   per-codebook innovation bit-rate annotations
+//!   (`docs/audio/speex/tables/innovation-cdbk-*.meta` `role:`
+//!   fields plus the staged `tables/README.md` inventory) combined
+//!   with the Table 9.1 "Innovation VQ" row (`bits/sub-frame × 200
+//!   = innovation bps`) uniquely pin mode 2 → 4 × `Sv10_16`, mode
+//!   3 → 4 × `Sv10_32`, mode 4 → 5 × `Sv8_128`, mode 5 → 8 ×
+//!   `Sv5_64`.
+//!   [`InnovationMapping::for_mode`] now surfaces `Documented` for
+//!   modes 2 / 3 / 4 / 5 / 6 / 8; `Undocumented` narrows to mode 1
+//!   (0-bit VQ field, vocoder excitation generation unstaged) and
+//!   mode 7 (96 bits → 19 200 bps, no annotated codebook). The real
+//!   mode-5 fixture now decodes every sub-frame's 40-sample `c[n]`
+//!   innovation vector end-to-end.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -313,7 +329,8 @@
 //! resolution + excitation history buffer + r241 adaptive-codebook
 //! contribution sum + r244 raw excitation composition primitive +
 //! r261 fixed-codebook gain index composition primitive + r269
-//! high-band excitation-gain index primitive surface typed
+//! high-band excitation-gain index primitive + r277 per-mode
+//! innovation binding for modes 2 / 3 / 4 / 5 surface typed
 //! intermediate values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]

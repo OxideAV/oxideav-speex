@@ -148,7 +148,9 @@ pub const TAP_PITCH_OFFSETS: [i32; ADAPTIVE_CODEBOOK_TAPS] = [-1, 0, 1];
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
+/// use oxideav_speex::resolve_lookback;
+///
 /// // Large T → no substitution needed.
 /// assert_eq!(resolve_lookback(/* k = */ -50, /* t = */ 60), -50);
 ///

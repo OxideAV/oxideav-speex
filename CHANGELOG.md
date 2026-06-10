@@ -8,6 +8,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r277: narrowband **per-mode innovation codebook binding for
+  modes 2 / 3 / 4 / 5**, retiring the r220 `Undocumented` dispatch
+  for four of the six previously unbound modes. Grounding: the
+  staged per-codebook innovation bit-rate annotations
+  (`docs/audio/speex/tables/innovation-cdbk-*.meta` `role:` fields +
+  the staged `tables/README.md` inventory) combined with Table 9.1's
+  "Innovation VQ" row (`bits/sub-frame × 200 = innovation bps`)
+  uniquely pin mode 2 → 4 × `Sv10_16` (3 200 bps), mode 3 → 4 ×
+  `Sv10_32` (4 000 bps), mode 4 → 5 × `Sv8_128` (7 000 bps), mode 5
+  → 8 × `Sv5_64` (9 600 bps); every binding satisfies
+  `index_bits × count == innovation_vq_bits` and
+  `sub_vector_len × count == 40` samples and cross-checks against
+  Table 9.2's composite bit-rates. `InnovationMapping::for_mode` now
+  surfaces `Documented` for modes 2 / 3 / 4 / 5 / 6 / 8;
+  `Undocumented` narrows to mode 1 (0-bit VQ field; vocoder
+  excitation-generation rule unstaged) and mode 7 (96 bits → 19 200
+  bps, no annotated codebook). The real `speexenc`-encoded mode-5
+  fixture now decodes every sub-frame's 40-sample `c[n]` innovation
+  vector end-to-end; the r220 docs-gap-pin integration test is
+  rewritten as `innovation_subvector_decodes_for_mode_5_fixture`
+  with a manual MSB-first cross-check of all 8 per-sub-frame
+  lookups against the raw 48-bit field. 8 new unit tests in
+  `innovation::tests`; the r234 `resolve_lookback` doc-example is
+  promoted from an ignored snippet to a compiled doc-test. 356
+  tests total (326 unit + 29 integration + 1 doc), up from 347.
+  The round's prime candidate (NB/HB excitation-gain magnitudes)
+  remains DOCS-GAP-blocked: no open-loop scalar gain quantiser
+  specification is staged under `docs/audio/speex/`.
 - Round r269: wideband **high-band fixed-codebook gain index
   primitive** — the high-band counterpart of r261's narrowband
   composition. Per Speex Codec Manual §10.4 / Table 10.1 (CELP
