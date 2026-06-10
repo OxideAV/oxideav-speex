@@ -8,6 +8,46 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r269: wideband **high-band fixed-codebook gain index
+  primitive** — the high-band counterpart of r261's narrowband
+  composition. Per Speex Codec Manual §10.4 / Table 10.1 (CELP
+  companion §5.1) the high band carries exactly one gain field per
+  sub-frame (the `Excitation gain` row: `0 / 5 / 4 / 4 / 4` bits for
+  modes 0..=4) and no frame-level factor, so the §9.2
+  `g_frame × g_subf` product structure reduces to a single typed
+  index. New `hb_excitation_gain` module exposes
+  `HbExcitationGainIndex` (`Absent` for mode 0 / `FiveBit(0..=31)`
+  for mode 1 / `FourBit(0..=15)` for modes 2..=4) with `resolve` /
+  `from_body` / `is_absent` / `bit_budget` / `entries` / `raw_index`
+  / `Display` helpers, the `hb_excitation_gain_indices(body, submode)`
+  batch helper returning `[HbExcitationGainIndex; 4]` per high-band
+  frame, and a new
+  `WidebandHighBandBody::hb_excitation_gain_indices(submode)`
+  convenience method mirroring r261's
+  `NarrowbandFrameBody::fixed_codebook_gain_indices`. New public
+  constants `HB_EXC_GAIN_BITS_MODE_1` (5) and
+  `HB_EXC_GAIN_BITS_MODES_2_TO_4` (4). The numeric gain magnitude is
+  gap-blocked behind the documented "computed, not a lookup array"
+  open-loop scalar quantiser note (staged tables README "Not
+  extracted" subsection), so the primitive surfaces only the typed
+  index algebra per the r234 / r241 / r244 / r261 Q-format-agnostic
+  pattern. 13 new unit tests in `hb_excitation_gain::tests` (318 lib
+  tests, up from 305): mode-0 absent everywhere, mode-1 5-bit
+  surface, modes-2..=4 4-bit surface, per-frame gain footprint equals
+  `4 × budget` with no frame-level term for every documented mode,
+  full 5-bit / 4-bit index ranges, non-conforming budget rejected,
+  out-of-range slot rejected, `raw_index` / `entries` / `Display`
+  surfaces, batch-vs-per-slot agreement, `is_absent` flags mode 0
+  only, width constants match the staged sub-mode table. Plus 3 new
+  integration tests in `tests/hb_excitation_gain_indices.rs`:
+  synthetic high-band bodies for every documented mode 0..=4 built
+  via the public `BitWriter` round-trip the written gain indices
+  through `WidebandHighBandBody::parse` + the new accessor; the
+  mode-0 body consumes zero bits and resolves `Absent`; resolution is
+  independent of the LSP + excitation-VQ field contents. 347 tests
+  total (318 unit + 29 integration), up from 331. README "Spec gaps
+  noted" gains a **high-band excitation-gain quantiser** entry.
+
 - Round r261: narrowband **fixed-codebook gain index composition
   primitive** surfacing the Speex Codec Manual §9.2 / CELP companion
   §2.3 product structure `fixed-codebook gain = g_frame × g_subf` at

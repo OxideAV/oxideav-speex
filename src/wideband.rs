@@ -401,6 +401,30 @@ impl WidebandHighBandBody {
         let sf = &self.subframes[sub_idx];
         crate::hb_innovation::decode_hb_subframe(submode, sf.excitation_vq_index)
     }
+
+    /// Resolve the four per-sub-frame typed high-band excitation-gain
+    /// indices off this parsed body — the high-band counterpart of
+    /// r261's
+    /// [`crate::NarrowbandFrameBody::fixed_codebook_gain_indices`].
+    /// Per Table 10.1 the high band carries **no frame-level gain
+    /// factor**, so each sub-frame's surface is the single
+    /// [`crate::hb_excitation_gain::HbExcitationGainIndex`] resolved
+    /// from the `Excitation gain` field (0 / 5 / 4 / 4 / 4 bits for
+    /// modes 0..=4).
+    ///
+    /// Returns `None` only for a hand-built non-conforming sub-mode
+    /// (gain budget outside {0, 4, 5}). The numeric gain magnitude
+    /// stays gap-blocked behind the documented "computed, not a
+    /// lookup array" quantiser note — see
+    /// [`crate::hb_excitation_gain`] module docs.
+    pub fn hb_excitation_gain_indices(
+        &self,
+        submode: &WidebandHighBandSubmode,
+    ) -> Option<
+        [crate::hb_excitation_gain::HbExcitationGainIndex; HIGH_BAND_SUBFRAMES_PER_FRAME as usize],
+    > {
+        crate::hb_excitation_gain::hb_excitation_gain_indices(self, submode)
+    }
 }
 
 /// Parsed wideband high-band frame header (the 4-bit prefix: 1-bit

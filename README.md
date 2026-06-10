@@ -852,6 +852,65 @@ The high-band path follows Table 10.1's simpler structure (one
 per-sub-frame `Excitation gain` field with no frame-level factor,
 so the composition reduces to a single index) and lives separately.
 
+**Round r269** (this commit) lands the **wideband high-band
+fixed-codebook gain index primitive** — the high-band counterpart
+of r261's narrowband composition, the follow-up explicitly queued
+at the end of the r261 entry above. Per Speex Codec Manual §10.4 /
+Table 10.1 (mirrored in CELP companion §5.1) the high band carries
+exactly one gain field per sub-frame — the `Excitation gain` row,
+widths `0 / 5 / 4 / 4 / 4` bits for modes 0..=4 — and **no
+frame-level factor**, so the §9.2 `g_frame × g_subf` product
+structure reduces to a single typed index. The new
+`hb_excitation_gain` module exposes:
+
+- `HbExcitationGainIndex` — typed wrapper over the per-sub-frame
+  field: `Absent` for mode 0 (0-bit budget, silence high band),
+  `FiveBit(0..=31)` for mode 1 (whose `Excitation VQ` row is 0, so
+  the gain is the only per-sub-frame high-band payload), and
+  `FourBit(0..=15)` for modes 2..=4. Helpers: `resolve(raw, submode)`
+  (rejects non-Table-10.1 budgets with `None`), `from_body(body,
+  submode, sub_idx)`, `is_absent()`, `bit_budget()` (0 / 4 / 5),
+  `entries()` (`None` / 32 / 16), `raw_index()`, and a `Display`
+  surface.
+- `hb_excitation_gain_indices(body, submode)` returns
+  `[HbExcitationGainIndex; 4]` per high-band frame; the new
+  `WidebandHighBandBody::hb_excitation_gain_indices(submode)`
+  convenience method wires it off the existing parsed body,
+  mirroring r261's
+  `NarrowbandFrameBody::fixed_codebook_gain_indices`.
+- New public constants `HB_EXC_GAIN_BITS_MODE_1` (5) and
+  `HB_EXC_GAIN_BITS_MODES_2_TO_4` (4) pinning the Table 10.1 row.
+
+The numeric gain magnitude is **gap-blocked** behind the same
+documented "computed, not a lookup array" open-loop scalar
+quantiser note as the narrowband pair (the staged
+`docs/audio/speex/tables/README.md` "Not extracted" subsection —
+there is no static gain table to consult), so this primitive
+surfaces only the typed index algebra per the r234 / r241 / r244 /
+r261 Q-format-agnostic pattern. Since §10.2 states there is no
+pitch prediction in the high band, this gain is the only scaling
+factor the §10.3 high-band excitation `c[n]` will receive once the
+quantiser gap closes.
+
+13 new unit tests in `hb_excitation_gain::tests` (318 lib tests, up
+from 305 in r261): mode-0 absent everywhere; mode-1 5-bit surface
+(budget 5, 32 entries); modes 2..=4 4-bit surface (budget 4, 16
+entries); every documented mode's per-frame gain footprint equals
+`4 × budget` with no frame-level term; full 5-bit and 4-bit index
+ranges; non-conforming 3-bit budget rejected; out-of-range sub-frame
+slot rejected; `raw_index` / `entries` / `Display` surfaces; batch
+matches per-slot resolution and the body convenience method;
+`is_absent` flags mode 0 only; width constants match the staged
+sub-mode table. Plus 3 new integration tests in
+`tests/hb_excitation_gain_indices.rs`: synthetic high-band bodies
+built via the public `BitWriter` for every documented mode 0..=4
+round-trip the written gain indices through
+`WidebandHighBandBody::parse` + the new accessor; the mode-0 body
+consumes zero bits and resolves `Absent`; gain resolution is
+unchanged when the LSP + excitation-VQ fields are flipped from
+all-zeros to all-ones (the primitive reads only the gain field).
+347 tests total (318 unit + 29 integration), up from 331.
+
 **Round r244** lands the **narrowband raw excitation
 composition primitive** composing r241 (`ea[n]` adaptive-codebook
 contribution) and r220 (`c[n]` innovation sub-vector) into the
@@ -1005,7 +1064,7 @@ pitch prediction for the high-band"*.
 
 ### Coverage estimate
 
-~39 % of the Speex codec surface (Ogg stream header + per-frame
+~40 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -1076,9 +1135,16 @@ field + absent variant) composed into a typed
 exercised against synthetic mode-0/1/2/5/8 bodies + every audio
 sub-frame of the real mode-5 fixture (frame-level index varies
 across packets and at least one non-zero 3-bit correction across
-the stream); LSP→LPC + the gain-scaled long-term predictor sum +
+the stream) + r269 wideband high-band fixed-codebook gain index
+primitive (Table 10.1's single per-sub-frame `Excitation gain`
+field — `0 / 5 / 4 / 4 / 4` bits for modes 0..=4 with no
+frame-level factor) via `HbExcitationGainIndex`, wired through
+`WidebandHighBandBody::hb_excitation_gain_indices` and exercised
+against synthetic mode-0..=4 bodies built via the public
+`BitWriter`; LSP→LPC + the gain-scaled long-term predictor sum +
 the §9 open-loop fixed-codebook scalar-quantiser magnitude
-reconstruction + per-mode codebook binding for narrowband modes
+reconstruction (narrowband pair and high-band single-index alike) +
+per-mode codebook binding for narrowband modes
 1 / 2 / 3 / 4 / 5 / 7 and high-band mode 4 + high-band sub-frame
 LSP interpolation + ultra-wideband framing + the CELP frame-body
 writer + the encoder-side codebook search are the remaining
@@ -1233,6 +1299,18 @@ generation; its output bytes are the test input.
   r220 surfaces the codebook samples as raw `i16`; the
   fixed-codebook gain reconstruction stays deferred behind the
   same docs-staging step as the LSP→LPC algorithm.
+- **High-band excitation-gain quantiser.** Manual §10.4 / Table 10.1
+  gives the per-sub-frame `Excitation gain` field widths (5 bits for
+  mode 1, 4 bits for modes 2..=4) but neither the manual nor the
+  staged companion documents the scalar quantiser curve mapping the
+  index to a gain magnitude; the staged
+  `docs/audio/speex/tables/README.md` "Not extracted" subsection
+  records that the fixed-codebook gain quantisation is computed
+  arithmetically, not a static lookup array, so there is no staged
+  table to transcribe. r269 surfaces the typed per-sub-frame index
+  (`HbExcitationGainIndex`); the magnitude reconstruction blocks on
+  a docs round staging the quantiser specification (the same staging
+  step gates the narrowband `g_frame × g_subf` magnitudes).
 - **High-band per-mode innovation codebook binding (mode 4).**
   Speex Codec Manual §10.3 states the high-band excitation is
   *"coded in a way similar to that of the narrowband innovation"*

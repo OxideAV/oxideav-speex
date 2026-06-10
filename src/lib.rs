@@ -287,6 +287,22 @@
 //!   composition at the index layer, leaving the Q-format / quantiser
 //!   pin for a future docs round.
 //!
+//! * **Round r269** (this commit) — wideband **high-band
+//!   fixed-codebook gain index primitive**, the high-band counterpart
+//!   of r261's narrowband composition. Per Speex Codec Manual §10.4 /
+//!   Table 10.1 the high band carries exactly one gain field per
+//!   sub-frame (the `Excitation gain` row: 0 / 5 / 4 / 4 / 4 bits for
+//!   modes 0..=4) and **no frame-level factor**, so the §9.2
+//!   `g_frame × g_subf` product structure reduces to a single typed
+//!   index. The new [`hb_excitation_gain`] module exposes
+//!   [`HbExcitationGainIndex`] (`Absent` for mode 0 / `FiveBit` for
+//!   mode 1 / `FourBit` for modes 2..=4), the
+//!   [`hb_excitation_gain_indices`] batch helper, and the
+//!   [`WidebandHighBandBody::hb_excitation_gain_indices`] convenience
+//!   method. The numeric gain magnitude stays gap-blocked behind the
+//!   documented "computed, not a lookup array" open-loop scalar
+//!   quantiser note (`tables/README.md` "Not extracted").
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -296,7 +312,8 @@
 //! innovation sub-vector dispatch + r234 adaptive-codebook index
 //! resolution + excitation history buffer + r241 adaptive-codebook
 //! contribution sum + r244 raw excitation composition primitive +
-//! r261 fixed-codebook gain index composition primitive surface typed
+//! r261 fixed-codebook gain index composition primitive + r269
+//! high-band excitation-gain index primitive surface typed
 //! intermediate values but do not yet produce PCM output.
 
 #![warn(missing_debug_implementations)]
@@ -310,6 +327,7 @@ mod codebooks;
 mod excitation;
 mod fixed_codebook_gain;
 mod frame;
+mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
 mod header;
@@ -347,6 +365,10 @@ pub use fixed_codebook_gain::{
     SubFrameInnovationGainCorrection, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+pub use hb_excitation_gain::{
+    hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
+    HB_EXC_GAIN_BITS_MODE_1,
+};
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
     HbInnovationMapping, HB_SUBFRAME_SAMPLES,
