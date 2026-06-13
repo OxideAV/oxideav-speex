@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r286: narrowband **LSP→LPC conversion + the LPC synthesis
+  filter**, closing the decoder "lacks LSP→LPC + synthesis filter"
+  tail. New `lsp_to_lpc` module: the standard auxiliary-polynomial
+  LSP reconstruction `A(z) = (P(z) + Q(z)) / 2` (P/Q built from the
+  per-LSP second-order sections `[1, −2cos(ωₖ), 1]` with the
+  `(1 ± z⁻¹)` boundary factors), grounded in *The Speex Codec
+  Manual* §9.1 ("converted back to the LPC filter Â(z)") + §9.4
+  ("S(z) = 1/A(z)"). `lsp_to_lpc` is the general radian-input float
+  transform; `lsp_q10_to_radians` / `lsp_vector_q10_to_radians` /
+  `lpc_from_lsp_q10` bridge the r194/r200 Q10 reconstruction under a
+  documented angular-unit assumption (the LSP fixed-point pin for
+  bit-exactness is a recorded docs gap). New `synthesis` module:
+  `SynthesisFilter` runs the decoder recurrence
+  `x[n] = e[n] + Σ a[i]·x[n−1−i]` (manual §8.2 prediction-error
+  inverse) with persistent IIR history across sub-frame and frame
+  boundaries, emitting `f64` or rounded/saturated `i16` PCM. New
+  integration test `tests/synthesis_pcm_fixture.rs` runs the real
+  mode-5 `speexenc` fixture end-to-end (LSP → interp → LSP→LPC →
+  innovation `c[n]` → synthesis) to finite, responsive, non-silent,
+  deterministic PCM — the crate's first real audio output. The
+  adaptive-codebook (pitch) contribution is not yet folded into the
+  excitation (gain Q-format still gap-blocked), so the PCM is
+  correct-by-construction but not yet bit-exact. 17 new unit tests +
+  3 integration tests (343 lib tests total).
 - Round r277: narrowband **per-mode innovation codebook binding for
   modes 2 / 3 / 4 / 5**, retiring the r220 `Undocumented` dispatch
   for four of the six previously unbound modes. Grounding: the

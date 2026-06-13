@@ -319,6 +319,34 @@
 //!   mode-5 fixture now decodes every sub-frame's 40-sample `c[n]`
 //!   innovation vector end-to-end.
 //!
+//! * **Round r286** (this commit) — narrowband **LSP→LPC conversion +
+//!   the LPC synthesis filter**, closing the decoder README's
+//!   "lacks LSP→LPC + synthesis filter" tail. The new [`lsp_to_lpc`]
+//!   module turns a set of LSP angular frequencies into the ten
+//!   linear-prediction coefficients of the analysis filter
+//!   `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ` via the standard auxiliary-polynomial
+//!   identity `A(z) = (P(z) + Q(z)) / 2` (P/Q built by convolving the
+//!   per-LSP second-order sections `[1, −2cos(ωₖ), 1]` and applying
+//!   the `(1 ± z⁻¹)` boundary factors). Spec basis: *The Speex Codec
+//!   Manual* §9.1 ("converted back to the LPC filter Â(z)") + §9.4
+//!   ("the synthesis filter S(z) = 1/A(z)"). [`lsp_to_lpc`] is the
+//!   general float transform; [`lsp_q10_to_radians`] /
+//!   [`lsp_vector_q10_to_radians`] / [`lpc_from_lsp_q10`] bridge the
+//!   r194/r200 Q10 reconstruction under a documented angular-unit
+//!   assumption (the LSP Q-format pin for *bit-exactness* against
+//!   reference output is a recorded docs gap). The new [`synthesis`]
+//!   module's [`SynthesisFilter`] runs the decoder recurrence
+//!   `x[n] = e[n] + Σ a[i]·x[n−1−i]` (manual §8.2 prediction-error
+//!   inverse) with persistent IIR history across sub-frames and
+//!   frames, emitting `f64` or rounded/saturated `i16` PCM. A new
+//!   integration test (`tests/synthesis_pcm_fixture.rs`) runs the
+//!   real mode-5 fixture end-to-end (LSP → interp → LSP→LPC →
+//!   innovation `c[n]` → synthesis) to produce finite, responsive,
+//!   non-silent PCM. The adaptive-codebook (pitch) contribution is
+//!   not yet folded into the excitation feeding the filter — its gain
+//!   Q-format stays gap-blocked — so the PCM is correct-by-construction
+//!   but not yet bit-exact.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -330,8 +358,10 @@
 //! contribution sum + r244 raw excitation composition primitive +
 //! r261 fixed-codebook gain index composition primitive + r269
 //! high-band excitation-gain index primitive + r277 per-mode
-//! innovation binding for modes 2 / 3 / 4 / 5 surface typed
-//! intermediate values but do not yet produce PCM output.
+//! innovation binding for modes 2 / 3 / 4 / 5 + r286 LSP→LPC
+//! conversion + LPC synthesis filter now compose into a real PCM
+//! path for one narrowband fixture, though the public
+//! `Decoder`/`Encoder` trait surface is not yet wired.
 
 #![warn(missing_debug_implementations)]
 
@@ -351,11 +381,13 @@ mod header;
 mod innovation;
 mod lsp;
 mod lsp_interp;
+mod lsp_to_lpc;
 mod narrowband_body;
 mod packet;
 mod pitch_gain;
 mod signalling;
 mod submode;
+mod synthesis;
 mod wideband;
 
 pub use adaptive_codebook::{
@@ -407,6 +439,9 @@ pub use lsp::{
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+pub use lsp_to_lpc::{
+    lpc_from_lsp_q10, lsp_q10_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians, LPC_ORDER,
+};
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
     PITCH_PERIOD_MIN,
@@ -419,6 +454,7 @@ pub use signalling::{
     INBAND_TABLE_5_1,
 };
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
+pub use synthesis::SynthesisFilter;
 pub use wideband::{
     HighBandSubFrameIndices, WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader,
     WidebandHighBandSubmode, WidebandSubmode, HIGH_BAND_FRAME_PREFIX_BITS,

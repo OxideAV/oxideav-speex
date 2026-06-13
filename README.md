@@ -970,6 +970,54 @@ extracted" subsection and companion §9 record the quantiser as
 r261 / r269 typed-index primitives stay the frontier for that
 path.
 
+**Round r286** (this commit) lands the **narrowband LSP→LPC
+conversion + the LPC synthesis filter**, closing the decoder
+"lacks LSP→LPC + synthesis filter" tail. Spec basis: *The Speex
+Codec Manual* §9.1 ("The LSP coefficients … converted back to the
+LPC filter Â(z)") + §9.4 ("the synthesis filter S(z) = 1/A(z)") +
+§8.2 (the prediction-error filter `A(z)` whose inverse the decoder
+runs).
+
+- **`lsp_to_lpc` module.** The LSP→LPC conversion is the standard
+  Line-Spectral-Pair reconstruction — pure polynomial algebra that
+  follows from the *definition* of LSPs, independent of any codec.
+  For the even order N=10 it forms the auxiliary polynomials
+  `P(z)` (symmetric) and `Q(z)` (antisymmetric) by convolving the
+  per-LSP second-order sections `[1, −2cos(ωₖ), 1]` (even-indexed
+  angles → P, odd-indexed → Q), applies the `(1 ± z⁻¹)` boundary
+  factors, and recovers `A(z) = (P(z) + Q(z)) / 2`. The result is
+  signed so the synthesis recurrence is a plain add. `lsp_to_lpc`
+  is the general float transform (radian input); `lsp_q10_to_radians`
+  / `lsp_vector_q10_to_radians` / `lpc_from_lsp_q10` bridge the
+  r194/r200 Q10 reconstruction under a documented angular-unit
+  assumption (`ω = value / 2^Q rad`, clamped to the open (0, π)
+  band). The exact LSP fixed-point format / cosine-series Q-domain
+  that the reference decoder uses for *bit-exactness* is silent in
+  the in-repo manual + companion — recorded as a docs gap below.
+- **`synthesis` module.** `SynthesisFilter` runs the all-pole
+  decoder recurrence `x[n] = e[n] + Σ a[i]·x[n−1−i]` with a
+  persistent N-sample IIR history that carries across sub-frame and
+  frame boundaries (the continuity that makes `1/A(z)` recursive,
+  not per-block). It filters in `f64` (no imposed Q-format the
+  manual does not specify) and emits `f64` or rounded/saturated
+  `i16` PCM.
+
+A new integration test (`tests/synthesis_pcm_fixture.rs`) runs the
+real mode-5 `speexenc` fixture end-to-end through the decode tail
+(LSP reconstruction → sub-frame interpolation → LSP→LPC →
+innovation `c[n]` → synthesis filter), asserting finite,
+range-bounded, non-silent, deterministic PCM with dynamic range —
+the first time the crate produces actual audio samples from a real
+stream. The excitation fed to the filter here is the r277
+innovation `c[n]` **alone**: the adaptive-codebook (pitch)
+contribution `p[n]` is not yet folded in, because its gain
+Q-format is still gap-blocked (r208 / r241), so the PCM is
+correct-by-construction but not yet bit-exact against reference
+output. 17 new unit tests (`lsp_to_lpc::tests` poly-mul + band
+mapping + finiteness; `synthesis::tests` impulse-response /
+one-pole geometric series / history continuity / saturation) +
+3 integration tests; 343 lib tests total.
+
 **Round r244** lands the **narrowband raw excitation
 composition primitive** composing r241 (`ea[n]` adaptive-codebook
 contribution) and r220 (`c[n]` innovation sub-vector) into the
@@ -1123,7 +1171,7 @@ pitch prediction for the high-band"*.
 
 ### Coverage estimate
 
-~40 % of the Speex codec surface (Ogg stream header + per-frame
+~45 % of the Speex codec surface (Ogg stream header + per-frame
 leading prefix + Table 9.1 narrowband sub-mode budgets + Table 10.1
 wideband high-band sub-mode budgets + narrowband frame-body
 bit-reader + wideband high-band frame-body bit-reader + §5.5
@@ -1203,14 +1251,22 @@ field — `0 / 5 / 4 / 4 / 4` bits for modes 0..=4 with no
 frame-level factor) via `HbExcitationGainIndex`, wired through
 `WidebandHighBandBody::hb_excitation_gain_indices` and exercised
 against synthetic mode-0..=4 bodies built via the public
-`BitWriter`; LSP→LPC + the gain-scaled long-term predictor sum +
+`BitWriter` + r286 narrowband LSP→LPC conversion (the standard
+`A(z) = (P(z) + Q(z)) / 2` auxiliary-polynomial reconstruction via
+`lsp_to_lpc`) + the LPC synthesis filter `1/A(z)` (`SynthesisFilter`
+running `x[n] = e[n] + Σ a[i]·x[n−1−i]` with persistent IIR history),
+composed into a real end-to-end PCM path for the mode-5 fixture
+(LSP → interp → LSP→LPC → innovation `c[n]` → synthesis); the
+gain-scaled long-term predictor sum +
 the §9 open-loop fixed-codebook scalar-quantiser magnitude
-reconstruction (narrowband pair and high-band single-index alike) +
+reconstruction (narrowband pair and high-band single-index alike;
+needed before the pitch contribution can join the excitation and
+the PCM becomes bit-exact) +
 per-mode excitation handling for narrowband modes
 1 / 7 and high-band mode 4 + high-band sub-frame
-LSP interpolation + ultra-wideband framing + the CELP frame-body
-writer + the encoder-side codebook search are the remaining
-pieces).
+LSP interpolation + high-band LSP→LPC + ultra-wideband framing +
+the CELP frame-body writer + the encoder-side codebook search are
+the remaining pieces).
 
 ### Spec material consulted
 
@@ -1218,8 +1274,12 @@ pieces).
   Version 1.2 Beta 3 (Jean-Marc Valin, December 2007). §5.5
   ("Packing and in-band signalling", Table 5.1), §7.3 ("Ogg file
   format", Table 7.1), §8 (CELP overview — source/filter, LPC, pitch,
-  innovation), §9.1 ("Whole-frame analysis": 160-sample frame, 4
-  sub-frames of 40 samples), §9.2 ("Sub-frame analysis-by-synthesis":
+  innovation), §8.2 (linear prediction: the prediction-error filter
+  `A(z)` via `e[n] = x[n] − Σ a[i]·x[n−i]`, inverted by the decoder
+  synthesis recurrence), §9.1 ("Whole-frame analysis": 160-sample
+  frame, 4 sub-frames of 40 samples; LSPs "converted back to the LPC
+  filter Â(z)"), §9.4 (names the synthesis filter `S(z) = 1/A(z)`),
+  §9.2 ("Sub-frame analysis-by-synthesis":
   pitch period in [17, 144] encoded with 7 bits; 3-tap β
   coefficients VQ'd with 5 or 7 bits; sub-vector innovation codebook
   sizes), §9.3 (Bit allocation, Table 9.1 — bit-stream packing
@@ -1292,20 +1352,26 @@ generation; its output bytes are the test input.
   framing is deferred to a follow-up round once the relevant
   material is staged (likely a triple-band QMF + per-band CELP, but
   the exact bit allocation is a docs gap).
-- **LSP → LPC conversion algorithm.** Manual §9.1 only states the
-  interpolated LSPs are *"converted back to the LPC filter Â(z)"*
-  without giving the conversion procedure (typically a Chebyshev
-  polynomial root-find or sum-of-cosines expansion). The staged
-  `docs/audio/speex/speex-celp-companion.md` is also silent on the
-  conversion algorithm — its §9 explicitly covers raw codebook
-  table data only, while the LSP→LPC conversion is algorithmic
-  (no static lookup array to extract). The r200 sub-frame
-  interpolation lands in Q12 ready for this stage; the conversion
-  itself blocks on a docs round staging either (a) a clean-room
-  algorithmic description of the LSP→LPC procedure used by Speex,
-  or (b) the reference textbook citation (commonly Kabal & Ramachandran
-  1986) sufficient to ground a from-scratch implementation against
-  a documented spec rather than a reference implementation.
+- **LSP angular unit / synthesis Q-format (for bit-exactness).**
+  r286 lands the LSP→LPC conversion (`lsp_to_lpc`) as the standard
+  auxiliary-polynomial reconstruction `A(z) = (P(z) + Q(z)) / 2` —
+  general polynomial algebra that follows from the *definition* of
+  LSPs, grounded in Manual §9.1 ("converted back to the LPC filter
+  Â(z)") + §9.4 ("S(z) = 1/A(z)") + §8.2 (the prediction-error
+  filter). That core is correct-by-construction and pinned by unit
+  tests against hand-computed second-order sections. What the
+  in-repo manual + companion remain **silent on** — and what a
+  *bit-exact* match against reference Speex output additionally
+  needs — is (a) the **angular interpretation** of the reconstructed
+  LSP value (whether the stored value is the angle `ω` directly,
+  `cos(ω)`, or a scaled variant) and (b) the exact **fixed-point
+  Q-domain** the reference decoder evaluates the cosine series + the
+  synthesis recurrence in. `lsp_q10_to_radians` isolates a single
+  documented assumption (`ω = value / 2^Q rad`) so a future docs
+  round changing it touches only that helper, never the polynomial
+  core or the synthesis filter. A docs round staging a clean-room
+  description of the LSP storage unit + the reference fixed-point
+  arithmetic would close this to bit-exactness.
 - The first-frame initialisation convention for sub-frame LSP
   interpolation (whether `prev_q10` should be set to `curr_q10`,
   to a constant "neutral" LSP vector, or to zero) is not specified
