@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r296: narrowband **per-sub-frame LSP→LPC conversion for a full
+  frame**, bridging the r200 sub-frame LSP interpolation (Q12
+  `NbSubFrameLsp`) and the r286 LSP→LPC core. The r286 `lpc_from_lsp_q10`
+  path only consumed the per-frame Q10 vector; the interpolated
+  per-sub-frame vectors carry two extra sub-binary-point bits (Q12),
+  so a Q-shift-aware conversion was missing. Generalises
+  `lsp_q10_to_radians` into the Q-shift-parameterised
+  `lsp_qn_to_radians` (Q10 helper now delegates), adds
+  `lpc_from_subframe_lsp_q12` for one Q12 sub-frame vector, and
+  `subframe_lpc_set` returning the four per-sub-frame LPC sets the
+  synthesis filter consumes (manual §9.1: each sub-frame is filtered
+  with its own interpolated LPC set; the 4th sub-frame carries the
+  current LSPs unchanged). The angular-unit assumption stays pinned in
+  the single shared `lsp_qn_to_radians` helper, keeping the recorded
+  LSP Q-format docs gap to one fix-site.
+
 - Round r286: narrowband **LSP→LPC conversion + the LPC synthesis
   filter**, closing the decoder "lacks LSP→LPC + synthesis filter"
   tail. New `lsp_to_lpc` module: the standard auxiliary-polynomial

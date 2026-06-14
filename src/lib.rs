@@ -347,6 +347,23 @@
 //!   Q-format stays gap-blocked — so the PCM is correct-by-construction
 //!   but not yet bit-exact.
 //!
+//! * **Round r296** (this commit) — narrowband **per-sub-frame LSP→LPC
+//!   conversion for a full frame**, bridging the r200 sub-frame LSP
+//!   interpolation (Q12 [`crate::lsp_interp::NbSubFrameLsp`]) and the
+//!   r286 LSP→LPC core. The r286 `lpc_from_lsp_q10` path only consumed
+//!   the per-frame Q10 vector; the interpolated per-sub-frame vectors
+//!   carry two extra sub-binary-point bits (Q12), so a Q-shift-aware
+//!   conversion was missing. This round generalises
+//!   [`lsp_q10_to_radians`] into the Q-shift-parameterised
+//!   [`lsp_qn_to_radians`] (the Q10 helper now delegates to it), adds
+//!   [`lpc_from_subframe_lsp_q12`] for one Q12 sub-frame vector, and
+//!   [`subframe_lpc_set`] returning the four per-sub-frame LPC sets the
+//!   [`synthesis`] filter consumes (manual §9.1: "each sub-frame is
+//!   filtered with its own interpolated LPC set"; the 4th sub-frame
+//!   carries the current LSPs unchanged). The angular-unit assumption
+//!   stays pinned in the single shared [`lsp_qn_to_radians`] helper, so
+//!   the recorded LSP Q-format docs gap still has one fix-site.
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -440,7 +457,8 @@ pub use lsp::{
 };
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 pub use lsp_to_lpc::{
-    lpc_from_lsp_q10, lsp_q10_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians, LPC_ORDER,
+    lpc_from_lsp_q10, lpc_from_subframe_lsp_q12, lsp_q10_to_radians, lsp_qn_to_radians, lsp_to_lpc,
+    lsp_vector_q10_to_radians, subframe_lpc_set, LPC_ORDER,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,

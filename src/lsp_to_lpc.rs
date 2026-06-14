@@ -86,6 +86,7 @@
 
 use crate::codebooks::NB_LSP_ORDER;
 use crate::lsp::NB_LSP_OUTPUT_Q;
+use crate::lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 
 /// Number of LPC coefficients produced (equals the narrowband LSP
 /// order, [`NB_LSP_ORDER`] = 10).
@@ -107,7 +108,35 @@ pub const LPC_ORDER: usize = NB_LSP_ORDER;
 /// `(0, π)` so a degenerate quantiser output can never drive `cos`
 /// outside `[−1, 1]` or collapse two roots onto `z = ±1`.
 pub fn lsp_q10_to_radians(value: i32) -> f64 {
-    let omega = f64::from(value) / f64::from(1u32 << NB_LSP_OUTPUT_Q);
+    lsp_qn_to_radians(value, NB_LSP_OUTPUT_Q)
+}
+
+/// Convert a fixed-point reconstructed LSP value in an arbitrary
+/// `Q`-format into an angular frequency in radians.
+///
+/// This is the Q-shift-parameterised generalisation of
+/// [`lsp_q10_to_radians`]: the stored value is treated as the angle
+/// `ω = value / 2^q` radians (the same documented angular-unit
+/// assumption — see module docs — applied at the supplied scale `q`).
+/// The result is clamped to the open band `(0, π)` so a degenerate
+/// quantiser output can never drive `cos` outside `[−1, 1]` or collapse
+/// a root onto `z = ±1`.
+///
+/// The r194/r200 path produces two distinct scales the synthesis chain
+/// consumes:
+///
+/// * `q = `[`NB_LSP_OUTPUT_Q`]` = 10` — the per-frame reconstructed LSP
+///   vector ([`crate::lsp::reconstruct_q10`]).
+/// * `q = `[`NB_LSP_INTERP_OUTPUT_Q`]` = 12` — the per-sub-frame
+///   interpolated LSP vector ([`crate::lsp_interp::NbSubFrameLsp`]),
+///   which carries two extra sub-binary-point bits from the un-divided
+///   weight multiplication (see the interpolation module docs).
+///
+/// Sharing one helper across both scales keeps the angular-unit
+/// assumption pinned in a single place: a future docs-gap fill changes
+/// only this function regardless of which Q-format feeds it.
+pub fn lsp_qn_to_radians(value: i32, q: u32) -> f64 {
+    let omega = f64::from(value) / f64::from(1u32 << q);
     // Keep strictly inside (0, π): the auxiliary-polynomial root split
     // assumes no LSP sits exactly on z = ±1.
     let eps = 1e-4_f64;
@@ -189,6 +218,46 @@ pub fn lsp_to_lpc(lsp_rad: &[f64; LPC_ORDER]) -> [f64; LPC_ORDER] {
 /// composing [`lsp_vector_q10_to_radians`] with [`lsp_to_lpc`].
 pub fn lpc_from_lsp_q10(lsp_q10: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORDER] {
     lsp_to_lpc(&lsp_vector_q10_to_radians(lsp_q10))
+}
+
+/// Convert one Q[[`NB_LSP_INTERP_OUTPUT_Q`]] = Q12 interpolated
+/// sub-frame LSP vector to its ten LPC coefficients.
+///
+/// The [`crate::lsp_interp::NbSubFrameLsp`] interpolation step emits the
+/// per-sub-frame LSPs at Q12 (input Q10 × the un-divided weight sum of
+/// 4). Each element is mapped to radians via [`lsp_qn_to_radians`] at
+/// `q = `[`NB_LSP_INTERP_OUTPUT_Q`] and run through the same
+/// [`lsp_to_lpc`] polynomial core as the per-frame path.
+pub fn lpc_from_subframe_lsp_q12(lsp_q12: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORDER] {
+    let mut rad = [0.0_f64; NB_LSP_ORDER];
+    for (r, &v) in rad.iter_mut().zip(lsp_q12.iter()) {
+        *r = lsp_qn_to_radians(v, NB_LSP_INTERP_OUTPUT_Q);
+    }
+    lsp_to_lpc(&rad)
+}
+
+/// Convert a whole frame's four interpolated sub-frame LSP vectors
+/// ([`crate::lsp_interp::NbSubFrameLsp`], Q12) into four LPC coefficient
+/// sets — one per 40-sample sub-frame.
+///
+/// This bridges the r200 sub-frame LSP interpolation and the r286
+/// LSP→LPC core for an entire narrowband frame: the returned `[[f64;
+/// 10]; 4]` is exactly the per-sub-frame LPC the [`crate::synthesis`]
+/// filter consumes (the module docs there note "each sub-frame is
+/// filtered with its own interpolated LPC set").
+///
+/// Sub-frame 4 (index 3) carries the current frame's LSPs unchanged
+/// (manual §9.1: "the LSP's are considered to be associated to the 4th
+/// sub-frame"); the other three carry the linearly-interpolated sets.
+/// Because the interpolation is order-preserving for monotone inputs
+/// and the conversion is per-vector, the four LPC sets evolve smoothly
+/// across the frame — the IIR continuity the synthesis filter relies on.
+pub fn subframe_lpc_set(lsp: &NbSubFrameLsp) -> [[f64; LPC_ORDER]; NB_LSP_SUBFRAMES_PER_FRAME] {
+    let mut out = [[0.0_f64; LPC_ORDER]; NB_LSP_SUBFRAMES_PER_FRAME];
+    for (slot, sf) in out.iter_mut().zip(lsp.subframes.iter()) {
+        *slot = lpc_from_subframe_lsp_q12(sf);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -322,6 +391,90 @@ mod tests {
         let rad = lsp_vector_q10_to_radians(&lsp_q10);
         for &r in &rad {
             assert!(approx(r, 1.0, 1e-9));
+        }
+    }
+
+    #[test]
+    fn qn_to_radians_matches_q10_special_case() {
+        // The generalised helper at q=10 must reproduce the Q10 helper
+        // exactly for every input value.
+        for v in [-5000, -1, 0, 1, 205, 1024, 3217, 1_000_000] {
+            assert_eq!(lsp_qn_to_radians(v, NB_LSP_OUTPUT_Q), lsp_q10_to_radians(v));
+        }
+    }
+
+    #[test]
+    fn qn_to_radians_scales_with_q() {
+        // A Q12 value of 4096 is the same angle (1.0 rad) as a Q10 value
+        // of 1024 — the two extra bits scale the integer by 4.
+        let q10 = lsp_qn_to_radians(1024, NB_LSP_OUTPUT_Q);
+        let q12 = lsp_qn_to_radians(4096, NB_LSP_INTERP_OUTPUT_Q);
+        assert!(approx(q10, q12, 1e-12));
+        assert!(approx(q12, 1.0, 1e-9));
+    }
+
+    #[test]
+    fn subframe_q12_path_equals_q10_path_when_value_scaled_by_four() {
+        // A Q12 sub-frame vector of 4·x equals the Q10 vector x at the
+        // same angles, so the LPC sets must match coefficient-for-
+        // coefficient.
+        let lsp_q10 = [205, 410, 615, 820, 1024, 1229, 1434, 1638, 1843, 2048];
+        let mut lsp_q12 = [0i32; NB_LSP_ORDER];
+        for (d, &s) in lsp_q12.iter_mut().zip(lsp_q10.iter()) {
+            *d = s * 4;
+        }
+        let from_q10 = lpc_from_lsp_q10(&lsp_q10);
+        let from_q12 = lpc_from_subframe_lsp_q12(&lsp_q12);
+        for i in 0..LPC_ORDER {
+            assert!(approx(from_q10[i], from_q12[i], 1e-12), "coeff {i}");
+        }
+    }
+
+    #[test]
+    fn subframe_lpc_set_produces_four_finite_sets() {
+        use crate::lsp_interp::NbSubFrameLsp;
+        // Steady-state interpolation between two ascending Q10 LSP sets.
+        let prev = [205, 410, 615, 820, 1024, 1229, 1434, 1638, 1843, 2048];
+        let curr = [256, 470, 690, 900, 1110, 1320, 1530, 1740, 1950, 2160];
+        let interp = NbSubFrameLsp::new(&prev, &curr);
+        let sets = subframe_lpc_set(&interp);
+        assert_eq!(sets.len(), NB_LSP_SUBFRAMES_PER_FRAME);
+        for set in &sets {
+            for &c in set {
+                assert!(c.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn subframe_lpc_set_subframe4_matches_current_frame_lpc() {
+        use crate::lsp_interp::NbSubFrameLsp;
+        // Manual §9.1: sub-frame 4 carries the current LSPs unchanged.
+        // Its interpolated Q12 vector is 4·curr, so its LPC set must
+        // equal the per-frame Q10 conversion of `curr`.
+        let prev = [100, 300, 500, 700, 900, 1100, 1300, 1500, 1700, 1900];
+        let curr = [205, 410, 615, 820, 1024, 1229, 1434, 1638, 1843, 2048];
+        let interp = NbSubFrameLsp::new(&prev, &curr);
+        let sets = subframe_lpc_set(&interp);
+        let curr_lpc = lpc_from_lsp_q10(&curr);
+        for i in 0..LPC_ORDER {
+            assert!(approx(sets[3][i], curr_lpc[i], 1e-12), "coeff {i}");
+        }
+    }
+
+    #[test]
+    fn subframe_lpc_set_first_frame_is_constant_across_subframes() {
+        use crate::lsp_interp::NbSubFrameLsp;
+        // First-frame init makes every sub-frame equal to `curr`, so all
+        // four LPC sets must be identical.
+        let curr = [205, 410, 615, 820, 1024, 1229, 1434, 1638, 1843, 2048];
+        let interp = NbSubFrameLsp::first_frame(&curr);
+        let sets = subframe_lpc_set(&interp);
+        let first = sets[0];
+        for (s, set) in sets.iter().enumerate().skip(1) {
+            for (i, (&c, &f)) in set.iter().zip(first.iter()).enumerate() {
+                assert!(approx(c, f, 1e-12), "set {s} coeff {i}");
+            }
         }
     }
 }

@@ -970,7 +970,38 @@ extracted" subsection and companion §9 record the quantiser as
 r261 / r269 typed-index primitives stay the frontier for that
 path.
 
-**Round r286** (this commit) lands the **narrowband LSP→LPC
+**Round r296** (this commit) lands the **narrowband per-sub-frame
+LSP→LPC conversion for a full frame**, bridging the r200 sub-frame
+LSP interpolation and the r286 LSP→LPC core. The r286
+`lpc_from_lsp_q10` path consumed only the per-frame Q10 LSP vector;
+the interpolated per-sub-frame vectors (`NbSubFrameLsp`) carry two
+extra sub-binary-point bits (Q12, from the un-divided weight sum of
+4 — see the interpolation section above), so a Q-shift-aware
+conversion was missing between the two stages.
+
+- **`lsp_qn_to_radians(value, q)`** generalises the r286
+  `lsp_q10_to_radians` to an arbitrary `Q`-format; the Q10 helper now
+  delegates to it, so the documented angular-unit assumption
+  (`ω = value / 2^q rad`, clamped to the open `(0, π)` band) is
+  pinned in **one** place regardless of which scale feeds it.
+- **`lpc_from_subframe_lsp_q12(&[i32; 10])`** converts one Q12
+  sub-frame LSP vector through the shared `lsp_to_lpc` polynomial
+  core.
+- **`subframe_lpc_set(&NbSubFrameLsp)`** returns the four
+  per-sub-frame LPC sets the `synthesis` filter consumes (manual
+  §9.1: each sub-frame is filtered with its own interpolated LPC
+  set; the 4th sub-frame carries the current frame's LSPs unchanged,
+  so its LPC set equals the per-frame Q10 conversion of `curr`).
+
+8 new unit tests pin the Q10↔Q12 equivalence (a Q12 vector of `4·x`
+maps to the same angles as the Q10 vector `x`), the 4th-sub-frame
+identity, and the first-frame constant-envelope case. Spec basis:
+*The Speex Codec Manual* §9.1. This is pure polynomial algebra over
+already-reconstructed LSPs — no gapped table or quantiser is
+involved; the LSP fixed-point pin for *bit-exactness* remains the
+recorded docs gap below.
+
+**Round r286** lands the **narrowband LSP→LPC
 conversion + the LPC synthesis filter**, closing the decoder
 "lacks LSP→LPC + synthesis filter" tail. Spec basis: *The Speex
 Codec Manual* §9.1 ("The LSP coefficients … converted back to the
@@ -1016,7 +1047,8 @@ correct-by-construction but not yet bit-exact against reference
 output. 17 new unit tests (`lsp_to_lpc::tests` poly-mul + band
 mapping + finiteness; `synthesis::tests` impulse-response /
 one-pole geometric series / history continuity / saturation) +
-3 integration tests; 343 lib tests total.
+3 integration tests. r296 adds 8 more lib tests → 349 lib tests
+total.
 
 **Round r244** lands the **narrowband raw excitation
 composition primitive** composing r241 (`ea[n]` adaptive-codebook
