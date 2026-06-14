@@ -457,8 +457,9 @@ pub use lsp::{
 };
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 pub use lsp_to_lpc::{
-    lpc_from_lsp_q10, lpc_from_subframe_lsp_q12, lsp_q10_to_radians, lsp_qn_to_radians, lsp_to_lpc,
-    lsp_vector_q10_to_radians, subframe_lpc_set, LPC_ORDER,
+    hb_lsp_q10_to_radians, hb_lsp_to_lpc, lpc_from_hb_lsp_q10, lpc_from_lsp_q10,
+    lpc_from_subframe_lsp_q12, lsp_q10_to_radians, lsp_qn_to_radians, lsp_to_lpc,
+    lsp_vector_q10_to_radians, subframe_lpc_set, HB_LPC_ORDER_OUT, LPC_ORDER,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,

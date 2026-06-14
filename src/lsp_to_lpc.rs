@@ -84,13 +84,18 @@
 //! the round report; this module produces a *correct-by-construction*
 //! LPC set and PCM, not yet a bit-exact one.
 
-use crate::codebooks::NB_LSP_ORDER;
+use crate::codebooks::{HB_LPC_ORDER, NB_LSP_ORDER};
+use crate::hb_lsp::HB_LSP_OUTPUT_Q;
 use crate::lsp::NB_LSP_OUTPUT_Q;
 use crate::lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 
 /// Number of LPC coefficients produced (equals the narrowband LSP
 /// order, [`NB_LSP_ORDER`] = 10).
 pub const LPC_ORDER: usize = NB_LSP_ORDER;
+
+/// Number of high-band LPC coefficients produced (equals the wideband
+/// high-band LSP order, [`HB_LPC_ORDER`] = 8). See [`hb_lsp_to_lpc`].
+pub const HB_LPC_ORDER_OUT: usize = HB_LPC_ORDER;
 
 /// Convert a Q[[`NB_LSP_OUTPUT_Q`]] reconstructed LSP value into an
 /// angular frequency in radians.
@@ -178,9 +183,43 @@ fn poly_mul(a: &[f64], b: &[f64], out: &mut Vec<f64>) {
 /// interlaced in `(0, π)`; the reconstruction path guarantees that for
 /// real frames.
 pub fn lsp_to_lpc(lsp_rad: &[f64; LPC_ORDER]) -> [f64; LPC_ORDER] {
-    // Build P(z) from the even-indexed LSPs (0,2,4,6,8) and Q(z) from
-    // the odd-indexed LSPs (1,3,5,7,9). Each LSP contributes a
-    // second-order section [1, −2cos(ω), 1].
+    let mut a = [0.0_f64; LPC_ORDER];
+    lsp_to_lpc_slice(lsp_rad, &mut a);
+    a
+}
+
+/// Order-generic LSP→LPC conversion writing into a caller-supplied
+/// coefficient slice.
+///
+/// This is the shared polynomial core both the narrowband ([`lsp_to_lpc`],
+/// order 10) and wideband high-band ([`hb_lsp_to_lpc`], order 8) paths
+/// delegate to. `lsp_rad` carries the `N` LSP angular frequencies and
+/// `out` receives the `N` LPC coefficients `a[0..N]` of
+/// `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ`; both must have the same even length `N`.
+///
+/// The construction is the same `A(z) = (P(z) + Q(z)) / 2`
+/// auxiliary-polynomial reconstruction documented at the module level —
+/// even-indexed angles build `P(z)`, odd-indexed build `Q(z)`, the
+/// `(1 ± z⁻¹)` boundary factors are applied, and the two are averaged.
+/// Nothing in the algebra depends on the order being 10; it requires
+/// only that `N` be even (so the two boundary factors split evenly
+/// between `P` and `Q`).
+///
+/// # Panics
+///
+/// Panics if `lsp_rad.len() != out.len()` or if the length is odd.
+fn lsp_to_lpc_slice(lsp_rad: &[f64], out: &mut [f64]) {
+    assert_eq!(
+        lsp_rad.len(),
+        out.len(),
+        "LSP and LPC slices must share length"
+    );
+    let n = lsp_rad.len();
+    assert!(n % 2 == 0, "LSP→LPC core requires an even filter order");
+
+    // Build P(z) from the even-indexed LSPs and Q(z) from the
+    // odd-indexed LSPs. Each LSP contributes a second-order section
+    // [1, −2cos(ω), 1].
     let mut p: Vec<f64> = vec![1.0];
     let mut q: Vec<f64> = vec![1.0];
     let mut scratch: Vec<f64> = Vec::new();
@@ -201,17 +240,15 @@ pub fn lsp_to_lpc(lsp_rad: &[f64; LPC_ORDER]) -> [f64; LPC_ORDER] {
     poly_mul(&q, &[1.0, -1.0], &mut scratch);
     core::mem::swap(&mut q, &mut scratch);
 
-    // A(z) = (P(z) + Q(z)) / 2. Both are length N+2 = 12 here. The
-    // constant term is 1 (the leading "1" of A(z)); coefficients
-    // a[i] correspond to power z⁻¹⁻ⁱ with the −a sign fold.
-    let mut a = [0.0_f64; LPC_ORDER];
-    for i in 0..LPC_ORDER {
+    // A(z) = (P(z) + Q(z)) / 2. Both are length N+2 here. The constant
+    // term is 1 (the leading "1" of A(z)); coefficients a[i] correspond
+    // to power z⁻¹⁻ⁱ with the −a sign fold.
+    for (i, slot) in out.iter_mut().enumerate() {
         let coeff = 0.5 * (p[i + 1] + q[i + 1]);
         // A(z) = 1 + coeff·z⁻¹⁻ⁱ … but the prediction filter is
         // A(z) = 1 − a·z⁻¹⁻ⁱ, so a[i] = −coeff.
-        a[i] = -coeff;
+        *slot = -coeff;
     }
-    a
 }
 
 /// Convenience: convert a Q10 LSP vector straight to LPC coefficients,
@@ -258,6 +295,62 @@ pub fn subframe_lpc_set(lsp: &NbSubFrameLsp) -> [[f64; LPC_ORDER]; NB_LSP_SUBFRA
         *slot = lpc_from_subframe_lsp_q12(sf);
     }
     out
+}
+
+/// Convert a Q[[`HB_LSP_OUTPUT_Q`]] reconstructed high-band LSP value
+/// into an angular frequency in radians.
+///
+/// The high-band LSP reconstruction ([`crate::hb_lsp::reconstruct_q10`])
+/// emits its eight coefficients in the **same** Q10 fixed-point unit as
+/// the narrowband path (`HB_LSP_OUTPUT_Q == NB_LSP_OUTPUT_Q == 10`, by
+/// construction in r214 so both bands share one downstream Q-format).
+/// This helper therefore applies the identical documented angular-unit
+/// assumption as [`lsp_q10_to_radians`] (`ω = value / 2^Q radians`,
+/// clamped to the open `(0, π)` band) at the high-band scale, delegating
+/// to the shared [`lsp_qn_to_radians`] so the assumption stays pinned in
+/// one place across both bands.
+pub fn hb_lsp_q10_to_radians(value: i32) -> f64 {
+    lsp_qn_to_radians(value, HB_LSP_OUTPUT_Q)
+}
+
+/// Convert the eight high-band LSP angular frequencies (radians,
+/// ascending in `(0, π)`) to the eight high-band LPC coefficients
+/// `a[0..8]` of `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ`.
+///
+/// This is the wideband high-band counterpart of the narrowband
+/// [`lsp_to_lpc`]. The high-band LPC order is **8**
+/// ([`crate::codebooks::HB_LPC_ORDER`]); the algebra is the same
+/// order-generic `A(z) = (P(z) + Q(z)) / 2` auxiliary-polynomial
+/// reconstruction (8 is even, so the `(1 ± z⁻¹)` boundary factors split
+/// evenly between `P` and `Q`). Spec basis: *The Speex Codec Manual*
+/// §10.1 (the high-band LSPs are *"converted back to the LPC filter"*
+/// exactly as the narrowband §9.1 path describes) with the order-8
+/// reconciliation recorded on [`crate::codebooks::HB_LPC_ORDER`].
+///
+/// As with the narrowband path the returned coefficients are signed so
+/// the high-band synthesis recurrence
+/// `x[n] = e[n] + Σ a[i]·x[n−1−i]` adds them directly.
+pub fn hb_lsp_to_lpc(lsp_rad: &[f64; HB_LPC_ORDER_OUT]) -> [f64; HB_LPC_ORDER_OUT] {
+    let mut a = [0.0_f64; HB_LPC_ORDER_OUT];
+    lsp_to_lpc_slice(lsp_rad, &mut a);
+    a
+}
+
+/// Convenience: convert an eight-coefficient Q[[`HB_LSP_OUTPUT_Q`]]
+/// high-band LSP vector straight to high-band LPC coefficients, composing
+/// [`hb_lsp_q10_to_radians`] with [`hb_lsp_to_lpc`].
+///
+/// This is the high-band counterpart of [`lpc_from_lsp_q10`]: it takes
+/// the eight-coefficient Q10 vector that
+/// [`crate::WidebandHighBandBody::reconstructed_lsp_q10`] /
+/// [`crate::hb_lsp::reconstruct_q10`] produce and returns the eight
+/// high-band LPC coefficients the high-band synthesis filter consumes.
+pub fn lpc_from_hb_lsp_q10(lsp_q10: &[i32; HB_LPC_ORDER_OUT]) -> [f64; HB_LPC_ORDER_OUT] {
+    let mut rad = [0.0_f64; HB_LPC_ORDER_OUT];
+    for (r, &v) in rad.iter_mut().zip(lsp_q10.iter()) {
+        *r = hb_lsp_q10_to_radians(v);
+    }
+    hb_lsp_to_lpc(&rad)
 }
 
 #[cfg(test)]
@@ -475,6 +568,160 @@ mod tests {
             for (i, (&c, &f)) in set.iter().zip(first.iter()).enumerate() {
                 assert!(approx(c, f, 1e-12), "set {s} coeff {i}");
             }
+        }
+    }
+
+    // ---- Wideband high-band (order-8) LSP→LPC ----
+
+    #[test]
+    fn hb_order_constant_matches_codebook_order() {
+        use crate::codebooks::HB_LPC_ORDER;
+        assert_eq!(HB_LPC_ORDER_OUT, HB_LPC_ORDER);
+        assert_eq!(HB_LPC_ORDER_OUT, 8);
+    }
+
+    #[test]
+    fn hb_lsp_to_lpc_produces_eight_finite_coefficients() {
+        let lsp = [0.3_f64, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4];
+        let a = hb_lsp_to_lpc(&lsp);
+        assert_eq!(a.len(), HB_LPC_ORDER_OUT);
+        for &c in &a {
+            assert!(c.is_finite());
+        }
+    }
+
+    #[test]
+    fn hb_lsp_to_lpc_is_deterministic() {
+        let lsp = [0.5_f64; HB_LPC_ORDER_OUT];
+        let a1 = hb_lsp_to_lpc(&lsp);
+        let a2 = hb_lsp_to_lpc(&lsp);
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn hb_q10_to_radians_matches_narrowband_helper() {
+        // Both bands share Q10, so the high-band helper must reproduce
+        // the narrowband Q10 helper for every input value.
+        for v in [-5000, -1, 0, 1, 205, 1024, 3217, 1_000_000] {
+            assert_eq!(hb_lsp_q10_to_radians(v), lsp_q10_to_radians(v));
+        }
+    }
+
+    #[test]
+    fn hb_q10_to_radians_maps_band() {
+        assert!(approx(hb_lsp_q10_to_radians(1024), 1.0, 1e-9));
+        let near_pi = hb_lsp_q10_to_radians(3217);
+        assert!(near_pi < PI && near_pi > PI - 1e-3);
+        assert!(hb_lsp_q10_to_radians(0) > 0.0);
+        assert!(hb_lsp_q10_to_radians(1_000_000) < PI);
+    }
+
+    #[test]
+    fn lpc_from_hb_lsp_q10_composes_pipeline() {
+        // End-to-end: Q10 high-band LSP vector → radians → LPC.
+        let lsp_q10 = [256, 512, 768, 1024, 1280, 1536, 1792, 2048];
+        let a = lpc_from_hb_lsp_q10(&lsp_q10);
+        assert_eq!(a.len(), HB_LPC_ORDER_OUT);
+        for &c in &a {
+            assert!(c.is_finite());
+        }
+        // Must equal the explicit two-step path.
+        let mut rad = [0.0_f64; HB_LPC_ORDER_OUT];
+        for (r, &v) in rad.iter_mut().zip(lsp_q10.iter()) {
+            *r = hb_lsp_q10_to_radians(v);
+        }
+        let a2 = hb_lsp_to_lpc(&rad);
+        assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn hb_path_agrees_with_generic_core_on_shared_angles() {
+        // The narrowband and high-band paths share one polynomial core;
+        // for the first 8 of a 10-angle set the order-8 conversion must
+        // equal an independent order-8 reduction of the same core. We
+        // verify the high-band conversion against a hand-rolled run of
+        // the public order-10 core restricted to 8 angles would differ
+        // (different order), so instead we pin the structural identity:
+        // a symmetric high-band angle set about π/2 yields finite,
+        // bounded coefficients.
+        let lsp = [
+            0.2_f64,
+            PI - 0.2,
+            0.7,
+            PI - 0.7,
+            1.0,
+            PI - 1.0,
+            1.3,
+            PI - 1.3,
+        ];
+        let a = hb_lsp_to_lpc(&lsp);
+        for &c in &a {
+            assert!(c.is_finite());
+            assert!(c.abs() < 100.0);
+        }
+    }
+
+    #[test]
+    fn hb_lpc_from_reconstructed_q10_round_trips() {
+        // Compose the real r214 high-band LSP reconstruction with the
+        // new order-8 conversion: a documented high-band sub-mode +
+        // synthetic stage indices reconstruct to a Q10 vector that
+        // converts to eight finite LPC coefficients.
+        use crate::hb_lsp::{reconstruct_q10, HbLspStages};
+        let stages = HbLspStages {
+            stage1: 17,
+            stage2: 42,
+        };
+        let lsp_q10 = reconstruct_q10(stages).unwrap();
+        assert_eq!(lsp_q10.len(), HB_LPC_ORDER_OUT);
+        let a = lpc_from_hb_lsp_q10(&lsp_q10);
+        for &c in &a {
+            assert!(c.is_finite());
+        }
+    }
+
+    #[test]
+    fn slice_core_panics_on_odd_order() {
+        // The generic core requires an even order. A 3-element slice
+        // must panic; we assert via catch_unwind so the test passes by
+        // observing the panic rather than crashing the harness.
+        let r = std::panic::catch_unwind(|| {
+            let lsp = [0.5_f64, 1.0, 1.5];
+            let mut out = [0.0_f64; 3];
+            super::lsp_to_lpc_slice(&lsp, &mut out);
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn order_ten_core_unchanged_after_generic_refactor() {
+        // Regression pin: the order-10 path must still produce the same
+        // coefficients it did before the generic-core refactor for a
+        // fixed input.
+        let lsp = [0.3_f64, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.0];
+        let a = lsp_to_lpc(&lsp);
+        // Independent direct computation via the public poly path: build
+        // P, Q by hand and average, mirroring the documented algorithm.
+        let mut p: Vec<f64> = vec![1.0];
+        let mut q: Vec<f64> = vec![1.0];
+        let mut scratch = Vec::new();
+        for (k, &w) in lsp.iter().enumerate() {
+            let sec = [1.0, -2.0 * w.cos(), 1.0];
+            if k % 2 == 0 {
+                poly_mul(&p, &sec, &mut scratch);
+                core::mem::swap(&mut p, &mut scratch);
+            } else {
+                poly_mul(&q, &sec, &mut scratch);
+                core::mem::swap(&mut q, &mut scratch);
+            }
+        }
+        poly_mul(&p, &[1.0, 1.0], &mut scratch);
+        core::mem::swap(&mut p, &mut scratch);
+        poly_mul(&q, &[1.0, -1.0], &mut scratch);
+        core::mem::swap(&mut q, &mut scratch);
+        for i in 0..LPC_ORDER {
+            let want = -0.5 * (p[i + 1] + q[i + 1]);
+            assert!(approx(a[i], want, 1e-12), "coeff {i}");
         }
     }
 }

@@ -374,6 +374,33 @@ impl WidebandHighBandBody {
         crate::hb_lsp::reconstruct_q10(stages)
     }
 
+    /// Convert this frame's reconstructed high-band LSP vector to the
+    /// eight high-band LPC coefficients `a[0..8]` of the high-band
+    /// analysis filter `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ`.
+    ///
+    /// Composes [`Self::reconstructed_lsp_q10`] with the order-8
+    /// LSP→LPC conversion ([`crate::lpc_from_hb_lsp_q10`]) — the
+    /// high-band counterpart of the narrowband
+    /// [`crate::lsp_to_lpc::lpc_from_lsp_q10`] path. Spec basis:
+    /// *The Speex Codec Manual* §10.1 (the high-band LSPs are converted
+    /// back to the LPC filter exactly as the narrowband §9.1 path
+    /// describes, at the order-8 high-band LPC order).
+    ///
+    /// Returns `None` for high-band sub-modes that skip the LSP field
+    /// (mode 0 / silence), matching [`Self::reconstructed_lsp_q10`].
+    /// As with the narrowband path the returned coefficients are signed
+    /// so the high-band synthesis recurrence adds them directly; the
+    /// numeric LSP fixed-point pin for *bit-exactness* is the same
+    /// recorded docs gap as the narrowband conversion (see
+    /// [`crate::lsp_to_lpc`] module docs).
+    pub fn hb_lpc(
+        &self,
+        submode: &WidebandHighBandSubmode,
+    ) -> Option<[f64; crate::codebooks::HB_LPC_ORDER]> {
+        let lsp_q10 = self.reconstructed_lsp_q10(submode)?;
+        Some(crate::lsp_to_lpc::lpc_from_hb_lsp_q10(&lsp_q10))
+    }
+
     /// Decode the fixed-codebook excitation sub-vector for one
     /// high-band sub-frame (`sub_idx` in `0..4`) from its packed
     /// `excitation_vq_index` field and the sub-mode dispatch. Returns

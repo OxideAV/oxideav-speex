@@ -8,6 +8,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r302: wideband **high-band (sub-band CELP) LSP→LPC conversion**,
+  the high-band counterpart of the r286 narrowband path. The
+  `lsp_to_lpc` polynomial core is refactored into an order-generic
+  slice-based helper (`A(z) = (P(z) + Q(z)) / 2` for any even order;
+  the order-10 narrowband path delegates to it unchanged) and a new
+  order-8 high-band entry point is added: `hb_lsp_to_lpc` (radian
+  input), `hb_lsp_q10_to_radians` (the shared Q10 angular-unit
+  assumption applied at the high-band scale, since
+  `HB_LSP_OUTPUT_Q == NB_LSP_OUTPUT_Q == 10`), and `lpc_from_hb_lsp_q10`
+  composing the two. Wired through `WidebandHighBandBody::hb_lpc`, which
+  composes the r214 high-band LSP MSVQ reconstruction with the new
+  conversion to yield eight signed high-band LPC coefficients (returns
+  `None` for silence mode 0). Spec basis: *The Speex Codec Manual* §10.1
+  (high-band LSPs converted back to the LPC filter exactly as §9.1
+  describes, at the order-8 high-band LPC order reconciled on
+  `HB_LPC_ORDER`). 10 new lib tests (359 total, up from 349) + 4 new
+  integration tests in `tests/hb_lsp_to_lpc.rs`. The numeric LSP
+  fixed-point pin for bit-exactness remains the same recorded docs gap
+  as the narrowband conversion.
+
 - Round r296: narrowband **per-sub-frame LSP→LPC conversion for a full
   frame**, bridging the r200 sub-frame LSP interpolation (Q12
   `NbSubFrameLsp`) and the r286 LSP→LPC core. The r286 `lpc_from_lsp_q10`

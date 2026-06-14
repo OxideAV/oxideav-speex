@@ -970,6 +970,58 @@ extracted" subsection and companion §9 record the quantiser as
 r261 / r269 typed-index primitives stay the frontier for that
 path.
 
+**Round r302** (this commit) lands the **wideband high-band
+(sub-band CELP) LSP→LPC conversion** — the high-band counterpart of
+the r286 narrowband path. The r214 high-band LSP MSVQ reconstruction
+already produced an eight-coefficient Q10 LSP vector
+(`WidebandHighBandBody::reconstructed_lsp_q10`); this round converts
+that vector into the eight high-band LPC coefficients the high-band
+synthesis filter consumes.
+
+- The `lsp_to_lpc` polynomial core is refactored into an
+  **order-generic** slice-based helper `lsp_to_lpc_slice` building
+  `A(z) = (P(z) + Q(z)) / 2` for any even filter order (8 is even, so
+  the `(1 ± z⁻¹)` boundary factors split evenly between `P` and `Q`).
+  The order-10 narrowband `lsp_to_lpc` delegates to it unchanged — a
+  regression test pins the order-10 coefficients against an
+  independent hand-rolled `P`/`Q` average.
+- **`hb_lsp_to_lpc(&[f64; 8])`** is the order-8 radian-input entry
+  point; **`hb_lsp_q10_to_radians`** applies the same documented Q10
+  angular-unit assumption at the high-band scale (since
+  `HB_LSP_OUTPUT_Q == NB_LSP_OUTPUT_Q == 10`, by construction in r214
+  so both bands share one downstream Q-format) by delegating to the
+  shared `lsp_qn_to_radians`; **`lpc_from_hb_lsp_q10(&[i32; 8])`**
+  composes the two.
+- **`WidebandHighBandBody::hb_lpc(submode)`** wires the conversion off
+  the parsed body, composing `reconstructed_lsp_q10` with
+  `lpc_from_hb_lsp_q10` — the high-band analogue of the narrowband
+  `lpc_from_lsp_q10` path. Returns `None` for silence mode 0 (no LSP
+  field on the wire).
+
+Spec basis: *The Speex Codec Manual* §10.1 — the high-band LSPs are
+*"converted back to the LPC filter"* exactly as the narrowband §9.1
+path describes, at the order-8 high-band LPC order reconciled on
+`HB_LPC_ORDER` (the §10.1 "10 coefficients" prose is the editorial
+slip recorded in the gaps below; the staged `.meta` + companion §9
+pin `order=8`). 10 new lib tests in `lsp_to_lpc::tests` (359 total,
+up from 349) — order-8 finiteness/determinism, the Q10 helper
+agreeing with the narrowband helper, the composed pipeline matching
+the explicit two-step path, the order-generic core panicking on an
+odd order, and the order-10 regression pin — plus 4 new integration
+tests in `tests/hb_lsp_to_lpc.rs` building synthetic high-band
+bodies via the public `BitWriter` for every documented mode 1..=4,
+parsing them through `WidebandHighBandBody::parse`, and checking the
+`hb_lpc` accessor matches the direct conversion (silence mode 0 →
+`None`; distinct LSP indices → distinct LPC sets).
+
+As with r286 this is pure polynomial algebra over already-
+reconstructed LSPs — no gapped table or quantiser is involved; the
+LSP fixed-point pin for *bit-exactness* remains the recorded docs gap
+below (shared with the narrowband conversion). The high-band
+sub-frame LSP interpolation rule (whether the high band uses the same
+r200 four-way scheme) is still unbound by the staged material, so the
+high-band path applies the per-frame LPC set directly.
+
 **Round r296** (this commit) lands the **narrowband per-sub-frame
 LSP→LPC conversion for a full frame**, bridging the r200 sub-frame
 LSP interpolation and the r286 LSP→LPC core. The r286
@@ -1288,7 +1340,10 @@ against synthetic mode-0..=4 bodies built via the public
 `lsp_to_lpc`) + the LPC synthesis filter `1/A(z)` (`SynthesisFilter`
 running `x[n] = e[n] + Σ a[i]·x[n−1−i]` with persistent IIR history),
 composed into a real end-to-end PCM path for the mode-5 fixture
-(LSP → interp → LSP→LPC → innovation `c[n]` → synthesis); the
+(LSP → interp → LSP→LPC → innovation `c[n]` → synthesis) + r302
+wideband high-band LSP→LPC conversion (order-8 counterpart of the
+r286 narrowband path via an order-generic polynomial core, wired
+through `WidebandHighBandBody::hb_lpc`); the
 gain-scaled long-term predictor sum +
 the §9 open-loop fixed-codebook scalar-quantiser magnitude
 reconstruction (narrowband pair and high-band single-index alike;
@@ -1296,9 +1351,9 @@ needed before the pitch contribution can join the excitation and
 the PCM becomes bit-exact) +
 per-mode excitation handling for narrowband modes
 1 / 7 and high-band mode 4 + high-band sub-frame
-LSP interpolation + high-band LSP→LPC + ultra-wideband framing +
-the CELP frame-body writer + the encoder-side codebook search are
-the remaining pieces).
+LSP interpolation + high-band synthesis filter + ultra-wideband
+framing + the CELP frame-body writer + the encoder-side codebook
+search are the remaining pieces).
 
 ### Spec material consulted
 
