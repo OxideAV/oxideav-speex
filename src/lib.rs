@@ -364,6 +364,33 @@
 //!   stays pinned in the single shared [`lsp_qn_to_radians`] helper, so
 //!   the recorded LSP Q-format docs gap still has one fix-site.
 //!
+//! * **Round r316** (this commit) — **log-domain scalar gain
+//!   reconstruction grid**, wiring the previously index-only
+//!   excitation-gain fields (r261 narrowband frame-level OL excitation
+//!   gain + r269 high-band per-sub-frame excitation gain) into
+//!   reconstructed scalar magnitudes. Spec basis: the staged
+//!   `docs/audio/speex/gain-quantiser-and-lsp-lpc-trace.md` §2 / §4
+//!   reconstruction grid `g(index) = 10^((index − offset) / slope)`
+//!   shared between the narrowband frame-level OL excitation gain (§2,
+//!   5 bits) and the high-band excitation gain (§4, *"coded in the
+//!   same way as for narrowband"* — 5 bits in HB mode 1, 4 bits in HB
+//!   modes 2..=4). The new [`gain_reconstruction`] module exposes the
+//!   parametric [`GainGrid`] (`reconstruct` / `table` / `db_per_step` /
+//!   `dynamic_range_db`), the three documented grids
+//!   [`NB_OL_EXC_GAIN_GRID`] / [`HB_EXC_GAIN_GRID_5BIT`] /
+//!   [`HB_EXC_GAIN_GRID_4BIT`], and the dispatch helpers
+//!   [`reconstruct_frame_ol_exc_gain`] / [`reconstruct_hb_exc_gain`]
+//!   (the silence / absent index variants reconstruct to `0.0`). The
+//!   grid **shape** (monotone log-domain, uniform dB-per-step, the
+//!   doc's ~80 dB / ~64 dB decade scale) is pinned and tested; the
+//!   codec author's **exact** `(slope, offset)` constants are the
+//!   recorded behavioural-trace gap (doc §2 "Behavioural-trace
+//!   methodology" — no calibration CSV staged), so the values are not
+//!   yet reference-bit-exact and the parameters in [`GainGrid`] stay
+//!   the single fix-site for the eventual calibration pin. The §3 NB
+//!   sub-frame innovation-gain **correction** multiplier stays at the
+//!   index layer (its `c[]` table is likewise unstaged).
+//!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
 //! r191 codebook accessors + r194 narrowband LSP reconstruction +
@@ -391,6 +418,7 @@ mod codebooks;
 mod excitation;
 mod fixed_codebook_gain;
 mod frame;
+mod gain_reconstruction;
 mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
@@ -431,6 +459,10 @@ pub use fixed_codebook_gain::{
     SubFrameInnovationGainCorrection, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+pub use gain_reconstruction::{
+    reconstruct_frame_ol_exc_gain, reconstruct_hb_exc_gain, GainGrid, HB_EXC_GAIN_GRID_4BIT,
+    HB_EXC_GAIN_GRID_5BIT, NB_OL_EXC_GAIN_GRID,
+};
 pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
     HB_EXC_GAIN_BITS_MODE_1,

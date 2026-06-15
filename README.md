@@ -32,8 +32,11 @@ return `Error::NotImplemented`. What is implemented and tested:
 * **Reconstruction primitives** — narrowband and high-band LSP
   reconstruction and sub-frame interpolation, LSP→LPC conversion, the
   LPC synthesis filter, innovation sub-vector lookup, 3-tap pitch-gain
-  reconstruction, and the adaptive-codebook (long-term predictor)
-  contribution sum with its excitation history buffer.
+  reconstruction, the adaptive-codebook (long-term predictor)
+  contribution sum with its excitation history buffer, and the
+  log-domain scalar **excitation-gain reconstruction grid**
+  (`g = 10^((index − offset) / slope)`) for the narrowband frame-level
+  OL excitation gain and the high-band 5-bit / 4-bit excitation gain.
 
 The end-to-end synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
@@ -41,9 +44,12 @@ stable, input-responsive PCM from a real stream.
 
 ## Not yet supported
 
-* Bit-exact full decode. The fixed-codebook and pitch gain Q-format
-  scaling and the LSP angular-unit / fixed-point domain are not yet
-  pinned by the staged material, and the gain-scaled pitch
+* Bit-exact full decode. The excitation-gain reconstruction grid shape
+  is wired (monotone log-domain, the staged trace's ~80 dB / ~64 dB
+  decade scale), but the codec author's *exact* `slope` / `offset`
+  constants remain a recorded behavioural-trace gap, the pitch gain
+  Q-format scaling and the LSP angular-unit / fixed-point domain are
+  not yet pinned by the staged material, and the gain-scaled pitch
   contribution is not yet folded into the excitation, so the output is
   not yet reference-equivalent. The framework `Decoder` endpoints
   return `Error::NotImplemented` until that closes.

@@ -8,6 +8,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r316: **log-domain scalar gain reconstruction grid** wiring the
+  previously index-only excitation-gain fields into reconstructed scalar
+  magnitudes. New `gain_reconstruction` module exposes the parametric
+  `GainGrid` (`reconstruct` / `table` / `db_per_step` /
+  `dynamic_range_db`), the three documented grids `NB_OL_EXC_GAIN_GRID`
+  / `HB_EXC_GAIN_GRID_5BIT` / `HB_EXC_GAIN_GRID_4BIT`, and the dispatch
+  helpers `reconstruct_frame_ol_exc_gain` / `reconstruct_hb_exc_gain`
+  (silence / absent index variants reconstruct to `0.0`). Spec basis:
+  the staged `docs/audio/speex/gain-quantiser-and-lsp-lpc-trace.md`
+  §2 / §4 reconstruction grid `g(index) = 10^((index − offset) / slope)`
+  shared between the narrowband frame-level OL excitation gain (5 bits)
+  and the high-band excitation gain (5 bits HB mode 1, 4 bits HB modes
+  2..=4, *"coded in the same way as for narrowband"*). The grid shape
+  (monotone log-domain, uniform dB-per-step, ~80 dB / ~64 dB decade
+  scale) is pinned and tested; the codec author's exact `(slope, offset)`
+  constants are the recorded behavioural-trace gap, so the values are
+  not yet reference-bit-exact and `GainGrid`'s parameters stay the
+  single fix-site for the eventual calibration pin. 11 new tests
+  (407 total, up from 396).
+
 - Round r302: wideband **high-band (sub-band CELP) LSP→LPC conversion**,
   the high-band counterpart of the r286 narrowband path. The
   `lsp_to_lpc` polynomial core is refactored into an order-generic
