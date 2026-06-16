@@ -34,9 +34,13 @@ return `Error::NotImplemented`. What is implemented and tested:
   LPC synthesis filter, innovation sub-vector lookup, 3-tap pitch-gain
   reconstruction, the adaptive-codebook (long-term predictor)
   contribution sum with its excitation history buffer, and the
-  log-domain scalar **excitation-gain reconstruction grid**
-  (`g = 10^((index − offset) / slope)`) for the narrowband frame-level
-  OL excitation gain and the high-band 5-bit / 4-bit excitation gain.
+  **exact scalar gain reconstruction tables** for the narrowband
+  frame-level OL excitation gain (32-level `ol_gain_table`, float law
+  `exp(qe/3.5)`), the narrowband per-sub-frame innovation-gain
+  correction (8-/2-level `g_subf`, composing the fixed-codebook gain
+  `g_frame · g_subf`), and the high-band excitation gain (32-level
+  5-bit folded gain + 16-level 4-bit gain-correction with its
+  `0.87360` reconstruction multiplier).
 
 The end-to-end synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
@@ -44,15 +48,15 @@ stable, input-responsive PCM from a real stream.
 
 ## Not yet supported
 
-* Bit-exact full decode. The excitation-gain reconstruction grid shape
-  is wired (monotone log-domain, the staged trace's ~80 dB / ~64 dB
-  decade scale), but the codec author's *exact* `slope` / `offset`
-  constants remain a recorded behavioural-trace gap, the pitch gain
-  Q-format scaling and the LSP angular-unit / fixed-point domain are
-  not yet pinned by the staged material, and the gain-scaled pitch
-  contribution is not yet folded into the excitation, so the output is
-  not yet reference-equivalent. The framework `Decoder` endpoints
-  return `Error::NotImplemented` until that closes.
+* Bit-exact full decode. The scalar excitation-gain quantiser levels
+  are now exact (staged `ol_gain_table` / `exc_gain_quant_scal{1,3}` /
+  `gc_quant_bound` / `fold_quant_bound`), but the reconstructed gain is
+  not yet folded into the excitation (the gain × innovation scaling and
+  the gain-scaled pitch contribution remain a downstream synthesis
+  layer), and the pitch-gain Q-format scaling and the LSP angular-unit /
+  fixed-point domain are not yet pinned by the staged material, so the
+  output is not yet reference-equivalent. The framework `Decoder`
+  endpoints return `Error::NotImplemented` until that closes.
 * Encoder.
 * Ultra-wideband framing (no dedicated chapter in the staged manual).
 * Per-mode innovation handling for narrowband modes 1 and 7 and

@@ -65,6 +65,22 @@ references.
 - `hb-innovation-cdbk-sv8-128.csv` — 128 × 8 (7-bit with sign)
 - `hb-innovation-cdbk-sv10-32.csv` — 32 × 10 (5-bit)
 
+### Scalar excitation-gain quantiser tables
+
+Wired through `src/gain_reconstruction.rs`. The full extraction
+manifest is `docs/audio/speex/provenance/02-speex-gain-quant.md`.
+
+- `nb-ol-gain-table-q15.csv` — 32 levels (5-bit NB OL excitation gain;
+  float magnitude = `28406 · level / 2^15 / 16384` ≈ `exp(qe/3.5)`)
+- `nb-exc-gain-scal3-float.csv` — 8 levels (3-bit NB sub-frame gain
+  correction); `nb-exc-gain-scal3-bound-float.csv` — 7 boundaries
+- `nb-exc-gain-scal1-float.csv` — 2 levels (1-bit NB sub-frame gain
+  correction); `nb-exc-gain-scal1-bound-float.csv` — 1 boundary
+- `hb-gc-quant-bound-float.csv` — 16 boundaries (4-bit HB gain
+  correction; level = `0.87360 · bound`)
+- `hb-fold-quant-bound-float.csv` — 32 boundaries/levels (5-bit HB
+  folded gain)
+
 ### LPC / lag / QMF fixtures (Q15 + float variants)
 
 - `lpc-analysis-window-{q15,float}.csv` — 200 samples (asymmetric)

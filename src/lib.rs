@@ -364,32 +364,31 @@
 //!   stays pinned in the single shared [`lsp_qn_to_radians`] helper, so
 //!   the recorded LSP Q-format docs gap still has one fix-site.
 //!
-//! * **Round r316** (this commit) — **log-domain scalar gain
-//!   reconstruction grid**, wiring the previously index-only
-//!   excitation-gain fields (r261 narrowband frame-level OL excitation
+//! * **Round r321** (this commit) — **exact scalar gain reconstruction
+//!   tables**, wiring the previously index-only excitation-gain fields
+//!   (r261 narrowband frame-level OL excitation
 //!   gain + r269 high-band per-sub-frame excitation gain) into
-//!   reconstructed scalar magnitudes. Spec basis: the staged
-//!   `docs/audio/speex/gain-quantiser-and-lsp-lpc-trace.md` §2 / §4
-//!   reconstruction grid `g(index) = 10^((index − offset) / slope)`
-//!   shared between the narrowband frame-level OL excitation gain (§2,
-//!   5 bits) and the high-band excitation gain (§4, *"coded in the
-//!   same way as for narrowband"* — 5 bits in HB mode 1, 4 bits in HB
-//!   modes 2..=4). The new [`gain_reconstruction`] module exposes the
-//!   parametric [`GainGrid`] (`reconstruct` / `table` / `db_per_step` /
-//!   `dynamic_range_db`), the three documented grids
-//!   [`NB_OL_EXC_GAIN_GRID`] / [`HB_EXC_GAIN_GRID_5BIT`] /
-//!   [`HB_EXC_GAIN_GRID_4BIT`], and the dispatch helpers
-//!   [`reconstruct_frame_ol_exc_gain`] / [`reconstruct_hb_exc_gain`]
-//!   (the silence / absent index variants reconstruct to `0.0`). The
-//!   grid **shape** (monotone log-domain, uniform dB-per-step, the
-//!   doc's ~80 dB / ~64 dB decade scale) is pinned and tested; the
-//!   codec author's **exact** `(slope, offset)` constants are the
-//!   recorded behavioural-trace gap (doc §2 "Behavioural-trace
-//!   methodology" — no calibration CSV staged), so the values are not
-//!   yet reference-bit-exact and the parameters in [`GainGrid`] stay
-//!   the single fix-site for the eventual calibration pin. The §3 NB
-//!   sub-frame innovation-gain **correction** multiplier stays at the
-//!   index layer (its `c[]` table is likewise unstaged).
+//!   reconstructed scalar magnitudes. Spec basis: the **exact**
+//!   reconstruction tables staged under `docs/audio/speex/tables/`
+//!   (`provenance/02-speex-gain-quant.md`) — `ol_gain_table` (32-level
+//!   5-bit NB OL excitation gain, float law `exp(qe/3.5)`),
+//!   `exc_gain_quant_scal3` / `_scal1` (8-/2-level NB per-sub-frame
+//!   innovation-gain correction `g_subf`), `gc_quant_bound` (16-level
+//!   4-bit HB gain-correction, reconstruction `0.87360·bound`), and
+//!   `fold_quant_bound` (32-level 5-bit HB folded gain). The
+//!   [`gain_reconstruction`] module embeds these vendored tables and
+//!   exposes the raw level accessors plus the dispatch helpers
+//!   [`reconstruct_frame_ol_exc_gain`] (silence → `0.0`),
+//!   [`reconstruct_subframe_gain_correction`] (absent → identity
+//!   `1.0`), [`reconstruct_fixed_codebook_gain`] (the composed
+//!   `g_frame · g_subf` fixed-codebook gain), and
+//!   [`reconstruct_hb_exc_gain`] (absent → `0.0`). This **replaces** the
+//!   earlier parametric `10^((index − offset)/slope)` placeholder grid:
+//!   the gain magnitudes are now exact reconstruction-level lookups, so
+//!   the codec author's quantiser points are pinned (no remaining
+//!   behavioural-trace gap for these tables). Excitation scaling
+//!   (multiplying the §8.4 innovation by the gain) remains a downstream
+//!   synthesis layer.
 //!
 //! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
 //! against `oxideav-core` still return [`Error::NotImplemented`]; the
@@ -460,8 +459,12 @@ pub use fixed_codebook_gain::{
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use gain_reconstruction::{
-    reconstruct_frame_ol_exc_gain, reconstruct_hb_exc_gain, GainGrid, HB_EXC_GAIN_GRID_4BIT,
-    HB_EXC_GAIN_GRID_5BIT, NB_OL_EXC_GAIN_GRID,
+    hb_folded_gain_levels, hb_gain_correction_levels, nb_ol_exc_gain_levels,
+    nb_subframe_gain_bound_1bit, nb_subframe_gain_bounds_3bit, nb_subframe_gain_levels_1bit,
+    nb_subframe_gain_levels_3bit, reconstruct_fixed_codebook_gain, reconstruct_frame_ol_exc_gain,
+    reconstruct_hb_exc_gain, reconstruct_subframe_gain_correction, HB_FOLDED_GAIN_LEVELS,
+    HB_GAIN_CORRECTION_LEVELS, NB_OL_EXC_GAIN_LEVELS, NB_SUBFRAME_GAIN_LEVELS_1BIT,
+    NB_SUBFRAME_GAIN_LEVELS_3BIT,
 };
 pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,

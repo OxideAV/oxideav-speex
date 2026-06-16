@@ -1,236 +1,342 @@
-//! **Log-domain scalar gain reconstruction grid** (r316 scope) — turns
-//! the index-only gain fields surfaced by [`crate::fixed_codebook_gain`]
-//! (narrowband frame-level OL excitation gain) and
+//! **Scalar gain reconstruction from the staged exact quantiser tables**
+//! (r321 scope) — turns the index-only gain fields surfaced by
+//! [`crate::fixed_codebook_gain`] (narrowband frame-level OL excitation
+//! gain + per-sub-frame innovation-gain correction) and
 //! [`crate::hb_excitation_gain`] (high-band per-sub-frame excitation
-//! gain) into reconstructed scalar magnitudes via the documented
-//! log-domain reconstruction grid.
+//! gain) into reconstructed scalar magnitudes via the **exact**
+//! reconstruction lookup tables staged for the codec.
 //!
 //! ## Spec basis
 //!
-//! The gain-quantiser trace doc staged at
-//! `docs/audio/speex/gain-quantiser-and-lsp-lpc-trace.md` §2 / §4 pins
-//! the **reconstruction grid shape** for the excitation-gain scalar
-//! quantisers as a monotone log-domain map from a code index to a gain
-//! magnitude:
+//! Earlier rounds modelled these quantisers with a *parametric*
+//! log-domain grid `g = 10^((index − offset)/slope)` because the codec
+//! author's exact reconstruction points were not yet available — only
+//! the bit widths (manual Table 9.1 / Table 10.1) and the log-domain
+//! shape were pinned. The clean-room extraction staged at
+//! `docs/audio/speex/tables/` (`provenance/02-speex-gain-quant.md`) now
+//! pins the **exact reconstruction levels and decision boundaries** for
+//! every scalar gain quantiser, so this module reconstructs from those
+//! tables directly. The parametric grid is retired.
+//!
+//! The staged tables and their documented reconstruction laws are:
+//!
+//! ### Narrowband open-loop frame excitation gain (5-bit)
+//!
+//! `tables/nb-ol-gain-table-q15.csv` — 32 levels addressed by the
+//! 5-bit `OL Exc gain` index `qe`. The fixed-point decoder reconstructs
+//! `ol_gain = MULT16_32_Q15(28406, ol_gain_table[qe])`; the float
+//! decoder uses the equivalent closed form `ol_gain = exp(qe / 3.5) ·
+//! SIG_SCALING`. The two agree: applying the Q15 reconstruction
+//! multiplier `28406` to the staged level and dividing by `SIG_SCALING`
+//! (`= 16384`, the fixed-point signal-domain unit) recovers the float
+//! magnitude `exp(qe/3.5)` to within one Q15 quantisation step. This
+//! module exposes that normalised float magnitude, which is the
+//! decoder-domain gain a synthesis stage multiplies the innovation by:
 //!
 //! ```text
-//! g(index) = 10 ^ ( (index − offset) / slope )
+//! g(qe) = (28406 · ol_gain_table[qe] / 2^15) / SIG_SCALING
+//!       ≈ exp(qe / 3.5)
 //! ```
 //!
-//! where `slope` is the number of codes per decade of gain
-//! (equivalently the dB-per-step is `20 / slope`) and `offset` biases
-//! the code-0 reference level. This is the inverse of the encode-side
-//! quantiser the doc records as
-//! `index = clip(round(log10(rms) · slope + offset), 0, 2^bits − 1)`.
+//! ### Narrowband per-sub-frame innovation-gain correction (1-/3-bit)
 //!
-//! The grid is shared across the narrowband frame-level OL excitation
-//! gain (§2, 5 bits, present in every NB mode except mode 0) and the
-//! high-band excitation gain (§4, 5 bits in HB mode 1 and 4 bits in HB
-//! modes 2..=4) — the doc §4 records the high-band gain is *"coded in
-//! the same way as for narrowband"*, i.e. the same log-domain grid
-//! applied to a fresh high-band residual.
+//! The fixed-codebook gain is `g_frame · g_subf` (companion §2.3). The
+//! sub-frame correction `g_subf` is a scalar quantiser:
 //!
-//! ## What the doc pins vs. what stays a recorded gap
+//! * 3-bit (modes 5/6/7): `tables/nb-exc-gain-scal3-float.csv` — 8
+//!   reconstruction levels, with `tables/nb-exc-gain-scal3-bound-float.csv`
+//!   the 7 encode-side decision boundaries.
+//! * 1-bit (modes 1/3/4): `tables/nb-exc-gain-scal1-float.csv` — 2
+//!   reconstruction levels, with `tables/nb-exc-gain-scal1-bound-float.csv`
+//!   the single decision boundary.
 //!
-//! The doc pins the **grid structure** (the log-domain map above, that
-//! the map is strictly monotone increasing in the index, and the
-//! order-of-magnitude of the parameters: §2 records `slope ≈ 7.75`
-//! codes/decade for the 5-bit field over ~80 dB of dynamic range, and
-//! §4 records ~80 dB for the 5-bit HB field and ~64 dB for the 4-bit HB
-//! field). It explicitly records that the codec author's **exact**
-//! `slope` / `offset` constants are **not published** in the staged
-//! manual / RFC and must be recovered by a behavioural-trace
-//! calibration of the reference binary (doc §2 "Behavioural-trace
-//! methodology"). No such calibration CSV is staged yet.
+//! The decoder forms the final innovation energy as
+//! `ener = MULT16_32_Q14(scal[q], ol_gain)`, i.e. the reconstructed
+//! correction level multiplies the frame-level gain.
 //!
-//! This module therefore implements the documented grid as a
-//! **parametric** quantiser carrying the doc's structural parameters,
-//! mirroring the crate-wide "Q-format-agnostic primitive" pattern
-//! (r234 / r241 / r244 / r261 / r269): the grid shape and its
-//! structural invariants land now and are tested; the eventual exact
-//! `(slope, offset)` pin from the staged calibration commutes through
-//! by replacing the parameter set in [`GainGrid`] with no change to the
-//! reconstruction algebra or its consumers. The reconstructed values
-//! are not yet reference-bit-exact and the public `Decoder` endpoints
-//! stay [`crate::Error::NotImplemented`] until the calibration closes.
+//! ### High-band excitation gain
+//!
+//! * 4-bit gain-correction (Table 10.1 `Excitation gain`, HB modes
+//!   2..=4): `tables/hb-gc-quant-bound-float.csv` — 16 decision
+//!   boundaries; reconstruction level `gc = 0.87360 · gc_bound[qgc]`.
+//! * 5-bit folded gain (HB mode 1):
+//!   `tables/hb-fold-quant-bound-float.csv` — 32 boundaries that double
+//!   as the reconstruction levels.
 //!
 //! ## What this module DOES
 //!
-//! * [`GainGrid`] — a parametric log-domain reconstruction grid
-//!   `(slope, offset, bits)` with [`GainGrid::reconstruct`] evaluating
-//!   the documented §2 map for one index and [`GainGrid::table`]
-//!   materialising the full `0..2^bits` reconstruction sweep.
-//! * [`NB_OL_EXC_GAIN_GRID`] — the narrowband frame-level OL
-//!   excitation-gain grid (5-bit, §2 parameters).
-//! * [`HB_EXC_GAIN_GRID_5BIT`] / [`HB_EXC_GAIN_GRID_4BIT`] — the
-//!   high-band excitation-gain grids (§4 parameters).
-//! * [`reconstruct_frame_ol_exc_gain`] — reconstruct the NB frame-level
-//!   gain magnitude from a [`crate::FrameInnovationGainIndex`] (the
-//!   silence variant reconstructs to `0.0`).
-//! * [`reconstruct_hb_exc_gain`] — reconstruct the HB per-sub-frame gain
-//!   magnitude from a [`crate::HbExcitationGainIndex`] (the absent
-//!   variant reconstructs to `0.0`), dispatching on the 5-bit / 4-bit
-//!   surface form to the matching grid.
+//! * [`reconstruct_frame_ol_exc_gain`] — exact NB frame-level gain from
+//!   a [`crate::FrameInnovationGainIndex`] (silence → `0.0`).
+//! * [`reconstruct_subframe_gain_correction`] — exact NB per-sub-frame
+//!   innovation-gain correction multiplier from a
+//!   [`crate::SubFrameInnovationGainCorrection`] (absent → `1.0`, the
+//!   identity multiplier).
+//! * [`reconstruct_fixed_codebook_gain`] — the composed
+//!   `g_frame · g_subf` fixed-codebook gain from a
+//!   [`crate::FixedCodebookGainIndices`].
+//! * [`reconstruct_hb_exc_gain`] — exact HB per-sub-frame gain from a
+//!   [`crate::HbExcitationGainIndex`] (absent → `0.0`), dispatching the
+//!   5-bit folded / 4-bit gain-correction surface to the matching table.
+//! * Raw-table accessors ([`nb_ol_exc_gain_levels`],
+//!   [`nb_subframe_gain_levels_3bit`], [`nb_subframe_gain_levels_1bit`],
+//!   [`hb_gain_correction_levels`], [`hb_folded_gain_levels`]) for
+//!   callers that want the full reconstruction sweep.
 //!
 //! ## What this module DOES NOT do
 //!
-//! * No reference-bit-exact magnitudes — the exact `(slope, offset)`
-//!   pin is the recorded behavioural-trace gap above.
-//! * No sub-frame innovation-gain **correction** reconstruction. The
-//!   doc §3 records the NB per-sub-frame 1-bit / 3-bit correction
-//!   `g_innov = g_frame · c[idx]` as a *separate* small look-up table
-//!   that is likewise behavioural-trace-blocked (no `c[]` values are
-//!   staged); the correction multiplier therefore stays at the index
-//!   layer in [`crate::SubFrameInnovationGainCorrection`].
 //! * No excitation scaling. Multiplying the §8.4 excitation `c[n]` by
-//!   the reconstructed gain is a downstream layer that consumes both
-//!   this primitive and the eventual exact pin.
-//! * No encoder-side index selection.
+//!   the reconstructed gain is a downstream synthesis layer that
+//!   consumes these primitives.
+//! * No encoder-side index selection (the decision boundaries are
+//!   exposed for completeness / round-trip tests, not an encoder).
 
-use crate::fixed_codebook_gain::FrameInnovationGainIndex;
+use crate::fixed_codebook_gain::{
+    FixedCodebookGainIndices, FrameInnovationGainIndex, SubFrameInnovationGainCorrection,
+};
 use crate::hb_excitation_gain::HbExcitationGainIndex;
+use std::sync::OnceLock;
 
-/// A parametric log-domain scalar gain reconstruction grid.
-///
-/// Evaluates the documented §2 reconstruction map
-/// `g(index) = 10^((index − offset) / slope)` for an `bits`-wide code
-/// index. The grid is strictly monotone increasing in the index for any
-/// positive `slope`, matching the doc's "spans the codec's full dynamic
-/// range" requirement.
-///
-/// The `slope` / `offset` fields carry the doc's structural parameters;
-/// the eventual exact-constant pin from the staged behavioural-trace
-/// calibration replaces them with no change to [`Self::reconstruct`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GainGrid {
-    /// Codes per decade of gain (doc §2: the encode-side log10-slope).
-    /// The dB-per-step of the grid is `20.0 / slope`. Must be positive
-    /// for a monotone-increasing grid.
-    pub slope: f32,
-    /// Code-0 reference bias (doc §2 `OFFSET`): the index value that
-    /// maps to unit gain (`g = 1.0`).
-    pub offset: f32,
-    /// Code width in bits (the Table 9.1 / Table 10.1 field width). The
-    /// grid addresses indices `0..2^bits`.
-    pub bits: u8,
+// ---------------------------------------------------------------------------
+// Embedded exact reconstruction tables (vendored from
+// docs/audio/speex/tables/, byte-identical).
+// ---------------------------------------------------------------------------
+
+/// `ol_gain_table` (32 entries, Q15 / SIG_SCALING domain). The float
+/// reconstruction magnitude is the level divided by `SIG_SCALING`.
+const NB_OL_GAIN_Q15_CSV: &str = include_str!("../tables/nb-ol-gain-table-q15.csv");
+/// `exc_gain_quant_scal3` (8 float reconstruction levels).
+const NB_SCAL3_CSV: &str = include_str!("../tables/nb-exc-gain-scal3-float.csv");
+/// `exc_gain_quant_scal3_bound` (7 float decision boundaries).
+const NB_SCAL3_BOUND_CSV: &str = include_str!("../tables/nb-exc-gain-scal3-bound-float.csv");
+/// `exc_gain_quant_scal1` (2 float reconstruction levels).
+const NB_SCAL1_CSV: &str = include_str!("../tables/nb-exc-gain-scal1-float.csv");
+/// `exc_gain_quant_scal1_bound` (1 float decision boundary).
+const NB_SCAL1_BOUND_CSV: &str = include_str!("../tables/nb-exc-gain-scal1-bound-float.csv");
+/// `gc_quant_bound` (16 float decision boundaries).
+const HB_GC_BOUND_CSV: &str = include_str!("../tables/hb-gc-quant-bound-float.csv");
+/// `fold_quant_bound` (32 float decision boundaries / levels).
+const HB_FOLD_BOUND_CSV: &str = include_str!("../tables/hb-fold-quant-bound-float.csv");
+
+/// `SIG_SCALING` in the fixed-point build (the signal-domain unit). The
+/// reconstructed `ol_gain` is divided by this to recover the normalised
+/// float gain (`exp(qe/3.5)`). Documented in
+/// `provenance/02-speex-gain-quant.md`.
+const SIG_SCALING: f32 = 16384.0;
+
+/// `ol_gain` reconstruction multiplier: the fixed-point decoder forms
+/// `ol_gain = MULT16_32_Q15(28406, ol_gain_table[qe])`, i.e.
+/// `28406 · table / 2^15`. Documented in
+/// `provenance/02-speex-gain-quant.md`.
+const OL_GAIN_RECON_MULT: f32 = 28406.0;
+/// Q15 scaling shift used by `MULT16_32_Q15` (`/ 2^15`).
+const Q15: f32 = 32768.0;
+
+/// High-band gain-correction reconstruction multiplier
+/// (`QCONST16(0.87360, 15)` — `gc = 0.87360 · gc_bound[qgc]`).
+/// Documented in `provenance/02-speex-gain-quant.md`.
+const HB_GC_RECONSTRUCTION_MULT: f32 = 0.873_60;
+
+/// Number of narrowband OL excitation-gain levels (5-bit field).
+pub const NB_OL_EXC_GAIN_LEVELS: usize = 32;
+/// Number of 3-bit sub-frame innovation-gain correction levels.
+pub const NB_SUBFRAME_GAIN_LEVELS_3BIT: usize = 8;
+/// Number of 1-bit sub-frame innovation-gain correction levels.
+pub const NB_SUBFRAME_GAIN_LEVELS_1BIT: usize = 2;
+/// Number of high-band 4-bit gain-correction levels.
+pub const HB_GAIN_CORRECTION_LEVELS: usize = 16;
+/// Number of high-band 5-bit folded-gain levels.
+pub const HB_FOLDED_GAIN_LEVELS: usize = 32;
+
+fn parse_floats(body: &str, expected: usize) -> Vec<f32> {
+    let v: Vec<f32> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.trim()
+                .parse::<f32>()
+                .expect("speex gain CSV: token must be a decimal float")
+        })
+        .collect();
+    assert_eq!(
+        v.len(),
+        expected,
+        "speex gain CSV row count mismatch: got {}, expected {}",
+        v.len(),
+        expected
+    );
+    v
 }
 
-impl GainGrid {
-    /// Number of distinct indices the grid addresses (`2^bits`).
-    pub const fn entries(&self) -> u32 {
-        1u32 << self.bits
-    }
-
-    /// Largest in-range index (`2^bits − 1`).
-    pub const fn max_index(&self) -> u32 {
-        self.entries() - 1
-    }
-
-    /// Reconstruct the gain magnitude for one code `index` per the
-    /// documented §2 grid `g = 10^((index − offset) / slope)`.
-    ///
-    /// The index is taken modulo nothing — callers pass the raw field
-    /// value, which the bit-reader already constrains to `0..2^bits` by
-    /// construction. For `index == offset` the result is exactly `1.0`
-    /// (unit gain); below it the gain attenuates, above it the gain
-    /// amplifies, monotonically.
-    pub fn reconstruct(&self, index: u32) -> f32 {
-        let exponent = (index as f32 - self.offset) / self.slope;
-        10.0_f32.powf(exponent)
-    }
-
-    /// The grid's dB-per-step (`20 / slope`): the gain change in
-    /// decibels between two adjacent indices.
-    pub fn db_per_step(&self) -> f32 {
-        20.0 / self.slope
-    }
-
-    /// Total dynamic range in dB the grid spans across its full index
-    /// sweep (`(2^bits − 1) · db_per_step`).
-    pub fn dynamic_range_db(&self) -> f32 {
-        self.max_index() as f32 * self.db_per_step()
-    }
-
-    /// Materialise the full `0..2^bits` reconstruction sweep as a
-    /// `Vec<f32>`, one magnitude per index. Useful for callers that
-    /// want the precomputed table rather than per-index evaluation.
-    pub fn table(&self) -> Vec<f32> {
-        (0..self.entries()).map(|i| self.reconstruct(i)).collect()
-    }
+fn parse_i64(body: &str, expected: usize) -> Vec<i64> {
+    let v: Vec<i64> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.trim()
+                .parse::<i64>()
+                .expect("speex gain CSV: token must be a decimal integer")
+        })
+        .collect();
+    assert_eq!(
+        v.len(),
+        expected,
+        "speex gain CSV row count mismatch: got {}, expected {}",
+        v.len(),
+        expected
+    );
+    v
 }
 
-/// Narrowband frame-level OL excitation-gain grid (Table 9.1 "OL Exc
-/// gain" row, 5 bits, present in NB modes 1..=8).
-///
-/// Parameters per the gain-quantiser trace doc §2: `slope ≈ 7.75`
-/// codes/decade (the doc's worked figure for a 5-bit field spanning
-/// ~80 dB of dynamic range), `offset` at the mid-range bias the doc
-/// records in the `0..4` band — `2.0` is chosen as the centre of that
-/// recorded band so the unit-gain reference sits inside the addressable
-/// index range. Both are structural placeholders pending the staged
-/// behavioural-trace calibration.
-pub const NB_OL_EXC_GAIN_GRID: GainGrid = GainGrid {
-    slope: 7.75,
-    offset: 2.0,
-    bits: 5,
-};
+/// The 32 narrowband OL excitation-gain reconstruction magnitudes, in
+/// the decoder's normalised float signal domain
+/// (`28406 · ol_gain_table[qe] / 2^15 / SIG_SCALING`, equivalently
+/// `exp(qe/3.5)`).
+pub fn nb_ol_exc_gain_levels() -> &'static [f32; NB_OL_EXC_GAIN_LEVELS] {
+    static T: OnceLock<[f32; NB_OL_EXC_GAIN_LEVELS]> = OnceLock::new();
+    T.get_or_init(|| {
+        let q15 = parse_i64(NB_OL_GAIN_Q15_CSV, NB_OL_EXC_GAIN_LEVELS);
+        let mut out = [0.0f32; NB_OL_EXC_GAIN_LEVELS];
+        for (o, &v) in out.iter_mut().zip(q15.iter()) {
+            // ol_gain = MULT16_32_Q15(28406, table) / SIG_SCALING.
+            // Compute in f64 to avoid intermediate f32 overflow on the
+            // large high-index Q15 levels (~1.3e8).
+            *o = ((OL_GAIN_RECON_MULT as f64) * (v as f64) / (Q15 as f64) / (SIG_SCALING as f64))
+                as f32;
+        }
+        out
+    })
+}
 
-/// High-band excitation-gain grid for HB mode 1 (Table 10.1, 5 bits).
-///
-/// Per doc §4 the high-band gain is *"coded in the same way as for
-/// narrowband"* over ~80 dB of dynamic range with 32 reconstruction
-/// levels — i.e. the same grid shape as [`NB_OL_EXC_GAIN_GRID`].
-pub const HB_EXC_GAIN_GRID_5BIT: GainGrid = GainGrid {
-    slope: 7.75,
-    offset: 2.0,
-    bits: 5,
-};
+/// The 8 narrowband 3-bit sub-frame innovation-gain correction levels.
+pub fn nb_subframe_gain_levels_3bit() -> &'static [f32; NB_SUBFRAME_GAIN_LEVELS_3BIT] {
+    static T: OnceLock<[f32; NB_SUBFRAME_GAIN_LEVELS_3BIT]> = OnceLock::new();
+    T.get_or_init(|| {
+        let v = parse_floats(NB_SCAL3_CSV, NB_SUBFRAME_GAIN_LEVELS_3BIT);
+        let mut out = [0.0f32; NB_SUBFRAME_GAIN_LEVELS_3BIT];
+        out.copy_from_slice(&v);
+        out
+    })
+}
 
-/// High-band excitation-gain grid for HB modes 2..=4 (Table 10.1,
-/// 4 bits).
-///
-/// Per doc §4 the 4-bit HB field spans ~64 dB of dynamic range with 16
-/// reconstruction levels. Holding the same `db_per_step` as the 5-bit
-/// grid (`20 / 7.75 ≈ 2.58 dB`) over 15 steps gives ~38.7 dB; the doc's
-/// wider ~64 dB figure implies a coarser step, so the 4-bit `slope` is
-/// scaled to spread ~64 dB across its 15 steps:
-/// `slope = 15 · 20 / 64 ≈ 4.69`. The `offset` keeps the doc's
-/// mid-range bias placement (`1.0`, the centre of the smaller index
-/// span). Both stay structural placeholders pending calibration.
-pub const HB_EXC_GAIN_GRID_4BIT: GainGrid = GainGrid {
-    slope: 4.69,
-    offset: 1.0,
-    bits: 4,
-};
+/// The 7 narrowband 3-bit sub-frame correction encode-side decision
+/// boundaries (exposed for round-trip / quantiser-shape tests).
+pub fn nb_subframe_gain_bounds_3bit() -> &'static [f32] {
+    static T: OnceLock<Vec<f32>> = OnceLock::new();
+    T.get_or_init(|| parse_floats(NB_SCAL3_BOUND_CSV, NB_SUBFRAME_GAIN_LEVELS_3BIT - 1))
+}
+
+/// The 2 narrowband 1-bit sub-frame innovation-gain correction levels.
+pub fn nb_subframe_gain_levels_1bit() -> &'static [f32; NB_SUBFRAME_GAIN_LEVELS_1BIT] {
+    static T: OnceLock<[f32; NB_SUBFRAME_GAIN_LEVELS_1BIT]> = OnceLock::new();
+    T.get_or_init(|| {
+        let v = parse_floats(NB_SCAL1_CSV, NB_SUBFRAME_GAIN_LEVELS_1BIT);
+        let mut out = [0.0f32; NB_SUBFRAME_GAIN_LEVELS_1BIT];
+        out.copy_from_slice(&v);
+        out
+    })
+}
+
+/// The single narrowband 1-bit sub-frame correction decision boundary.
+pub fn nb_subframe_gain_bound_1bit() -> f32 {
+    static T: OnceLock<f32> = OnceLock::new();
+    *T.get_or_init(|| parse_floats(NB_SCAL1_BOUND_CSV, 1)[0])
+}
+
+/// The 16 high-band 4-bit gain-correction reconstruction levels
+/// (`0.87360 · gc_quant_bound[qgc]`).
+pub fn hb_gain_correction_levels() -> &'static [f32; HB_GAIN_CORRECTION_LEVELS] {
+    static T: OnceLock<[f32; HB_GAIN_CORRECTION_LEVELS]> = OnceLock::new();
+    T.get_or_init(|| {
+        let bound = parse_floats(HB_GC_BOUND_CSV, HB_GAIN_CORRECTION_LEVELS);
+        let mut out = [0.0f32; HB_GAIN_CORRECTION_LEVELS];
+        for (o, &b) in out.iter_mut().zip(bound.iter()) {
+            *o = HB_GC_RECONSTRUCTION_MULT * b;
+        }
+        out
+    })
+}
+
+/// The 32 high-band 5-bit folded-gain reconstruction levels
+/// (`fold_quant_bound[q]`, which double as both boundary and level).
+pub fn hb_folded_gain_levels() -> &'static [f32; HB_FOLDED_GAIN_LEVELS] {
+    static T: OnceLock<[f32; HB_FOLDED_GAIN_LEVELS]> = OnceLock::new();
+    T.get_or_init(|| {
+        let v = parse_floats(HB_FOLD_BOUND_CSV, HB_FOLDED_GAIN_LEVELS);
+        let mut out = [0.0f32; HB_FOLDED_GAIN_LEVELS];
+        out.copy_from_slice(&v);
+        out
+    })
+}
 
 /// Reconstruct the narrowband frame-level OL excitation-gain magnitude
 /// from a typed [`FrameInnovationGainIndex`].
 ///
 /// * [`FrameInnovationGainIndex::Silence`] (mode 0) reconstructs to
 ///   `0.0` — no excitation gain is transmitted and the frame is silent.
-/// * [`FrameInnovationGainIndex::Indexed`] reconstructs through
-///   [`NB_OL_EXC_GAIN_GRID`].
+/// * [`FrameInnovationGainIndex::Indexed`] reconstructs through the
+///   exact 32-level [`nb_ol_exc_gain_levels`] table.
 pub fn reconstruct_frame_ol_exc_gain(index: FrameInnovationGainIndex) -> f32 {
     match index {
         FrameInnovationGainIndex::Silence => 0.0,
-        FrameInnovationGainIndex::Indexed(i) => NB_OL_EXC_GAIN_GRID.reconstruct(u32::from(i)),
+        FrameInnovationGainIndex::Indexed(i) => {
+            nb_ol_exc_gain_levels()[usize::from(i) % NB_OL_EXC_GAIN_LEVELS]
+        }
     }
+}
+
+/// Reconstruct the narrowband per-sub-frame innovation-gain
+/// **correction** multiplier `g_subf` from a typed
+/// [`SubFrameInnovationGainCorrection`].
+///
+/// * [`SubFrameInnovationGainCorrection::Absent`] (0-bit budget, modes
+///   0/2/8) reconstructs to `1.0` — the identity multiplier, i.e. the
+///   fixed-codebook gain is the frame-level gain unchanged.
+/// * [`SubFrameInnovationGainCorrection::OneBit`] reconstructs through
+///   the exact 2-level [`nb_subframe_gain_levels_1bit`] table.
+/// * [`SubFrameInnovationGainCorrection::ThreeBit`] reconstructs through
+///   the exact 8-level [`nb_subframe_gain_levels_3bit`] table.
+pub fn reconstruct_subframe_gain_correction(correction: SubFrameInnovationGainCorrection) -> f32 {
+    match correction {
+        SubFrameInnovationGainCorrection::Absent => 1.0,
+        SubFrameInnovationGainCorrection::OneBit(i) => {
+            nb_subframe_gain_levels_1bit()[usize::from(i) % NB_SUBFRAME_GAIN_LEVELS_1BIT]
+        }
+        SubFrameInnovationGainCorrection::ThreeBit(i) => {
+            nb_subframe_gain_levels_3bit()[usize::from(i) % NB_SUBFRAME_GAIN_LEVELS_3BIT]
+        }
+    }
+}
+
+/// Reconstruct the composed narrowband fixed-codebook gain
+/// `g = g_frame · g_subf` from a typed [`FixedCodebookGainIndices`]
+/// (companion §2.3 product structure).
+///
+/// When the frame is silent the frame factor is `0.0`, so the product
+/// is `0.0` regardless of the (absent) correction.
+pub fn reconstruct_fixed_codebook_gain(indices: FixedCodebookGainIndices) -> f32 {
+    let g_frame = reconstruct_frame_ol_exc_gain(indices.frame);
+    let g_subf = reconstruct_subframe_gain_correction(indices.subframe);
+    g_frame * g_subf
 }
 
 /// Reconstruct the high-band per-sub-frame excitation-gain magnitude
 /// from a typed [`HbExcitationGainIndex`].
 ///
-/// * [`HbExcitationGainIndex::Absent`] (mode 0) reconstructs to `0.0` —
-///   no high-band excitation gain is transmitted.
-/// * [`HbExcitationGainIndex::FiveBit`] (mode 1) reconstructs through
-///   [`HB_EXC_GAIN_GRID_5BIT`].
-/// * [`HbExcitationGainIndex::FourBit`] (modes 2..=4) reconstructs
-///   through [`HB_EXC_GAIN_GRID_4BIT`].
+/// * [`HbExcitationGainIndex::Absent`] (mode 0) reconstructs to `0.0`.
+/// * [`HbExcitationGainIndex::FiveBit`] (HB mode 1) reconstructs through
+///   the exact 32-level folded-gain table [`hb_folded_gain_levels`].
+/// * [`HbExcitationGainIndex::FourBit`] (HB modes 2..=4) reconstructs
+///   through the exact 16-level gain-correction table
+///   [`hb_gain_correction_levels`].
 pub fn reconstruct_hb_exc_gain(index: HbExcitationGainIndex) -> f32 {
     match index {
         HbExcitationGainIndex::Absent => 0.0,
-        HbExcitationGainIndex::FiveBit(i) => HB_EXC_GAIN_GRID_5BIT.reconstruct(u32::from(i)),
-        HbExcitationGainIndex::FourBit(i) => HB_EXC_GAIN_GRID_4BIT.reconstruct(u32::from(i)),
+        HbExcitationGainIndex::FiveBit(i) => {
+            hb_folded_gain_levels()[usize::from(i) % HB_FOLDED_GAIN_LEVELS]
+        }
+        HbExcitationGainIndex::FourBit(i) => {
+            hb_gain_correction_levels()[usize::from(i) % HB_GAIN_CORRECTION_LEVELS]
+        }
     }
 }
 
@@ -238,181 +344,215 @@ pub fn reconstruct_hb_exc_gain(index: HbExcitationGainIndex) -> f32 {
 mod tests {
     use super::*;
 
-    /// The §2 reconstruction map evaluates exactly at the unit-gain
-    /// reference: `g(offset) == 1.0` for any grid.
+    /// Every reconstruction table has exactly the bit-width-implied
+    /// number of entries.
     #[test]
-    fn unit_gain_at_offset_index() {
-        // `offset` is integer-valued for the NB grid, so an exact index
-        // hits it.
-        let g = NB_OL_EXC_GAIN_GRID.reconstruct(NB_OL_EXC_GAIN_GRID.offset as u32);
-        assert!(
-            (g - 1.0).abs() < 1e-5,
-            "g(offset) should be unit gain, got {g}"
-        );
+    fn table_lengths_match_bit_widths() {
+        assert_eq!(nb_ol_exc_gain_levels().len(), 32);
+        assert_eq!(nb_subframe_gain_levels_3bit().len(), 8);
+        assert_eq!(nb_subframe_gain_bounds_3bit().len(), 7);
+        assert_eq!(nb_subframe_gain_levels_1bit().len(), 2);
+        assert_eq!(hb_gain_correction_levels().len(), 16);
+        assert_eq!(hb_folded_gain_levels().len(), 32);
     }
 
-    /// The grid is strictly monotone increasing in the index across the
-    /// full sweep — the doc's "spans the dynamic range" requirement.
+    /// Every reconstruction level is finite and strictly positive.
     #[test]
-    fn grid_is_strictly_monotone_increasing() {
-        for grid in [
-            NB_OL_EXC_GAIN_GRID,
-            HB_EXC_GAIN_GRID_5BIT,
-            HB_EXC_GAIN_GRID_4BIT,
+    fn all_levels_finite_and_positive() {
+        let mut all: Vec<f32> = Vec::new();
+        all.extend_from_slice(nb_ol_exc_gain_levels());
+        all.extend_from_slice(nb_subframe_gain_levels_3bit());
+        all.extend_from_slice(nb_subframe_gain_levels_1bit());
+        all.extend_from_slice(hb_gain_correction_levels());
+        all.extend_from_slice(hb_folded_gain_levels());
+        for v in all {
+            assert!(
+                v.is_finite() && v > 0.0,
+                "level {v} must be finite + positive"
+            );
+        }
+    }
+
+    /// Each scalar quantiser's reconstruction levels are strictly
+    /// monotone increasing in the index (the staged tables are sorted
+    /// log-domain quantisers).
+    #[test]
+    fn levels_strictly_monotone() {
+        for tbl in [
+            &nb_ol_exc_gain_levels()[..],
+            &nb_subframe_gain_levels_3bit()[..],
+            &nb_subframe_gain_levels_1bit()[..],
+            &hb_gain_correction_levels()[..],
+            &hb_folded_gain_levels()[..],
         ] {
-            let table = grid.table();
-            assert_eq!(table.len() as u32, grid.entries());
-            for w in table.windows(2) {
-                assert!(
-                    w[1] > w[0],
-                    "grid must be strictly increasing: {} !> {}",
-                    w[1],
-                    w[0]
-                );
+            for w in tbl.windows(2) {
+                assert!(w[1] > w[0], "levels must increase: {} !> {}", w[1], w[0]);
             }
         }
     }
 
-    /// Pointwise pin: every grid entry equals the documented §2 formula
-    /// `10^((index − offset)/slope)`.
+    /// The narrowband OL gain table reproduces the documented float law
+    /// `exp(qe/3.5)` (the Q15 staged levels divided by SIG_SCALING).
     #[test]
-    fn pointwise_pin_matches_documented_formula() {
-        for grid in [
-            NB_OL_EXC_GAIN_GRID,
-            HB_EXC_GAIN_GRID_5BIT,
-            HB_EXC_GAIN_GRID_4BIT,
-        ] {
-            for i in 0..grid.entries() {
-                let expected = 10.0_f32.powf((i as f32 - grid.offset) / grid.slope);
-                assert_eq!(grid.reconstruct(i), expected, "index {i}");
-            }
+    fn nb_ol_gain_matches_exp_law() {
+        let levels = nb_ol_exc_gain_levels();
+        for (qe, &g) in levels.iter().enumerate() {
+            let expected = (qe as f32 / 3.5).exp();
+            // The Q15 source quantises exp(qe/3.5)·16384 to an integer,
+            // so the float law is reproduced to the integer-rounding
+            // tolerance of one Q15 level over the magnitude.
+            let rel = (g - expected).abs() / expected;
+            assert!(
+                rel < 1e-3,
+                "qe {qe}: level {g} vs exp law {expected} (rel {rel})"
+            );
         }
     }
 
-    /// Adjacent indices differ by exactly the grid's dB-per-step (the
-    /// log-domain spacing is uniform).
+    /// The decision boundaries strictly interleave the reconstruction
+    /// levels for the 3-bit quantiser: `level[i] < bound[i] < level[i+1]`.
     #[test]
-    fn adjacent_indices_uniform_in_db() {
-        for grid in [NB_OL_EXC_GAIN_GRID, HB_EXC_GAIN_GRID_4BIT] {
-            let table = grid.table();
-            let step_db = grid.db_per_step();
-            for w in table.windows(2) {
-                let measured_db = 20.0 * (w[1] / w[0]).log10();
-                assert!(
-                    (measured_db - step_db).abs() < 1e-3,
-                    "log-domain step should be uniform: {measured_db} vs {step_db}"
-                );
-            }
+    fn scal3_bounds_interleave_levels() {
+        let levels = nb_subframe_gain_levels_3bit();
+        let bounds = nb_subframe_gain_bounds_3bit();
+        for (i, &b) in bounds.iter().enumerate() {
+            assert!(
+                levels[i] < b && b < levels[i + 1],
+                "bound {b} must lie between levels {} and {}",
+                levels[i],
+                levels[i + 1]
+            );
         }
     }
 
-    /// The 5-bit grids cover ~80 dB and the 4-bit grid ~64 dB of dynamic
-    /// range, matching the doc §2 / §4 order-of-magnitude figures
-    /// (tolerance is wide because the exact constants are the recorded
-    /// behavioural-trace gap — this only pins the documented decade
-    /// scale, not the exact endpoint).
+    /// The single 1-bit boundary lies between the two 1-bit levels.
     #[test]
-    fn dynamic_range_matches_doc_order_of_magnitude() {
-        // 5-bit ~80 dB (doc §2 / §4); 31 steps × 2.58 dB ≈ 80 dB.
-        assert!(
-            (NB_OL_EXC_GAIN_GRID.dynamic_range_db() - 80.0).abs() < 5.0,
-            "5-bit grid should span ~80 dB, got {}",
-            NB_OL_EXC_GAIN_GRID.dynamic_range_db()
-        );
-        assert!(
-            (HB_EXC_GAIN_GRID_5BIT.dynamic_range_db() - 80.0).abs() < 5.0,
-            "5-bit HB grid should span ~80 dB, got {}",
-            HB_EXC_GAIN_GRID_5BIT.dynamic_range_db()
-        );
-        // 4-bit ~64 dB (doc §4); 15 steps spread across ~64 dB.
-        assert!(
-            (HB_EXC_GAIN_GRID_4BIT.dynamic_range_db() - 64.0).abs() < 5.0,
-            "4-bit HB grid should span ~64 dB, got {}",
-            HB_EXC_GAIN_GRID_4BIT.dynamic_range_db()
-        );
+    fn scal1_bound_interleaves_levels() {
+        let levels = nb_subframe_gain_levels_1bit();
+        let b = nb_subframe_gain_bound_1bit();
+        assert!(levels[0] < b && b < levels[1], "bound {b} between levels");
     }
 
-    /// The grid's entry count matches its bit width.
+    /// HB gain-correction levels equal `0.87360 · gc_quant_bound`.
     #[test]
-    fn entries_match_bit_width() {
-        assert_eq!(NB_OL_EXC_GAIN_GRID.entries(), 32);
-        assert_eq!(NB_OL_EXC_GAIN_GRID.max_index(), 31);
-        assert_eq!(HB_EXC_GAIN_GRID_5BIT.entries(), 32);
-        assert_eq!(HB_EXC_GAIN_GRID_4BIT.entries(), 16);
-        assert_eq!(HB_EXC_GAIN_GRID_4BIT.max_index(), 15);
+    fn hb_gain_correction_applies_reconstruction_mult() {
+        let levels = hb_gain_correction_levels();
+        let bounds = parse_floats(HB_GC_BOUND_CSV, HB_GAIN_CORRECTION_LEVELS);
+        for (l, b) in levels.iter().zip(bounds.iter()) {
+            assert!((*l - HB_GC_RECONSTRUCTION_MULT * b).abs() < 1e-6);
+        }
     }
 
-    /// NB silence reconstructs to zero gain; an indexed field
-    /// reconstructs through the grid.
+    /// NB frame reconstruction: silence → 0; an indexed field hits the
+    /// exact level for its index.
     #[test]
     fn nb_frame_reconstruction_dispatch() {
         assert_eq!(
             reconstruct_frame_ol_exc_gain(FrameInnovationGainIndex::Silence),
             0.0
         );
+        let levels = nb_ol_exc_gain_levels();
         for i in 0..32u8 {
-            let g = reconstruct_frame_ol_exc_gain(FrameInnovationGainIndex::Indexed(i));
             assert_eq!(
-                g,
-                NB_OL_EXC_GAIN_GRID.reconstruct(u32::from(i)),
+                reconstruct_frame_ol_exc_gain(FrameInnovationGainIndex::Indexed(i)),
+                levels[usize::from(i)],
                 "index {i}"
             );
-            assert!(g > 0.0, "indexed gain is strictly positive");
         }
     }
 
-    /// HB absent reconstructs to zero; 5-bit / 4-bit dispatch to the
-    /// matching grid.
+    /// Sub-frame correction: absent → identity 1.0; 1-bit / 3-bit hit
+    /// the exact level.
+    #[test]
+    fn subframe_correction_dispatch() {
+        assert_eq!(
+            reconstruct_subframe_gain_correction(SubFrameInnovationGainCorrection::Absent),
+            1.0
+        );
+        let l1 = nb_subframe_gain_levels_1bit();
+        for i in 0..2u8 {
+            assert_eq!(
+                reconstruct_subframe_gain_correction(SubFrameInnovationGainCorrection::OneBit(i)),
+                l1[usize::from(i)]
+            );
+        }
+        let l3 = nb_subframe_gain_levels_3bit();
+        for i in 0..8u8 {
+            assert_eq!(
+                reconstruct_subframe_gain_correction(SubFrameInnovationGainCorrection::ThreeBit(i)),
+                l3[usize::from(i)]
+            );
+        }
+    }
+
+    /// Composed fixed-codebook gain is the product of frame and
+    /// sub-frame factors; silence frame zeroes the product.
+    #[test]
+    fn fixed_codebook_gain_is_product() {
+        let frame = FrameInnovationGainIndex::Indexed(10);
+        let subf = SubFrameInnovationGainCorrection::ThreeBit(5);
+        let g = reconstruct_fixed_codebook_gain(FixedCodebookGainIndices {
+            frame,
+            subframe: subf,
+        });
+        let expected =
+            reconstruct_frame_ol_exc_gain(frame) * reconstruct_subframe_gain_correction(subf);
+        assert_eq!(g, expected);
+
+        let silent = reconstruct_fixed_codebook_gain(FixedCodebookGainIndices {
+            frame: FrameInnovationGainIndex::Silence,
+            subframe: SubFrameInnovationGainCorrection::Absent,
+        });
+        assert_eq!(silent, 0.0);
+    }
+
+    /// HB reconstruction: absent → 0; 5-bit → folded table; 4-bit →
+    /// gain-correction table.
     #[test]
     fn hb_reconstruction_dispatch() {
         assert_eq!(reconstruct_hb_exc_gain(HbExcitationGainIndex::Absent), 0.0);
+        let fold = hb_folded_gain_levels();
         for i in 0..32u8 {
-            let g = reconstruct_hb_exc_gain(HbExcitationGainIndex::FiveBit(i));
             assert_eq!(
-                g,
-                HB_EXC_GAIN_GRID_5BIT.reconstruct(u32::from(i)),
+                reconstruct_hb_exc_gain(HbExcitationGainIndex::FiveBit(i)),
+                fold[usize::from(i)],
                 "5-bit {i}"
             );
         }
+        let gc = hb_gain_correction_levels();
         for i in 0..16u8 {
-            let g = reconstruct_hb_exc_gain(HbExcitationGainIndex::FourBit(i));
             assert_eq!(
-                g,
-                HB_EXC_GAIN_GRID_4BIT.reconstruct(u32::from(i)),
+                reconstruct_hb_exc_gain(HbExcitationGainIndex::FourBit(i)),
+                gc[usize::from(i)],
                 "4-bit {i}"
             );
         }
     }
 
-    /// The NB 5-bit grid and the HB 5-bit grid share the documented
-    /// "coded in the same way" parameters (doc §4).
+    /// Spot-check exact staged values against the provenance manifest's
+    /// recorded extremes (defends against a vendoring / parse slip).
     #[test]
-    fn nb_and_hb_5bit_grids_share_parameters() {
-        assert_eq!(NB_OL_EXC_GAIN_GRID, HB_EXC_GAIN_GRID_5BIT);
-    }
-
-    /// Every reconstructed magnitude is finite and positive across the
-    /// full index sweep of every grid (no NaN / inf at the endpoints).
-    #[test]
-    fn all_reconstructed_values_finite_and_positive() {
-        for grid in [
-            NB_OL_EXC_GAIN_GRID,
-            HB_EXC_GAIN_GRID_5BIT,
-            HB_EXC_GAIN_GRID_4BIT,
-        ] {
-            for v in grid.table() {
-                assert!(
-                    v.is_finite() && v > 0.0,
-                    "value {v} must be finite + positive"
-                );
-            }
-        }
-    }
-
-    /// dB-per-step relates to slope as `20 / slope`.
-    #[test]
-    fn db_per_step_inverts_slope() {
-        assert!((NB_OL_EXC_GAIN_GRID.db_per_step() - 20.0 / 7.75).abs() < 1e-5);
-        assert!((HB_EXC_GAIN_GRID_4BIT.db_per_step() - 20.0 / 4.69).abs() < 1e-5);
+    fn staged_value_spot_checks() {
+        // ol_gain_table Q15 first/last: 18900 / 132760927; float-domain
+        // = 28406 · table / 2^15 / 2^14.
+        let ol = nb_ol_exc_gain_levels();
+        let f = |t: f64| (28406.0 * t / 32768.0 / 16384.0) as f32;
+        assert!((ol[0] - f(18900.0)).abs() < 1e-4);
+        assert!((ol[31] - f(132_760_927.0)).abs() < 1.0);
+        // scal3 float endpoints 0.061130 / 1.326874.
+        let s3 = nb_subframe_gain_levels_3bit();
+        assert!((s3[0] - 0.061130).abs() < 1e-6);
+        assert!((s3[7] - 1.326874).abs() < 1e-6);
+        // scal1 float levels 0.70469 / 1.05127.
+        let s1 = nb_subframe_gain_levels_1bit();
+        assert!((s1[0] - 0.70469).abs() < 1e-6);
+        assert!((s1[1] - 1.05127).abs() < 1e-6);
+        // gc bound first 0.97979 → level 0.87360 · it.
+        let gc = hb_gain_correction_levels();
+        assert!((gc[0] - 0.873_60 * 0.97979).abs() < 1e-5);
+        // fold bound first/last 0.30498 / 14.69497.
+        let fold = hb_folded_gain_levels();
+        assert!((fold[0] - 0.30498).abs() < 1e-5);
+        assert!((fold[31] - 14.69497).abs() < 1e-4);
     }
 }
