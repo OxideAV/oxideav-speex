@@ -41,6 +41,12 @@ return `Error::NotImplemented`. What is implemented and tested:
   `g_frame · g_subf`), and the high-band excitation gain (32-level
   5-bit folded gain + 16-level 4-bit gain-correction with its
   `0.87360` reconstruction multiplier).
+* **Gain-scaled fixed-codebook contribution** — folds the reconstructed
+  fixed-codebook gain `g = g_frame · g_subf` into the raw innovation
+  sub-vector, producing the magnitude-correct `c[n]` that enters the
+  §8.4 excitation composition `e[n] = p[n] + c[n]`
+  (`gain_scaled_innovation_subframe` / `_from_indices` / `_sample`). A
+  silent frame drives the gain to `0.0`, vanishing the contribution.
 
 The end-to-end synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
@@ -50,10 +56,11 @@ stable, input-responsive PCM from a real stream.
 
 * Bit-exact full decode. The scalar excitation-gain quantiser levels
   are now exact (staged `ol_gain_table` / `exc_gain_quant_scal{1,3}` /
-  `gc_quant_bound` / `fold_quant_bound`), but the reconstructed gain is
-  not yet folded into the excitation (the gain × innovation scaling and
-  the gain-scaled pitch contribution remain a downstream synthesis
-  layer), and the pitch-gain Q-format scaling and the LSP angular-unit /
+  `gc_quant_bound` / `fold_quant_bound`), and the reconstructed
+  fixed-codebook gain is now folded into the innovation (the gain ×
+  innovation scaling lands `c[n]` in magnitude-correct float units), but
+  the gain-scaled pitch contribution still composes raw with the scaled
+  `c[n]`, and the pitch-gain Q-format scaling and the LSP angular-unit /
   fixed-point domain are not yet pinned by the staged material, so the
   output is not yet reference-equivalent. The framework `Decoder`
   endpoints return `Error::NotImplemented` until that closes.

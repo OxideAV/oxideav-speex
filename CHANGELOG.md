@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r326: **gain-scaled fixed-codebook contribution** — new
+  `gain_scaled_innovation` module folds the reconstructed fixed-codebook
+  gain `g = g_frame · g_subf` (from `reconstruct_fixed_codebook_gain`)
+  into the raw `[i16; 40]` innovation sub-vector, producing the
+  magnitude-correct `c[n]` (`[f32; 40]`) that enters the Speex Codec
+  Manual §8.4 excitation composition `e[n] = p[n] + c[n]`. Exposes
+  `gain_scaled_innovation_subframe` (apply a reconstructed scalar gain),
+  `gain_scaled_innovation_from_indices` (reconstruct + apply from typed
+  `FixedCodebookGainIndices` in one call), `gain_scaled_innovation_sample`
+  (single-sample helper), and `GAIN_SCALED_INNOVATION_SAMPLES`. Spec
+  basis: §8.4 `e[n] = p[n] + c[n]` (manual) + companion §2.3
+  fixed-codebook-gain product structure + the staged
+  `provenance/02-speex-gain-quant.md` decoder application law
+  `ener = MULT16_32_Q14(scal[q], ol_gain)` (the reconstructed gain
+  multiplies the innovation). A silent frame drives the gain to `0.0`,
+  vanishing the contribution. 11 new tests (382 lib tests, up from 371).
 - Round r316: **log-domain scalar gain reconstruction grid** wiring the
   previously index-only excitation-gain fields into reconstructed scalar
   magnitudes. New `gain_reconstruction` module exposes the parametric

@@ -418,6 +418,7 @@ mod excitation;
 mod fixed_codebook_gain;
 mod frame;
 mod gain_reconstruction;
+mod gain_scaled_innovation;
 mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
@@ -465,6 +466,10 @@ pub use gain_reconstruction::{
     reconstruct_hb_exc_gain, reconstruct_subframe_gain_correction, HB_FOLDED_GAIN_LEVELS,
     HB_GAIN_CORRECTION_LEVELS, NB_OL_EXC_GAIN_LEVELS, NB_SUBFRAME_GAIN_LEVELS_1BIT,
     NB_SUBFRAME_GAIN_LEVELS_3BIT,
+};
+pub use gain_scaled_innovation::{
+    gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,
+    gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES,
 };
 pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
