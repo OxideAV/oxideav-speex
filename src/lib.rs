@@ -418,6 +418,7 @@ mod excitation;
 mod fixed_codebook_gain;
 mod frame;
 mod gain_reconstruction;
+mod gain_scaled_excitation;
 mod gain_scaled_innovation;
 mod gain_scaled_pitch;
 mod hb_excitation_gain;
@@ -468,6 +469,9 @@ pub use gain_reconstruction::{
     reconstruct_frame_ol_exc_gain, reconstruct_hb_exc_gain, reconstruct_subframe_gain_correction,
     HB_FOLDED_GAIN_LEVELS, HB_GAIN_CORRECTION_LEVELS, NB_OL_EXC_GAIN_LEVELS,
     NB_SUBFRAME_GAIN_LEVELS_1BIT, NB_SUBFRAME_GAIN_LEVELS_3BIT,
+};
+pub use gain_scaled_excitation::{
+    gain_scaled_excitation_sample, gain_scaled_excitation_subframe, GAIN_SCALED_EXCITATION_SAMPLES,
 };
 pub use gain_scaled_innovation::{
     gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,

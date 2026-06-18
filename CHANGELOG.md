@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r337: **float-domain excitation composition** — new
+  `gain_scaled_excitation` module joins the two gain-scaled contributions
+  into the final per-sub-frame excitation `e[n] = p[n] + c[n]` of *The
+  Speex Codec Manual* §8.4 / CELP companion §2.3, the float analogue of
+  the r244 raw-integer `raw_excitation_subframe`. Both inputs are
+  `[f32; 40]` already in the **same normalised float signal domain** (the
+  r331 gain-scaled pitch contribution `p[n]` and the r326 gain-scaled
+  innovation contribution `c[n]`), so the composition is a plain
+  elementwise `f32` sum — no Q-format shift, matching the floating-point
+  posture of the downstream `SynthesisFilter`. Unlike the r244 raw sum
+  (whose terms carried different un-divided Q-formats), this sum is
+  magnitude-correct: it closes the README "Not yet supported" tail's
+  flagged composition step. Exposes `gain_scaled_excitation_subframe`,
+  `gain_scaled_excitation_sample`, and `GAIN_SCALED_EXCITATION_SAMPLES`.
+  Stream-start (empty buffer → `p[n] = 0.0`, `e[n] = c[n]`) and silence
+  (both terms → `0.0`) cases behave per spec. 10 new tests (406 lib
+  tests, up from 396).
 - Round r335: **open-loop / scalar gain quantiser (encode direction)** —
   the `gain_reconstruction` module now ships the encode half that mirrors
   its existing reconstruction lookups. The new `scal_quant` core is the

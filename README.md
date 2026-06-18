@@ -56,6 +56,15 @@ return `Error::NotImplemented`. What is implemented and tested:
   contributions now share one domain, so the §8.4 sum `e[n] = p[n] +
   c[n]` is well-posed. Stream-start and silence-tap cases vanish to
   `0.0`.
+* **Float-domain excitation composition** — joins the two gain-scaled
+  contributions into the final per-sub-frame excitation `e[n] = p[n] +
+  c[n]` (§8.4 / companion §2.3). Because the gain-scaled pitch `p[n]` and
+  innovation `c[n]` are now both `[f32; 40]` in the same normalised float
+  signal domain, the composition is a plain elementwise `f32` sum
+  (`gain_scaled_excitation_subframe` / `_sample`) — the
+  magnitude-correct float analogue of the raw-integer `e[n]` sum. At
+  stream start the pitch term vanishes so `e[n] = c[n]`; a silent frame
+  drives both terms to `0.0`.
 * **Open-loop / scalar gain quantiser** — the encode-direction inverse
   of the gain reconstruction tables. The `scal_quant` sorted-threshold
   search maps a target gain magnitude to its field index (count of
@@ -82,12 +91,17 @@ stable, input-responsive PCM from a real stream.
   the adaptive-codebook (pitch) contribution `p[n]` is now scaled into
   the same normalised float signal domain by the staged **Q6**
   pitch-gain factor (`GAIN_SCALING = 64`), so the two §8.4 contributions
-  finally share one domain. What remains: the float-domain composition
-  step `e[n] = p[n] + c[n]` joining the two scaled contributions is not
-  yet wired into the end-to-end synthesis path, and the LSP angular-unit
-  / fixed-point domain is not yet pinned by the staged material, so the
-  output is not yet reference-equivalent. The framework `Decoder`
-  endpoints return `Error::NotImplemented` until that closes.
+  finally share one domain, and the float-domain composition step
+  `e[n] = p[n] + c[n]` joining the two scaled contributions is now
+  surfaced as the magnitude-correct `gain_scaled_excitation_subframe`
+  primitive. What remains: that composed `e[n]` is not yet threaded into
+  the end-to-end synthesis path (the `SynthesisFilter` is currently fed
+  the innovation-only excitation, and the float → `i16` excitation-buffer
+  feedback for the next sub-frame's pitch lookup is not yet wired), and
+  the LSP angular-unit / fixed-point domain is not yet pinned by the
+  staged material, so the output is not yet reference-equivalent. The
+  framework `Decoder` endpoints return `Error::NotImplemented` until that
+  closes.
 * Encoder.
 * Ultra-wideband framing (no dedicated chapter in the staged manual).
 * Per-mode innovation handling for narrowband modes 1 and 7 and
