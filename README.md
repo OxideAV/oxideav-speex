@@ -47,6 +47,15 @@ return `Error::NotImplemented`. What is implemented and tested:
   §8.4 excitation composition `e[n] = p[n] + c[n]`
   (`gain_scaled_innovation_subframe` / `_from_indices` / `_sample`). A
   silent frame drives the gain to `0.0`, vanishing the contribution.
+* **Gain-scaled adaptive-codebook (pitch) contribution** — divides the
+  §9.2 long-term-predictor dot product by the now-staged **Q6**
+  pitch-gain scaling (`GAIN_SCALING = 64`, `GAIN_SHIFT = 6`, from
+  `provenance/02`), producing the pitch contribution `p[n]` as `[f32;
+  40]` in the **same normalised float signal domain** as the
+  gain-scaled `c[n]` (`gain_scaled_pitch_subframe` / `_sample`). Both
+  contributions now share one domain, so the §8.4 sum `e[n] = p[n] +
+  c[n]` is well-posed. Stream-start and silence-tap cases vanish to
+  `0.0`.
 
 The end-to-end synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
@@ -58,10 +67,14 @@ stable, input-responsive PCM from a real stream.
   are now exact (staged `ol_gain_table` / `exc_gain_quant_scal{1,3}` /
   `gc_quant_bound` / `fold_quant_bound`), and the reconstructed
   fixed-codebook gain is now folded into the innovation (the gain ×
-  innovation scaling lands `c[n]` in magnitude-correct float units), but
-  the gain-scaled pitch contribution still composes raw with the scaled
-  `c[n]`, and the pitch-gain Q-format scaling and the LSP angular-unit /
-  fixed-point domain are not yet pinned by the staged material, so the
+  innovation scaling lands `c[n]` in magnitude-correct float units), and
+  the adaptive-codebook (pitch) contribution `p[n]` is now scaled into
+  the same normalised float signal domain by the staged **Q6**
+  pitch-gain factor (`GAIN_SCALING = 64`), so the two §8.4 contributions
+  finally share one domain. What remains: the float-domain composition
+  step `e[n] = p[n] + c[n]` joining the two scaled contributions is not
+  yet wired into the end-to-end synthesis path, and the LSP angular-unit
+  / fixed-point domain is not yet pinned by the staged material, so the
   output is not yet reference-equivalent. The framework `Decoder`
   endpoints return `Error::NotImplemented` until that closes.
 * Encoder.

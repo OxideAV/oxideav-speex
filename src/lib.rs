@@ -419,6 +419,7 @@ mod fixed_codebook_gain;
 mod frame;
 mod gain_reconstruction;
 mod gain_scaled_innovation;
+mod gain_scaled_pitch;
 mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
@@ -470,6 +471,10 @@ pub use gain_reconstruction::{
 pub use gain_scaled_innovation::{
     gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,
     gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES,
+};
+pub use gain_scaled_pitch::{
+    gain_scaled_pitch_sample, gain_scaled_pitch_subframe, GAIN_SCALED_PITCH_SAMPLES,
+    PITCH_GAIN_SCALING,
 };
 pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,

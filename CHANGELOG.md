@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r331: **gain-scaled adaptive-codebook (pitch) contribution** —
+  new `gain_scaled_pitch` module divides the §9.2 long-term-predictor
+  dot product (`adaptive_contribution_subframe`) by the now-staged
+  **Q6** pitch-gain scaling (`GAIN_SCALING = 64`, `GAIN_SHIFT = 6`, from
+  `provenance/02-speex-gain-quant.md` "Scalar constants" — the previously
+  un-pinned pitch-gain Q-format), producing the pitch contribution
+  `p[n]` as `[f32; 40]` in the **same normalised float signal domain**
+  as the r326 gain-scaled `c[n]`. The two §8.4 contributions now share
+  one domain, so the composition `e[n] = p[n] + c[n]` is well-posed.
+  Exposes `gain_scaled_pitch_subframe`, `gain_scaled_pitch_sample`,
+  `GAIN_SCALED_PITCH_SAMPLES`, and the `PITCH_GAIN_SCALING` constant.
+  Stream-start and silence-tap cases vanish to `0.0`. 7 new tests (389
+  lib tests, up from 382).
 - Round r326: **gain-scaled fixed-codebook contribution** — new
   `gain_scaled_innovation` module folds the reconstructed fixed-codebook
   gain `g = g_frame · g_subf` (from `reconstruct_fixed_codebook_gain`)
