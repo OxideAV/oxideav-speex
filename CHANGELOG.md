@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r335: **open-loop / scalar gain quantiser (encode direction)** —
+  the `gain_reconstruction` module now ships the encode half that mirrors
+  its existing reconstruction lookups. The new `scal_quant` core is the
+  textbook sorted-threshold search (companion §2.3): the index is the
+  count of decision boundaries a target gain meets-or-exceeds, saturated
+  to the field width. Exposes `quantise_frame_ol_exc_gain`
+  (NB 5-bit `OL Exc gain`, `scal_quant32` against the 32 normalised
+  levels; non-positive/non-finite → `Silence`),
+  `quantise_subframe_gain_correction` (NB 1-/3-bit innovation-gain
+  correction over `scal1_bound`/`scal3_bound`; 0-bit → `Absent`,
+  unknown budget → `None`), and `quantise_hb_exc_gain` (HB 5-bit folded
+  gain over `fold_quant_bound`; HB 4-bit gain-correction over
+  `gc_quant_bound` with the `0.87360` reconstruction multiplier divided
+  out of the target). Each quantiser returns the same typed index enum
+  the parser produces, so it is the exact inverse of the matching
+  reconstruction function at every cell. Also exposes the
+  `hb_gc_quant_bound` accessor. Spec basis: the staged decision-boundary
+  arrays + `scal_quant`/`scal_quant32` semantics indexed in
+  `provenance/02-speex-gain-quant.md`. 7 new tests covering per-cell
+  round-trips, boundary placement, clamping, and the `scal_quant`
+  threshold contract.
 - Round r331: **gain-scaled adaptive-codebook (pitch) contribution** —
   new `gain_scaled_pitch` module divides the §9.2 long-term-predictor
   dot product (`adaptive_contribution_subframe`) by the now-staged

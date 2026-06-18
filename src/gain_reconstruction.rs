@@ -82,13 +82,41 @@
 //!   [`hb_gain_correction_levels`], [`hb_folded_gain_levels`]) for
 //!   callers that want the full reconstruction sweep.
 //!
+//! ## The open-loop / scalar gain *quantiser* (encode direction)
+//!
+//! The reconstruction functions above are the decode half. The encode
+//! half is the **scalar quantiser**: given a target gain magnitude it
+//! picks the index whose reconstruction is closest under the codec's
+//! decision boundaries. The decision-boundary search is the textbook
+//! sorted-threshold quantiser (`scal_quant` / `scal_quant32` in the
+//! companion §2.3): the returned index is the count of boundaries the
+//! value meets-or-exceeds, clamped to the field width. The boundary
+//! tables are the same vendored arrays the decoder uses, so the
+//! quantiser and reconstruction are exact inverses across every cell:
+//!
+//! * [`quantise_frame_ol_exc_gain`] — NB 5-bit `OL Exc gain`
+//!   (`scal_quant32(ol_gain, ol_gain_table, 32)`; the 32 normalised
+//!   levels double as the boundary set).
+//! * [`quantise_subframe_gain_correction`] — NB 1-/3-bit innovation-gain
+//!   correction (`scal_quant(fine_gain, scal{1,3}_bound, {2,8})`).
+//! * [`quantise_hb_exc_gain`] — HB 5-bit folded gain
+//!   (`scal_quant(g, fold_quant_bound, 32)`) and HB 4-bit gain-correction
+//!   (`scal_quant(gc / 0.87360, gc_quant_bound, 16)`).
+//!
+//! Each quantiser returns the same typed index enum the parser produces,
+//! so feeding it straight back through the matching reconstruction
+//! function is the round-trip identity for any input that already sits at
+//! a reconstruction level (proven by the round-trip tests below).
+//!
 //! ## What this module DOES NOT do
 //!
 //! * No excitation scaling. Multiplying the §8.4 excitation `c[n]` by
 //!   the reconstructed gain is a downstream synthesis layer that
 //!   consumes these primitives.
-//! * No encoder-side index selection (the decision boundaries are
-//!   exposed for completeness / round-trip tests, not an encoder).
+//! * No full encoder. The quantiser maps an already-computed target gain
+//!   magnitude to its field index; the open-loop *estimation* of that
+//!   target gain from the residual energy is an encoder analysis stage
+//!   outside this module.
 
 use crate::fixed_codebook_gain::{
     FixedCodebookGainIndices, FrameInnovationGainIndex, SubFrameInnovationGainCorrection,
@@ -340,6 +368,147 @@ pub fn reconstruct_hb_exc_gain(index: HbExcitationGainIndex) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Open-loop / scalar gain quantiser (encode direction).
+//
+// `scal_quant(value, bound, n)` (companion §2.3) is the textbook
+// sorted-threshold scalar quantiser: the index is the number of decision
+// boundaries `value` meets-or-exceeds, saturated at `n - 1`. The boundary
+// arrays are the same vendored tables the decoder reconstructs from, so
+// the quantiser is the exact inverse of the matching reconstruction
+// function at every reconstruction level.
+// ---------------------------------------------------------------------------
+
+/// Core `scal_quant`: return the index of `value` against the sorted
+/// decision-boundary slice `bound`, saturated to `levels - 1`.
+///
+/// The boundary slice holds the thresholds *between* adjacent
+/// reconstruction levels; a quantiser over `levels` cells has either
+/// `levels - 1` interior boundaries (the NB innovation-gain tables) or
+/// `levels` boundaries whose last entry is unreachable after saturation
+/// (the HB tables, which ship the level array itself as the bound set).
+/// Either layout yields the same index: walk while `value` exceeds the
+/// next boundary, stop at the field width.
+fn scal_quant(value: f32, bound: &[f32], levels: usize) -> u8 {
+    let mut idx = 0usize;
+    let max = levels.saturating_sub(1);
+    while idx < max && idx < bound.len() && value > bound[idx] {
+        idx += 1;
+    }
+    idx as u8
+}
+
+/// Quantise a normalised narrowband frame-level OL excitation-gain
+/// magnitude (`exp(qe/3.5)` domain — the same domain
+/// [`nb_ol_exc_gain_levels`] returns) into a typed
+/// [`FrameInnovationGainIndex`].
+///
+/// `scal_quant32(ol_gain, ol_gain_table, 32)`: the 32 reconstruction
+/// levels themselves serve as the boundary set, so the index is the count
+/// of levels `gain` meets-or-exceeds, saturated to 31. A non-finite or
+/// non-positive `gain` quantises to [`FrameInnovationGainIndex::Silence`]
+/// (the mode-0 / no-excitation convention), matching the decoder's
+/// `Silence → 0.0` reconstruction.
+pub fn quantise_frame_ol_exc_gain(gain: f32) -> FrameInnovationGainIndex {
+    if !gain.is_finite() || gain <= 0.0 {
+        return FrameInnovationGainIndex::Silence;
+    }
+    let levels = nb_ol_exc_gain_levels();
+    let idx = scal_quant(gain, levels, NB_OL_EXC_GAIN_LEVELS);
+    FrameInnovationGainIndex::Indexed(idx)
+}
+
+/// Quantise a narrowband per-sub-frame innovation-gain **correction**
+/// multiplier `g_subf` for the given bit budget (0, 1, or 3) into a typed
+/// [`SubFrameInnovationGainCorrection`].
+///
+/// * 0-bit budget → [`SubFrameInnovationGainCorrection::Absent`]
+///   (identity multiplier; no field transmitted).
+/// * 1-bit budget → `scal_quant(g_subf, scal1_bound, 2)`.
+/// * 3-bit budget → `scal_quant(g_subf, scal3_bound, 8)`.
+///
+/// Returns `None` for any other bit budget (no such NB sub-frame
+/// quantiser exists — manual Table 9.1).
+pub fn quantise_subframe_gain_correction(
+    correction: f32,
+    bits: u8,
+) -> Option<SubFrameInnovationGainCorrection> {
+    match bits {
+        0 => Some(SubFrameInnovationGainCorrection::Absent),
+        1 => {
+            let bound = [nb_subframe_gain_bound_1bit()];
+            let idx = scal_quant(correction, &bound, NB_SUBFRAME_GAIN_LEVELS_1BIT);
+            Some(SubFrameInnovationGainCorrection::OneBit(idx))
+        }
+        3 => {
+            let idx = scal_quant(
+                correction,
+                nb_subframe_gain_bounds_3bit(),
+                NB_SUBFRAME_GAIN_LEVELS_3BIT,
+            );
+            Some(SubFrameInnovationGainCorrection::ThreeBit(idx))
+        }
+        _ => None,
+    }
+}
+
+/// Quantise a high-band per-sub-frame excitation-gain magnitude for the
+/// given bit budget (0, 4, or 5) into a typed [`HbExcitationGainIndex`].
+///
+/// * 0-bit budget → [`HbExcitationGainIndex::Absent`].
+/// * 5-bit budget (HB mode 1) → folded gain
+///   `scal_quant(gain, fold_quant_bound, 32)`; the boundary array is the
+///   level array.
+/// * 4-bit budget (HB modes 2..=4) → gain-correction
+///   `scal_quant(gain / 0.87360, gc_quant_bound, 16)`. The 0.87360
+///   reconstruction multiplier is divided out of the target gain so the
+///   search runs in the `gc_quant_bound` domain, the exact inverse of the
+///   `gc = 0.87360 · gc_bound[qgc]` reconstruction.
+///
+/// A non-finite or non-positive `gain` quantises to index 0. Returns
+/// `None` for any other bit budget.
+pub fn quantise_hb_exc_gain(gain: f32, bits: u8) -> Option<HbExcitationGainIndex> {
+    let g = if gain.is_finite() && gain > 0.0 {
+        gain
+    } else {
+        0.0
+    };
+    match bits {
+        0 => Some(HbExcitationGainIndex::Absent),
+        5 => {
+            let idx = scal_quant(g, hb_folded_gain_levels(), HB_FOLDED_GAIN_LEVELS);
+            Some(HbExcitationGainIndex::FiveBit(idx))
+        }
+        4 => {
+            // Reconstruction is gc = 0.87360 · gc_quant_bound[q]; invert
+            // the multiplier so the boundary search runs in the bound
+            // domain. gc_quant_bound entries are the boundary set.
+            let bound = hb_gc_quant_bound();
+            let idx = scal_quant(
+                g / HB_GC_RECONSTRUCTION_MULT,
+                bound,
+                HB_GAIN_CORRECTION_LEVELS,
+            );
+            Some(HbExcitationGainIndex::FourBit(idx))
+        }
+        _ => None,
+    }
+}
+
+/// The 16 high-band 4-bit gain-correction decision boundaries
+/// (`gc_quant_bound`, the bound-domain values the quantiser searches and
+/// the reconstruction multiplies by `0.87360`). Exposed for the
+/// quantiser search and round-trip tests.
+pub fn hb_gc_quant_bound() -> &'static [f32; HB_GAIN_CORRECTION_LEVELS] {
+    static T: OnceLock<[f32; HB_GAIN_CORRECTION_LEVELS]> = OnceLock::new();
+    T.get_or_init(|| {
+        let v = parse_floats(HB_GC_BOUND_CSV, HB_GAIN_CORRECTION_LEVELS);
+        let mut out = [0.0f32; HB_GAIN_CORRECTION_LEVELS];
+        out.copy_from_slice(&v);
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +723,151 @@ mod tests {
         let fold = hb_folded_gain_levels();
         assert!((fold[0] - 0.30498).abs() < 1e-5);
         assert!((fold[31] - 14.69497).abs() < 1e-4);
+    }
+
+    // -- Open-loop / scalar gain quantiser (encode direction) --------------
+
+    /// Quantising any exact NB OL reconstruction level returns that level's
+    /// own index, so quantise → reconstruct is the identity at every cell.
+    #[test]
+    fn ol_quantiser_round_trips_every_level() {
+        let levels = nb_ol_exc_gain_levels();
+        for (qe, &g) in levels.iter().enumerate() {
+            let idx = quantise_frame_ol_exc_gain(g);
+            assert_eq!(
+                idx,
+                FrameInnovationGainIndex::Indexed(qe as u8),
+                "level {g} (qe {qe}) must quantise back to its own index"
+            );
+            assert_eq!(reconstruct_frame_ol_exc_gain(idx), g);
+        }
+    }
+
+    /// OL quantiser clamps: non-positive / non-finite → Silence; a gain
+    /// above the top level saturates to index 31; below the lowest → 0.
+    #[test]
+    fn ol_quantiser_clamps() {
+        assert_eq!(
+            quantise_frame_ol_exc_gain(0.0),
+            FrameInnovationGainIndex::Silence
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain(-1.0),
+            FrameInnovationGainIndex::Silence
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain(f32::NAN),
+            FrameInnovationGainIndex::Silence
+        );
+        let levels = nb_ol_exc_gain_levels();
+        assert_eq!(
+            quantise_frame_ol_exc_gain(levels[31] * 10.0),
+            FrameInnovationGainIndex::Indexed(31)
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain(levels[0] * 0.5),
+            FrameInnovationGainIndex::Indexed(0)
+        );
+    }
+
+    /// NB sub-frame correction quantiser: each level round-trips; values
+    /// just inside a boundary land on the lower cell, just above on the
+    /// upper. 0-bit → Absent, unknown budget → None.
+    #[test]
+    fn subframe_quantiser_round_trips_and_dispatches() {
+        assert_eq!(
+            quantise_subframe_gain_correction(1.0, 0),
+            Some(SubFrameInnovationGainCorrection::Absent)
+        );
+        assert_eq!(quantise_subframe_gain_correction(1.0, 2), None);
+
+        let l1 = nb_subframe_gain_levels_1bit();
+        for (i, &l) in l1.iter().enumerate() {
+            let q = quantise_subframe_gain_correction(l, 1).unwrap();
+            assert_eq!(q, SubFrameInnovationGainCorrection::OneBit(i as u8));
+            assert_eq!(reconstruct_subframe_gain_correction(q), l);
+        }
+        let b1 = nb_subframe_gain_bound_1bit();
+        assert_eq!(
+            quantise_subframe_gain_correction(b1 - 1e-4, 1).unwrap(),
+            SubFrameInnovationGainCorrection::OneBit(0)
+        );
+        assert_eq!(
+            quantise_subframe_gain_correction(b1 + 1e-4, 1).unwrap(),
+            SubFrameInnovationGainCorrection::OneBit(1)
+        );
+
+        let l3 = nb_subframe_gain_levels_3bit();
+        for (i, &l) in l3.iter().enumerate() {
+            let q = quantise_subframe_gain_correction(l, 3).unwrap();
+            assert_eq!(q, SubFrameInnovationGainCorrection::ThreeBit(i as u8));
+            assert_eq!(reconstruct_subframe_gain_correction(q), l);
+        }
+        let b3 = nb_subframe_gain_bounds_3bit();
+        for (i, &b) in b3.iter().enumerate() {
+            assert_eq!(
+                quantise_subframe_gain_correction(b - 1e-4, 3).unwrap(),
+                SubFrameInnovationGainCorrection::ThreeBit(i as u8)
+            );
+            assert_eq!(
+                quantise_subframe_gain_correction(b + 1e-4, 3).unwrap(),
+                SubFrameInnovationGainCorrection::ThreeBit((i + 1) as u8)
+            );
+        }
+    }
+
+    /// HB quantiser: 5-bit folded gain and 4-bit gain-correction each
+    /// round-trip every reconstruction level; 0-bit → Absent; unknown → None.
+    #[test]
+    fn hb_quantiser_round_trips_and_dispatches() {
+        assert_eq!(
+            quantise_hb_exc_gain(1.0, 0),
+            Some(HbExcitationGainIndex::Absent)
+        );
+        assert_eq!(quantise_hb_exc_gain(1.0, 3), None);
+
+        let fold = hb_folded_gain_levels();
+        for (i, &g) in fold.iter().enumerate() {
+            let q = quantise_hb_exc_gain(g, 5).unwrap();
+            assert_eq!(q, HbExcitationGainIndex::FiveBit(i as u8));
+            assert_eq!(reconstruct_hb_exc_gain(q), g);
+        }
+
+        let gc = hb_gain_correction_levels();
+        for (i, &g) in gc.iter().enumerate() {
+            let q = quantise_hb_exc_gain(g, 4).unwrap();
+            assert_eq!(q, HbExcitationGainIndex::FourBit(i as u8));
+            assert_eq!(reconstruct_hb_exc_gain(q), g);
+        }
+    }
+
+    /// HB 4-bit quantiser divides out the 0.87360 multiplier so the search
+    /// runs in the gc_quant_bound domain — its boundaries equal the bound
+    /// CSV.
+    #[test]
+    fn hb_gc_quant_bound_matches_csv() {
+        let b = hb_gc_quant_bound();
+        let csv = parse_floats(HB_GC_BOUND_CSV, HB_GAIN_CORRECTION_LEVELS);
+        for (x, y) in b.iter().zip(csv.iter()) {
+            assert_eq!(x, y);
+        }
+        // A target gain just below gc[0]'s reconstruction quantises to 0.
+        let gc = hb_gain_correction_levels();
+        assert_eq!(
+            quantise_hb_exc_gain(gc[0] * 0.5, 4).unwrap(),
+            HbExcitationGainIndex::FourBit(0)
+        );
+    }
+
+    /// `scal_quant` core: index is the count of boundaries met-or-exceeded,
+    /// saturated to the field width.
+    #[test]
+    fn scal_quant_threshold_semantics() {
+        let bound = [1.0f32, 2.0, 3.0];
+        assert_eq!(scal_quant(0.5, &bound, 4), 0);
+        assert_eq!(scal_quant(1.5, &bound, 4), 1);
+        assert_eq!(scal_quant(2.5, &bound, 4), 2);
+        assert_eq!(scal_quant(99.0, &bound, 4), 3); // saturates at n-1
+        assert_eq!(scal_quant(1.0, &bound, 4), 0); // equal → not exceeded
     }
 }

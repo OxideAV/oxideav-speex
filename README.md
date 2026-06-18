@@ -56,6 +56,17 @@ return `Error::NotImplemented`. What is implemented and tested:
   contributions now share one domain, so the §8.4 sum `e[n] = p[n] +
   c[n]` is well-posed. Stream-start and silence-tap cases vanish to
   `0.0`.
+* **Open-loop / scalar gain quantiser** — the encode-direction inverse
+  of the gain reconstruction tables. The `scal_quant` sorted-threshold
+  search maps a target gain magnitude to its field index (count of
+  decision boundaries met-or-exceeded, saturated to the field width):
+  `quantise_frame_ol_exc_gain` (NB 5-bit OL gain),
+  `quantise_subframe_gain_correction` (NB 1-/3-bit innovation-gain
+  correction), and `quantise_hb_exc_gain` (HB 5-bit folded / 4-bit
+  gain-correction, the latter dividing out the `0.87360` multiplier).
+  Each returns the same typed index enum the parser produces, so it is
+  the exact inverse of the matching reconstruction function at every
+  cell.
 
 The end-to-end synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
