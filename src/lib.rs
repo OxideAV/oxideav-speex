@@ -419,6 +419,7 @@ mod fixed_codebook_gain;
 mod frame;
 mod gain_reconstruction;
 mod gain_scaled_excitation;
+mod gain_scaled_hb_innovation;
 mod gain_scaled_innovation;
 mod gain_scaled_pitch;
 mod hb_excitation_gain;
@@ -472,6 +473,10 @@ pub use gain_reconstruction::{
 };
 pub use gain_scaled_excitation::{
     gain_scaled_excitation_sample, gain_scaled_excitation_subframe, GAIN_SCALED_EXCITATION_SAMPLES,
+};
+pub use gain_scaled_hb_innovation::{
+    gain_scaled_hb_innovation_from_body, gain_scaled_hb_innovation_sample,
+    gain_scaled_hb_innovation_subframe, GAIN_SCALED_HB_INNOVATION_SAMPLES,
 };
 pub use gain_scaled_innovation::{
     gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,

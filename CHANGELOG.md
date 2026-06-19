@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r340: **gain-scaled high-band excitation** — new
+  `gain_scaled_hb_innovation` module folds the reconstructed high-band
+  `Excitation gain` factor (`reconstruct_hb_exc_gain`) into the raw
+  high-band innovation sub-vector (`decode_hb_subframe`), producing the
+  magnitude-correct high-band excitation `e_hb[n]` as `[f32; 40]`. Per
+  *The Speex Codec Manual* §10.2 there is **no pitch prediction in the
+  high band**, so the §8.4 composition `e[n] = p[n] + c[n]` collapses to
+  `e_hb[n] = c_hb[n]` — this gain-scaled innovation is the *entire*
+  high-band excitation that the high-band synthesis filter `1/A_hb(z)`
+  consumes (the high-band counterpart of the r326
+  `gain_scaled_innovation`, minus the adaptive-codebook term). Exposes
+  `gain_scaled_hb_innovation_subframe`, `gain_scaled_hb_innovation_sample`,
+  `gain_scaled_hb_innovation_from_body`, and
+  `GAIN_SCALED_HB_INNOVATION_SAMPLES`. Modes 0/1 (silence/gain-only)
+  vanish to `0.0`; mode 4 surfaces the documented `Undocumented`
+  codebook-binding gap. 8 new tests.
 - Round r337: **float-domain excitation composition** — new
   `gain_scaled_excitation` module joins the two gain-scaled contributions
   into the final per-sub-frame excitation `e[n] = p[n] + c[n]` of *The
