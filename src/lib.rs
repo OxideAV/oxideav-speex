@@ -440,6 +440,7 @@ mod submode;
 mod synthesis;
 mod wb_synthesis;
 mod wideband;
+mod wideband_decoder;
 
 pub use adaptive_codebook::{
     resolve_lookback, sample_lookback_indices, subframe_lookback_indices, ExcitationBuffer,
@@ -543,6 +544,7 @@ pub use wideband::{
     WidebandHighBandSubmode, WidebandSubmode, HIGH_BAND_FRAME_PREFIX_BITS,
     HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
 };
+pub use wideband_decoder::{WidebandDecodeError, WidebandDecoder, WidebandFrame};
 
 /// Crate-local error type. Until the full clean-room rebuild lands, the
 /// codec-level public API paths return [`Error::NotImplemented`]; the

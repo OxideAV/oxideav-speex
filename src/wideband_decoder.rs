@@ -1,0 +1,325 @@
+//! **End-to-end wideband (sub-band CELP) decode loop** — decodes a
+//! wideband packet into its two reconstructed 8 kHz half-band signals
+//! (low band `x_lb[n]` + high band `x_hb[n]`).
+//!
+//! A wideband packet is the **embedded** concatenation of a narrowband
+//! frame (the low band, 0–4 kHz) and a high-band frame (4–8 kHz folded
+//! to an 8 kHz half-band), per *The Speex Codec Manual* §10:
+//!
+//! > "The 16 kHz signal is thus divided into two 8 kHz signals, one
+//! > representing the low band (0–4 kHz), the other the high band
+//! > (4–8 kHz)."
+//!
+//! The on-wire layout (§10.4 *"the narrowband frame is packed first,
+//! then the high band"*) is:
+//!
+//! ```text
+//!  wideband packet
+//!    ├── 5-bit NB prefix (wideband flag=1 || 4-bit NB mode ID)
+//!    ├── narrowband Table 9.1 body              ─► NB decode ─► x_lb[n]
+//!    ├── 4-bit HB prefix (wideband flag || 3-bit HB mode ID)
+//!    └── high-band Table 10.1 body              ─► HB synth ─► x_hb[n]
+//! ```
+//!
+//! ## What this round adds
+//!
+//! The narrowband decode loop ([`crate::NarrowbandDecoder`]) and the
+//! high-band synthesis chain ([`crate::synthesise_high_band_frame`]) both
+//! already existed; this module **binds them into one wideband decoder**
+//! that walks a wideband packet, decodes the embedded narrowband frame to
+//! the low-band signal, then parses + synthesises the high-band frame
+//! that follows, returning both half-band signals with their respective
+//! persistent IIR state carried across frames.
+//!
+//! ## QMF synthesis gap (documented, not fished)
+//!
+//! The final recombination `(x_lb, x_hb) → 16 kHz wideband PCM` runs the
+//! two half-band signals back through the QMF **synthesis** filterbank.
+//! The staged material provides the 64-tap QMF prototype `h0` as pure
+//! data but does **not** specify the synthesis filterbank algorithm
+//! (polyphase recombination, the `h0 → {h0, h1}` analysis/synthesis pair
+//! derivation, the 2× interpolation / decimation factors, the inter-band
+//! delay alignment). That recombination is therefore a recorded docs gap
+//! (see [`crate::wb_synthesis`] module docs + the README). This decoder
+//! stops at the two reconstructed half-band signals, which is the
+//! furthest the staged material uniquely pins.
+
+use crate::bitreader::BitReader;
+use crate::frame::NarrowbandFrameHeader;
+use crate::hb_synthesis::HbSynthesisFilter;
+use crate::narrowband_body::NarrowbandFrameBody;
+use crate::narrowband_decoder::{
+    NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
+};
+use crate::submode::Submode;
+use crate::wb_synthesis::{synthesise_high_band_frame, HB_FRAME_SAMPLES};
+use crate::wideband::{
+    WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
+};
+use core::fmt;
+
+/// The two reconstructed 8 kHz half-band signals of one wideband frame.
+///
+/// Both are 160-sample (`= NARROWBAND_FRAME_SAMPLES = HB_FRAME_SAMPLES`)
+/// 8 kHz half-band signals. The (gap-documented) QMF synthesis
+/// filterbank recombines them into the 16 kHz wideband PCM.
+#[derive(Debug, Clone)]
+pub struct WidebandFrame {
+    /// Low-band (0–4 kHz) reconstructed signal `x_lb[n]` — the embedded
+    /// narrowband synthesis output.
+    pub low_band: [f64; NARROWBAND_FRAME_SAMPLES],
+    /// High-band (4–8 kHz folded) reconstructed signal `x_hb[n]`.
+    pub high_band: [f64; HB_FRAME_SAMPLES],
+}
+
+/// Errors from [`WidebandDecoder::decode_packet`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WidebandDecodeError {
+    /// The embedded narrowband prefix did not parse, or its mode was not
+    /// a CELP sub-mode (an in-band-signalling / terminator pseudo-frame
+    /// cannot be the low band of a wideband frame).
+    NotNarrowbandLowBand,
+    /// The wideband flag preceding the high-band frame was `0` — there
+    /// is no high-band layer, so this is a plain narrowband packet, not
+    /// a wideband one.
+    NoHighBandLayer,
+    /// The high-band sub-mode is the reserved high-rate slot whose
+    /// per-field bit budget the staged Table 10.1 does not pin.
+    HighBandReserved { mode_id: u8 },
+    /// The embedded narrowband frame failed to decode.
+    Narrowband(NarrowbandDecodeError),
+    /// The high-band frame failed to parse or synthesise.
+    HighBand(WidebandBodyError),
+    /// The high-band excitation codebook binding is a recorded docs gap
+    /// (high-band mode 4).
+    HighBandUndocumented,
+    /// A low-level bit-reader / framing failure.
+    Framing,
+}
+
+impl fmt::Display for WidebandDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WidebandDecodeError::NotNarrowbandLowBand => {
+                write!(f, "wideband decode: embedded low band is not a narrowband CELP frame")
+            }
+            WidebandDecodeError::NoHighBandLayer => {
+                write!(f, "wideband decode: wideband flag 0 — no high-band layer present")
+            }
+            WidebandDecodeError::HighBandReserved { mode_id } => write!(
+                f,
+                "wideband decode: high-band mode {mode_id} is the reserved high-rate slot (not in Table 10.1)"
+            ),
+            WidebandDecodeError::Narrowband(e) => write!(f, "wideband decode: low band: {e}"),
+            WidebandDecodeError::HighBand(e) => write!(f, "wideband decode: high band: {e}"),
+            WidebandDecodeError::HighBandUndocumented => {
+                write!(f, "wideband decode: high-band excitation codebook binding is a docs gap")
+            }
+            WidebandDecodeError::Framing => write!(f, "wideband decode: framing/bit-reader failure"),
+        }
+    }
+}
+
+impl std::error::Error for WidebandDecodeError {}
+
+impl From<NarrowbandDecodeError> for WidebandDecodeError {
+    fn from(e: NarrowbandDecodeError) -> Self {
+        WidebandDecodeError::Narrowband(e)
+    }
+}
+
+impl From<WidebandBodyError> for WidebandDecodeError {
+    fn from(e: WidebandBodyError) -> Self {
+        WidebandDecodeError::HighBand(e)
+    }
+}
+
+/// Stateful wideband (sub-band CELP) decoder.
+///
+/// Holds the embedded [`NarrowbandDecoder`] (low-band state) plus the
+/// high-band [`HbSynthesisFilter`] IIR memory, both carried across
+/// frames. Construct with [`WidebandDecoder::new`], then call
+/// [`WidebandDecoder::decode_packet`] once per wideband packet.
+#[derive(Debug, Clone)]
+pub struct WidebandDecoder {
+    low_band: NarrowbandDecoder,
+    high_band_filter: HbSynthesisFilter,
+}
+
+impl Default for WidebandDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WidebandDecoder {
+    /// A fresh wideband decoder at stream start (zero history in both
+    /// bands).
+    pub fn new() -> Self {
+        Self {
+            low_band: NarrowbandDecoder::new(),
+            high_band_filter: HbSynthesisFilter::new(),
+        }
+    }
+
+    /// Decode one wideband packet into its two reconstructed half-band
+    /// signals.
+    ///
+    /// Walks the embedded narrowband frame (low band) and the high-band
+    /// frame that follows (Table 10.1), advancing both bands' state.
+    pub fn decode_packet(&mut self, packet: &[u8]) -> Result<WidebandFrame, WidebandDecodeError> {
+        let mut reader = BitReader::new(packet);
+
+        // --- Low band: embedded narrowband frame ---
+        let nb_header =
+            NarrowbandFrameHeader::parse(&mut reader).map_err(|_| WidebandDecodeError::Framing)?;
+        let nb_submode = match nb_header.submode {
+            Submode::Celp(s) => s,
+            _ => return Err(WidebandDecodeError::NotNarrowbandLowBand),
+        };
+        let nb_body = NarrowbandFrameBody::parse(&mut reader, &nb_submode)
+            .map_err(|_| WidebandDecodeError::Framing)?;
+        let low_band = self.low_band.decode_frame(&nb_body, &nb_submode)?;
+
+        // --- High band: 4-bit prefix + Table 10.1 body ---
+        let hb_header =
+            WidebandHighBandFrameHeader::parse(&mut reader).map_err(WidebandDecodeError::from)?;
+        if !hb_header.wideband {
+            return Err(WidebandDecodeError::NoHighBandLayer);
+        }
+        let hb_submode = match hb_header.submode {
+            WidebandSubmode::Documented(s) => s,
+            WidebandSubmode::ReservedHighRate(id) => {
+                return Err(WidebandDecodeError::HighBandReserved { mode_id: id })
+            }
+        };
+        let hb_body = WidebandHighBandBody::parse(&mut reader, &hb_submode)
+            .map_err(WidebandDecodeError::from)?;
+        let high_band =
+            synthesise_high_band_frame(&hb_body, &hb_submode, &mut self.high_band_filter)
+                .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
+
+        Ok(WidebandFrame {
+            low_band,
+            high_band,
+        })
+    }
+
+    /// Read-only view of the embedded narrowband decoder (diagnostics).
+    pub fn low_band_decoder(&self) -> &NarrowbandDecoder {
+        &self.low_band
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitreader::BitWriter;
+    use crate::submode::NarrowbandSubmode;
+    use crate::wideband::WIDEBAND_HIGH_BAND_SUBMODES;
+
+    /// Build a wideband packet: an all-ones narrowband mode-`nb` body
+    /// (wideband flag 1) followed by an all-ones high-band mode-`hb`
+    /// frame (wideband flag 1 + 3-bit HB mode ID + body bits all 1).
+    fn wideband_packet(nb: u8, hb: u8) -> Vec<u8> {
+        let nb_submode = NarrowbandSubmode::for_id(nb).expect("valid nb mode");
+        let hb_submode = WIDEBAND_HIGH_BAND_SUBMODES[hb as usize];
+
+        let mut w = BitWriter::new();
+        // NB prefix: wideband flag = 1, 4-bit NB mode ID.
+        w.write_bit(1).unwrap();
+        w.write(u32::from(nb), 4).unwrap();
+        // NB body: every bit 1, total - 5 prefix bits.
+        let nb_body_bits = u32::from(nb_submode.total_bits) - 5;
+        write_ones(&mut w, nb_body_bits);
+
+        // HB prefix: wideband flag = 1, 3-bit HB mode ID.
+        w.write_bit(1).unwrap();
+        w.write(u32::from(hb), 3).unwrap();
+        // HB body: every bit 1, total - 4 prefix bits.
+        let hb_body_bits = u32::from(hb_submode.total_bits) - 4;
+        write_ones(&mut w, hb_body_bits);
+
+        w.into_bytes()
+    }
+
+    fn write_ones(w: &mut BitWriter, mut bits: u32) {
+        // Write `bits` 1-bits, chunked through write() (which takes up to
+        // 32 bits). Use ≤ 16-bit chunks so the all-ones mask never needs
+        // a 32-bit shift.
+        while bits > 0 {
+            let chunk = bits.min(16);
+            let mask = (1u32 << chunk) - 1;
+            w.write(mask, chunk).unwrap();
+            bits -= chunk;
+        }
+    }
+
+    #[test]
+    fn wideband_mode5_nb_plus_mode2_hb_decodes_both_bands() {
+        // NB mode 5 (full fields), HB mode 2 (4 × HbSv10_32, documented).
+        let pkt = wideband_packet(5, 2);
+        let mut dec = WidebandDecoder::new();
+        let frame = dec.decode_packet(&pkt).expect("wideband packet decodes");
+        assert_eq!(frame.low_band.len(), 160);
+        assert_eq!(frame.high_band.len(), 160);
+        for &s in &frame.low_band {
+            assert!(s.is_finite(), "low-band sample not finite");
+        }
+        for &s in &frame.high_band {
+            assert!(s.is_finite(), "high-band sample not finite");
+        }
+    }
+
+    #[test]
+    fn wideband_high_band_silence_mode_yields_zero_high_band() {
+        // NB mode 3 + HB mode 0 (silence): the high band is exactly zero
+        // at stream start (no LSP, no excitation, zero filter history).
+        let pkt = wideband_packet(3, 0);
+        let mut dec = WidebandDecoder::new();
+        let frame = dec.decode_packet(&pkt).expect("decodes");
+        assert!(
+            frame.high_band.iter().all(|&s| s == 0.0),
+            "silence high band should be exactly zero at stream start"
+        );
+    }
+
+    #[test]
+    fn wideband_high_band_mode4_reports_docs_gap() {
+        // HB mode 4's excitation codebook binding is a documented gap.
+        let pkt = wideband_packet(5, 4);
+        let mut dec = WidebandDecoder::new();
+        match dec.decode_packet(&pkt) {
+            Err(WidebandDecodeError::HighBandUndocumented) => {}
+            other => panic!("expected HighBandUndocumented, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wideband_decoder_is_deterministic() {
+        let pkt = wideband_packet(5, 2);
+        let mut a = WidebandDecoder::new();
+        let mut b = WidebandDecoder::new();
+        for _ in 0..4 {
+            let fa = a.decode_packet(&pkt).unwrap();
+            let fb = b.decode_packet(&pkt).unwrap();
+            assert_eq!(fa.low_band, fb.low_band);
+            assert_eq!(fa.high_band, fb.high_band);
+        }
+    }
+
+    #[test]
+    fn high_band_state_carries_across_frames() {
+        // Two consecutive non-silent wideband frames: the high-band IIR
+        // history advances, so the second frame's high band generally
+        // differs from the first.
+        let pkt = wideband_packet(5, 2);
+        let mut dec = WidebandDecoder::new();
+        let f0 = dec.decode_packet(&pkt).unwrap();
+        let f1 = dec.decode_packet(&pkt).unwrap();
+        assert!(
+            f0.high_band != f1.high_band || f0.high_band.iter().all(|&v| v == 0.0),
+            "high-band history should influence the second frame"
+        );
+    }
+}
