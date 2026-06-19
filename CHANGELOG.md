@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r340: **high-band LPC synthesis filter** — new `hb_synthesis`
+  module runs the gain-scaled high-band excitation `e_hb[n]` through the
+  order-8 all-pole synthesis filter `1/A_hb(z)`, producing the high-band
+  8 kHz half-band signal that the QMF synthesis filterbank recombines
+  with the narrowband (low-band) signal into 16 kHz wideband PCM. Per
+  *The Speex Codec Manual* §10.1 the high-band linear prediction is *"very
+  similar to what is done for narrowband"* — the synthesis recurrence
+  `x[n] = e[n] + Σ a[i]·x[n−i]` is identical to the r286 narrowband
+  `SynthesisFilter`, only at the high-band order 8 (`HB_LPC_ORDER`). The
+  IIR history persists across sub-frame and frame boundaries. Consumes
+  the `lpc_from_hb_lsp_q10` order-8 coefficients and the
+  `gain_scaled_hb_innovation_subframe` excitation. Exposes
+  `HbSynthesisFilter` with `process` / `process_subframe`. 7 new tests.
 - Round r340: **gain-scaled high-band excitation** — new
   `gain_scaled_hb_innovation` module folds the reconstructed high-band
   `Excitation gain` factor (`reconstruct_hb_exc_gain`) into the raw
