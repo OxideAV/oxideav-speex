@@ -77,9 +77,29 @@ return `Error::NotImplemented`. What is implemented and tested:
   the exact inverse of the matching reconstruction function at every
   cell.
 
-The end-to-end synthesis path is wired (LSP reconstruction →
+* **Wideband high-band synthesis** — the complete high-band branch of
+  the wideband (sub-band CELP) decode path. The high-band excitation is
+  the gain-scaled innovation `e_hb[n] = g · c_hb[n]`
+  (`gain_scaled_hb_innovation`) — per manual §10.2 there is **no pitch
+  prediction in the high band**, so the §8.4 sum collapses to the
+  innovation alone. That excitation runs through the order-8 high-band
+  LPC synthesis filter `1/A_hb(z)` (`HbSynthesisFilter`, the high-band
+  analogue of the narrowband `SynthesisFilter` at `HB_LPC_ORDER = 8`),
+  and `synthesise_high_band_frame` assembles the per-sub-frame
+  LSP→LPC + excitation + synthesis into the 160-sample high-band 8 kHz
+  half-band signal `x_hb[n]` — the second of the two 8 kHz signals the
+  QMF synthesis filterbank recombines into 16 kHz wideband PCM.
+* **Ultra-wideband framing recursion** — the `UwbFrameLayout` /
+  `SubBandLayer` descriptor captures the embedded, scalable bit-stream
+  structure (manual §2.2 "Embedded wideband structure"): narrowband →
+  wideband → ultra-wideband adds one high-band layer (one 1-bit
+  wideband-flag recursion marker) per step, doubling the reconstructed
+  sample rate (8 / 16 / 32 kHz).
+
+The end-to-end narrowband synthesis path is wired (LSP reconstruction →
 interpolation → LSP→LPC → innovation → synthesis filter) and produces
-stable, input-responsive PCM from a real stream.
+stable, input-responsive PCM from a real stream. The wideband high-band
+branch is likewise wired end-to-end to a reconstructed half-band signal.
 
 ## Not yet supported
 
@@ -103,10 +123,30 @@ stable, input-responsive PCM from a real stream.
   framework `Decoder` endpoints return `Error::NotImplemented` until that
   closes.
 * Encoder.
-* Ultra-wideband framing (no dedicated chapter in the staged manual).
+* **QMF synthesis filterbank** — the final recombination of the low-band
+  (narrowband) + high-band 8 kHz half-band signals into 16 kHz wideband
+  PCM. The staged material provides the 64-tap QMF prototype `h0` as
+  pure data and states structurally that a QMF splits / recombines the
+  bands, but does **not** specify the synthesis filterbank algorithm
+  (polyphase recombination structure, the `h0 → {h0, h1}` analysis /
+  synthesis pair derivation, the 2× interpolation + decimation factors,
+  or the inter-band delay alignment). Recorded docs gap; the high-band
+  branch stops at the reconstructed half-band signal.
+* **Per-sub-frame high-band LSP interpolation** — the high-band
+  synthesis currently uses the frame-level high-band LPC set for all
+  four sub-frames; the per-sub-frame interpolation (the high-band
+  analogue of the narrowband §9.1 path) is a follow-up.
+* **Ultra-wideband high-band bit allocation** — the UWB framing
+  *recursion* is surfaced (`UwbFrameLayout`), but the per-mode UWB
+  high-band bit budget (a "Table 11.x" analogue of Table 10.1 for the
+  8–16 kHz band) is not in the staged manual. Recorded docs gap.
 * Per-mode innovation handling for narrowband modes 1 and 7 and
   high-band mode 4, whose decomposition the staged inventory does not
-  yet uniquely fix.
+  yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither
+  staged high-band codebook shape — `HbSv8_128` (8 samples, 8-bit
+  composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a split
+  matching both the 80-bit budget *and* the 40-sample count, so the
+  binding stays a recorded docs gap.)
 
 ## Usage
 

@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r340: **wideband high-band synthesis assembly + UWB framing
+  recursion** — new `wb_synthesis` module composes the high-band
+  primitives into the complete high-band branch of the wideband decode
+  path: `synthesise_high_band_frame` reconstructs the order-8 high-band
+  LPC (`hb_lpc`), and for each of the four sub-frames decodes +
+  gain-scales the excitation (`e_hb[n] = g·c_hb[n]`, §10.2 no high-band
+  pitch) and runs it through `1/A_hb(z)`, concatenating into the
+  160-sample high-band 8 kHz half-band signal `x_hb[n]` — the second
+  input to the QMF synthesis filterbank. Also adds the `UwbFrameLayout`
+  / `SubBandLayer` typed descriptor for the embedded, scalable framing
+  recursion (§2.2 "Embedded wideband structure"): narrowband →
+  wideband → ultra-wideband adds one high-band layer (one wideband-flag
+  recursion marker) per step, doubling the reconstructed rate
+  (8/16/32 kHz). Exposes `synthesise_high_band_frame`, `UwbFrameLayout`,
+  `SubBandLayer`, `HB_FRAME_SAMPLES`, `HB_SUBFRAMES_PER_FRAME`. New
+  `tests/wb_high_band_synthesis.rs` drives the full chain on a synthetic
+  mode-2 frame (finite, responsive, history-continuous). **Docs gaps**
+  (not fished): (1) the QMF *synthesis* filterbank algorithm (polyphase
+  recombination / `h0→{h0,h1}` pair / 2× factors / delay) is not in the
+  staged manual — only the `h0` prototype is staged as data; (2) the
+  per-sub-frame high-band LSP interpolation primitive is a follow-up
+  (frame-level LPC used for all four sub-frames meanwhile); (3) the
+  per-mode UWB high-band bit allocation (a "Table 11.x" analogue) is not
+  in the staged manual. 9 lib tests + 4 integration tests.
 - Round r340: **high-band LPC synthesis filter** — new `hb_synthesis`
   module runs the gain-scaled high-band excitation `e_hb[n]` through the
   order-8 all-pole synthesis filter `1/A_hb(z)`, producing the high-band

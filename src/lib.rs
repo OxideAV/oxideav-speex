@@ -437,6 +437,7 @@ mod pitch_gain;
 mod signalling;
 mod submode;
 mod synthesis;
+mod wb_synthesis;
 mod wideband;
 
 pub use adaptive_codebook::{
@@ -531,6 +532,10 @@ pub use signalling::{
 };
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
 pub use synthesis::SynthesisFilter;
+pub use wb_synthesis::{
+    synthesise_high_band_frame, SubBandLayer, UwbFrameLayout, HB_FRAME_SAMPLES,
+    HB_SUBFRAMES_PER_FRAME,
+};
 pub use wideband::{
     HighBandSubFrameIndices, WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader,
     WidebandHighBandSubmode, WidebandSubmode, HIGH_BAND_FRAME_PREFIX_BITS,
