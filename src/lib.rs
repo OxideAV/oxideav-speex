@@ -432,6 +432,7 @@ mod lsp;
 mod lsp_interp;
 mod lsp_to_lpc;
 mod narrowband_body;
+mod narrowband_decoder;
 mod packet;
 mod pitch_gain;
 mod signalling;
@@ -523,6 +524,7 @@ pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
     PITCH_PERIOD_MIN,
 };
+pub use narrowband_decoder::{NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES};
 pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use signalling::{
