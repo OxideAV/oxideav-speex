@@ -96,32 +96,58 @@ return `Error::NotImplemented`. What is implemented and tested:
   wideband-flag recursion marker) per step, doubling the reconstructed
   sample rate (8 / 16 / 32 kHz).
 
-The end-to-end narrowband synthesis path is wired (LSP reconstruction →
-interpolation → LSP→LPC → innovation → synthesis filter) and produces
-stable, input-responsive PCM from a real stream. The wideband high-band
-branch is likewise wired end-to-end to a reconstructed half-band signal.
+* **Closed narrowband decode loop** (`NarrowbandDecoder`) — the full
+  §8–§9 per-sub-frame recurrence with the **excitation feedback wired**:
+  LSP reconstruct → interpolate → LSP→LPC, then per sub-frame
+  `p[n]` = gain-scaled adaptive-codebook tap sum (reading the excitation
+  history), `c[n]` = gain-scaled innovation, `e[n] = p[n] + c[n]` pushed
+  back into the [`ExcitationBuffer`] (so the next sub-frame's pitch term
+  is live), and `x[n] = 1/A(z)·e[n]`. Pitch period resolves from
+  whichever Table 9.1 row the mode carries (per-sub-frame fine pitch
+  modes 3..7, frame-level OL pitch modes 1/2/8); silence rings the IIR
+  out on zero excitation. `decode_frame` / `decode_frame_i16` emit the
+  full 160-sample frame with the live pitch path — earlier rounds fed the
+  synthesis filter the innovation alone because the feedback was unwired.
+* **Wideband sub-band decode loop** (`WidebandDecoder`) — walks an
+  embedded wideband packet (manual §10.4: narrowband frame packed first,
+  then the high band) and returns both reconstructed 8 kHz half-band
+  signals (`WidebandFrame { low_band, high_band }`), each band carrying
+  its persistent IIR state across packets.
+* **Top-level packet decoder** (`SpeexDecoder`) — drives the
+  `PacketFrames` iterator through the per-frame decode loops, decoding a
+  whole multi-frame Speex packet to a `Vec<DecodedFrame>` (narrowband
+  PCM, wideband half-band pair, or a control pseudo-frame). One decoder
+  instance handles a stream mixing NB / WB frames with continuous state
+  (a wideband frame's low band *is* an embedded narrowband frame, so the
+  shared narrowband state stays continuous; RFC 5574 §3.1).
+
+The narrowband + wideband decode loops are wired end-to-end and produce
+finite, input-responsive, deterministic PCM from a real `speexenc`
+stream through the top-level `SpeexDecoder`.
 
 ## Not yet supported
 
-* Bit-exact full decode. The scalar excitation-gain quantiser levels
-  are now exact (staged `ol_gain_table` / `exc_gain_quant_scal{1,3}` /
-  `gc_quant_bound` / `fold_quant_bound`), and the reconstructed
-  fixed-codebook gain is now folded into the innovation (the gain ×
-  innovation scaling lands `c[n]` in magnitude-correct float units), and
-  the adaptive-codebook (pitch) contribution `p[n]` is now scaled into
-  the same normalised float signal domain by the staged **Q6**
-  pitch-gain factor (`GAIN_SCALING = 64`), so the two §8.4 contributions
-  finally share one domain, and the float-domain composition step
-  `e[n] = p[n] + c[n]` joining the two scaled contributions is now
-  surfaced as the magnitude-correct `gain_scaled_excitation_subframe`
-  primitive. What remains: that composed `e[n]` is not yet threaded into
-  the end-to-end synthesis path (the `SynthesisFilter` is currently fed
-  the innovation-only excitation, and the float → `i16` excitation-buffer
-  feedback for the next sub-frame's pitch lookup is not yet wired), and
-  the LSP angular-unit / fixed-point domain is not yet pinned by the
-  staged material, so the output is not yet reference-equivalent. The
-  framework `Decoder` endpoints return `Error::NotImplemented` until that
-  closes.
+* Bit-exact full decode. The scalar excitation-gain quantiser levels are
+  exact, the fixed-codebook gain `g = g_frame·g_subf` is folded into the
+  innovation, the Q6 pitch scaling lands `p[n]` in the same float signal
+  domain, and the composed excitation `e[n] = p[n] + c[n]` is now
+  **threaded end-to-end** through the closed `NarrowbandDecoder` loop
+  (the float → `i16` excitation-buffer feedback for the next sub-frame's
+  pitch lookup is wired). What remains for *reference-equivalence* is the
+  **LSP angular-unit / fixed-point domain pin**: the in-repo manual is
+  silent on whether a reconstructed LSP value is the angle `ω`, `cos(ω)`,
+  or a scaled variant, and on the exact Q-format the reference decoder
+  evaluates the cosine series in (recorded docs gap, isolated to the
+  single `lsp_q*_to_radians` helper). Under the current placeholder
+  angular-unit assumption the closed-loop output is finite and
+  responsive but **not magnitude-bounded** — the un-pinned LSP unit can
+  produce an LPC set outside the unit circle, which the now-live
+  excitation feedback amplifies (the earlier innovation-only path masked
+  this because it carried no feedback). Pinning the LSP unit closes both
+  the boundedness and the bit-exactness gap. The framework `Decoder`
+  endpoints return `Error::NotImplemented` until that closes; the
+  free-function `SpeexDecoder` / `NarrowbandDecoder` / `WidebandDecoder`
+  decode paths are the public surface in the meantime.
 * Encoder.
 * **QMF synthesis filterbank** — the final recombination of the low-band
   (narrowband) + high-band 8 kHz half-band signals into 16 kHz wideband
