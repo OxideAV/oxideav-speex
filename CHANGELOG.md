@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r350: **High-band per-sub-frame LSP interpolation** — the
+  wideband high-band synthesis now reconstructs a **separate order-8 LPC
+  set per sub-frame** from the §9.1 four-way linear interpolation of the
+  previous and current frame's high-band LSP vectors, instead of one
+  frame-level set applied to all four sub-frames. Spec basis: *The Speex
+  Codec Manual* §10.1 — the high-band linear prediction is *"very similar
+  to narrowband. The only difference is that we use only 12 bits to
+  encode the high-band LSP's"*; the manual names exactly one difference,
+  so the §9.1 per-sub-frame interpolation applies verbatim to the high
+  band (this resolves the earlier over-cautious "§10 is silent on
+  high-band LSP interpolation" docs-gap note). New `hb_lsp_interp` module
+  (`HbSubFrameLsp`, the high-band analogue of `NbSubFrameLsp`, Q10→Q12
+  exact-integer four-way interpolation with the `prev = curr` first-frame
+  convention); new base-aware per-sub-frame LSP→LPC helpers
+  `lpc_from_hb_subframe_lsp_q12` / `hb_subframe_lpc_set_with_base` (add
+  the pinned HB base vector + `.05`-rad HB `LSP_MARGIN`); new
+  `synthesise_high_band_frame_interp(.., &mut prev_hb_lsp)` synthesis
+  entry that threads the previous frame's high-band LSP for cross-frame
+  continuity. `WidebandDecoder` / `SpeexDecoder` carry the prev-LSP state
+  so the interpolation is continuous across wideband frames; high-band
+  silence frames (no LSP field) leave the previous envelope untouched.
+  The stateless `synthesise_high_band_frame` delegates to the
+  interpolating path with the first-frame convention, reproducing the
+  prior frame-level-LPC behaviour exactly (locked by a consistency
+  test). 13 new lib unit tests + a 4-test `wb_high_band_lsp_interp`
+  integration suite.
 - Round r347: **LSP base-vector / Q-format pin (NB + HB boundedness)** —
   new `lsp_base` module pins the documented Speex LSP linear-init base
   vector (`LSP_LINEAR(i) = .25·i + .25` rad NB; `LSP_LINEAR_HIGH(i) =

@@ -89,6 +89,22 @@ return `Error::NotImplemented`. What is implemented and tested:
   LSP→LPC + excitation + synthesis into the 160-sample high-band 8 kHz
   half-band signal `x_hb[n]` — the second of the two 8 kHz signals the
   QMF synthesis filterbank recombines into 16 kHz wideband PCM.
+* **High-band per-sub-frame LSP interpolation** — the high-band
+  synthesis reconstructs a **separate order-8 LPC set per sub-frame**
+  from the §9.1 four-way linear interpolation of the previous and
+  current frame's high-band LSP vectors (`HbSubFrameLsp`, the high-band
+  analogue of the narrowband `NbSubFrameLsp`; Q10→Q12 exact integer),
+  reconstructed through the base-aware `hb_subframe_lpc_set_with_base`.
+  Spec basis: manual §10.1 states the high-band linear prediction is
+  *"very similar to narrowband. The only difference is that we use only
+  12 bits"* — the manual names exactly one difference, so the §9.1
+  interpolation applies verbatim to the high band. The interpolating
+  entry `synthesise_high_band_frame_interp` threads the previous frame's
+  high-band LSP for cross-frame continuity; `WidebandDecoder` /
+  `SpeexDecoder` carry that state (silence frames leave the previous
+  envelope untouched). The stateless `synthesise_high_band_frame`
+  delegates with the `prev = curr` first-frame convention, reproducing
+  the prior frame-level-LPC behaviour exactly.
 * **Ultra-wideband framing recursion** — the `UwbFrameLayout` /
   `SubBandLayer` descriptor captures the embedded, scalable bit-stream
   structure (manual §2.2 "Embedded wideband structure"): narrowband →
@@ -169,10 +185,6 @@ stream through the top-level `SpeexDecoder`.
   synthesis pair derivation, the 2× interpolation + decimation factors,
   or the inter-band delay alignment). Recorded docs gap; the high-band
   branch stops at the reconstructed half-band signal.
-* **Per-sub-frame high-band LSP interpolation** — the high-band
-  synthesis currently uses the frame-level high-band LPC set for all
-  four sub-frames; the per-sub-frame interpolation (the high-band
-  analogue of the narrowband §9.1 path) is a follow-up.
 * **Ultra-wideband high-band bit allocation** — the UWB framing
   *recursion* is surfaced (`UwbFrameLayout`), but the per-mode UWB
   high-band bit budget (a "Table 11.x" analogue of Table 10.1 for the
