@@ -43,6 +43,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   quantiser output. Exposes `enforce_lsp_margin_radians`,
   `nb/hb_lsp_margin_radians`, and the `*_LSP_MARGIN_Q10` /
   `*_LSP_MARGIN_RADIANS` constants.
+- Round r347: **closed-loop boundedness validation** — new
+  `tests/speex_decoder_fixture.rs::closed_loop_decode_is_non_divergent`
+  drives the real `speexenc` mode-5 (q8) fixture through the top-level
+  `SpeexDecoder` and asserts the closed excitation-feedback loop stays
+  **non-divergent** (finite, frame-to-frame non-growing) with the LSP
+  base vector + `LSP_MARGIN` pinned — the runaway an out-of-band LSP set
+  would produce under live feedback can no longer happen. Output is
+  bounded but not yet at reference *amplitude* (the cosine-series
+  fixed-point Q-format + absolute gain calibration remain a documented
+  docs gap).
 - Round r340: **wideband high-band synthesis assembly + UWB framing
   recursion** — new `wb_synthesis` module composes the high-band
   primitives into the complete high-band branch of the wideband decode

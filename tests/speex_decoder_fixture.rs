@@ -89,6 +89,67 @@ fn top_level_decoder_walks_fixture_to_pcm() {
     );
 }
 
+/// Round r347 boundedness milestone: with the LSP base vector +
+/// `LSP_MARGIN` pinned, the closed-loop decode of the real `speexenc`
+/// mode-5 (q8) fixture stays **non-divergent** across the whole stream —
+/// the live excitation feedback no longer drives the output to runaway
+/// (1e10+) magnitudes that a genuinely unstable LPC set (poles outside
+/// the unit circle) would produce, because every reconstructed LSP angle
+/// is now forced inside the conformant, strictly interlaced band.
+///
+/// The output is not yet at reference *amplitude* (the remaining
+/// cosine-series fixed-point Q-format + the absolute gain calibration are
+/// a documented docs gap, so the synthesis filter sits in a not-yet-
+/// reference envelope and the peak runs above full-scale i16), but it is
+/// **bounded** frame-to-frame rather than growing without limit: the
+/// last-quarter peak does not exceed the first-quarter peak by more than
+/// a small factor. That non-growth is the concrete boundedness signal the
+/// base-vector + margin pin delivers; a regression that un-pinned the LSP
+/// band would send the tail magnitudes orders of magnitude above the head.
+#[test]
+fn closed_loop_decode_is_non_divergent() {
+    let packets = lift_ogg_packets(FIXTURE);
+    let audio = &packets[2..];
+
+    let mut decoder = SpeexDecoder::new();
+    let mut frame_peaks: Vec<f64> = Vec::new();
+    for pkt in audio {
+        for frame in decoder.decode_packet(pkt).expect("packet decodes") {
+            if let DecodedFrame::Narrowband(pcm) = frame {
+                let mut peak = 0.0f64;
+                for &s in pcm.iter() {
+                    assert!(s.is_finite(), "non-finite PCM sample");
+                    peak = peak.max(s.abs());
+                }
+                frame_peaks.push(peak);
+            }
+        }
+    }
+    assert!(frame_peaks.len() >= 40, "fixture should decode many frames");
+
+    // Every frame's peak is finite and far below the runaway range an
+    // unstable (out-of-band LSP) filter would reach within the feedback
+    // loop.
+    let global_peak = frame_peaks.iter().cloned().fold(0.0f64, f64::max);
+    assert!(
+        global_peak.is_finite() && global_peak < 1.0e8,
+        "global peak {global_peak} is in the runaway range — LSP→LPC filter unstable"
+    );
+
+    // Non-growth: the mean peak over the last quarter of the stream is not
+    // dramatically larger than over the first quarter. A divergent filter
+    // would show the tail many orders of magnitude above the head.
+    let n = frame_peaks.len();
+    let q = (n / 4).max(1);
+    let head: f64 = frame_peaks[..q].iter().sum::<f64>() / q as f64;
+    let tail: f64 = frame_peaks[n - q..].iter().sum::<f64>() / q as f64;
+    assert!(
+        tail <= head * 50.0 + 1.0,
+        "tail peak mean {tail} grew {:.1}× over head {head} — filter is diverging",
+        tail / head.max(1.0)
+    );
+}
+
 #[test]
 fn top_level_decoder_is_deterministic() {
     let packets = lift_ogg_packets(FIXTURE);
