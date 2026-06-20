@@ -86,6 +86,7 @@
 
 use crate::codebooks::{HB_LPC_ORDER, NB_LSP_ORDER};
 use crate::hb_lsp::HB_LSP_OUTPUT_Q;
+use crate::hb_lsp_interp::{HbSubFrameLsp, HB_LSP_INTERP_OUTPUT_Q, HB_LSP_SUBFRAMES_PER_FRAME};
 use crate::lsp::NB_LSP_OUTPUT_Q;
 use crate::lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 
@@ -456,6 +457,59 @@ pub fn lpc_from_hb_lsp_delta_q10(
     hb_lsp_to_lpc(&rad)
 }
 
+/// Convert one Q[[`HB_LSP_INTERP_OUTPUT_Q`]] = Q12 interpolated
+/// high-band sub-frame LSP **codebook-delta** vector to its eight
+/// high-band LPC coefficients, **with the pinned high-band base vector
+/// added** and the pinned high-band `LSP_MARGIN` (`.05` rad) safeguard
+/// applied.
+///
+/// The high-band counterpart of [`lpc_from_subframe_lsp_q12`] composed
+/// with the base-aware boundedness of [`lpc_from_hb_lsp_delta_q10`].
+/// Because the interpolation runs on the codebook-delta LSPs and the
+/// base offset is a pure translation, the pinned sub-frame angle is the
+/// interpolated delta plus the **Q12** high-band base (`base_q10 × 4`,
+/// since `HB_LSP_INTERP_OUTPUT_Q = HB_LSP_OUTPUT_Q + 2`).
+pub fn lpc_from_hb_subframe_lsp_q12(
+    lsp_delta_q12: &[i32; HB_LPC_ORDER_OUT],
+) -> [f64; HB_LPC_ORDER_OUT] {
+    // High-band base re-expressed in the Q12 interpolation domain
+    // (Q10 × 4).
+    let base_q10 = crate::lsp_base::hb_lsp_base_q10();
+    let shift = HB_LSP_INTERP_OUTPUT_Q - HB_LSP_OUTPUT_Q; // = 2
+    let mut based = *lsp_delta_q12;
+    for (v, &b) in based.iter_mut().zip(base_q10.iter()) {
+        *v += b << shift;
+    }
+    let mut rad = [0.0_f64; HB_LPC_ORDER_OUT];
+    for (r, &v) in rad.iter_mut().zip(based.iter()) {
+        *r = lsp_qn_to_radians(v, HB_LSP_INTERP_OUTPUT_Q);
+    }
+    crate::lsp_base::enforce_lsp_margin_radians(&mut rad, crate::lsp_base::hb_lsp_margin_radians());
+    hb_lsp_to_lpc(&rad)
+}
+
+/// Convert a whole wideband frame's four interpolated high-band
+/// sub-frame LSP vectors ([`crate::hb_lsp_interp::HbSubFrameLsp`], Q12)
+/// into four high-band LPC coefficient sets **with the pinned base
+/// vector added** — the high-band counterpart of
+/// [`subframe_lpc_set_with_base`] (round r350).
+///
+/// Each of the four 40-sample high-band sub-frames is reconstructed
+/// from its own interpolated LSP set, so the high-band spectral envelope
+/// evolves smoothly across the frame exactly as the narrowband path does
+/// (§9.1, applied to the high band per §10.1 — "the only difference is
+/// the 12 bits"). Sub-frame 4 (index 3) carries the current frame's
+/// high-band LSPs unchanged.
+pub fn hb_subframe_lpc_set_with_base(
+    lsp: &HbSubFrameLsp,
+) -> [[f64; HB_LPC_ORDER_OUT]; HB_LSP_SUBFRAMES_PER_FRAME] {
+    let mut out = [[0.0_f64; HB_LPC_ORDER_OUT]; HB_LSP_SUBFRAMES_PER_FRAME];
+    for (slot, sf) in out.iter_mut().zip(lsp.subframes.iter()) {
+        *slot = lpc_from_hb_subframe_lsp_q12(sf);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +523,68 @@ mod tests {
     fn order_constant_matches_lsp_order() {
         assert_eq!(LPC_ORDER, NB_LSP_ORDER);
         assert_eq!(LPC_ORDER, 10);
+    }
+
+    #[test]
+    fn hb_first_frame_interp_matches_frame_level_lpc() {
+        // Boundedness/consistency invariant: when prev == curr (the
+        // first-frame convention), every interpolated sub-frame LSP set
+        // equals the current frame's LSP set, so each sub-frame's LPC
+        // must equal the frame-level `lpc_from_hb_lsp_delta_q10` result.
+        // This is what lets `synthesise_high_band_frame` (prev = None)
+        // reproduce the earlier frame-level-LPC behaviour exactly.
+        let deltas: [[i32; HB_LPC_ORDER_OUT]; 3] = [
+            [0; HB_LPC_ORDER_OUT],
+            [3, -5, 7, -9, 11, -13, 15, -17],
+            [40, 40, -40, -40, 20, -20, 10, -10],
+        ];
+        for d in &deltas {
+            let frame_level = lpc_from_hb_lsp_delta_q10(d);
+            let sub = HbSubFrameLsp::first_frame(d);
+            let sets = hb_subframe_lpc_set_with_base(&sub);
+            for (s, set) in sets.iter().enumerate() {
+                for i in 0..HB_LPC_ORDER_OUT {
+                    assert!(
+                        approx(set[i], frame_level[i], 1e-12),
+                        "delta {d:?} sub-frame {s} coeff {i}: {} != {}",
+                        set[i],
+                        frame_level[i]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hb_subframe_4_equals_frame_level_curr() {
+        // Sub-frame 4 (index 3) always carries the *current* frame's
+        // LSPs unchanged, regardless of `prev` — so its LPC set equals
+        // the frame-level LPC of `curr`.
+        let prev = [100, -90, 80, -70, 60, -50, 40, -30];
+        let curr = [5, -6, 7, -8, 9, -10, 11, -12];
+        let sub = HbSubFrameLsp::new(&prev, &curr);
+        let sets = hb_subframe_lpc_set_with_base(&sub);
+        let frame_level_curr = lpc_from_hb_lsp_delta_q10(&curr);
+        for i in 0..HB_LPC_ORDER_OUT {
+            assert!(
+                approx(sets[3][i], frame_level_curr[i], 1e-12),
+                "sub-frame 4 coeff {i}: {} != {}",
+                sets[3][i],
+                frame_level_curr[i]
+            );
+        }
+    }
+
+    #[test]
+    fn hb_subframe_lpc_sets_are_all_finite() {
+        let prev = [60, -60, 30, -30, 15, -15, 7, -7];
+        let curr = [-20, 25, -30, 35, -40, 45, -50, 55];
+        let sets = hb_subframe_lpc_set_with_base(&HbSubFrameLsp::new(&prev, &curr));
+        for set in &sets {
+            for &c in set {
+                assert!(c.is_finite());
+            }
+        }
     }
 
     #[test]

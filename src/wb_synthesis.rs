@@ -30,19 +30,30 @@
 //! existing narrowband synthesis path; the final QMF recombination is a
 //! documented docs gap (see "QMF synthesis gap" below).
 //!
-//! ## Per-sub-frame high-band LPC
+//! ## Per-sub-frame high-band LPC (round r350)
 //!
 //! The high-band frame carries a **single** 12-bit LSP MSVQ index
 //! ([`WidebandHighBandBody::lsp_index`]) reconstructed to one order-8
-//! LPC set by [`WidebandHighBandBody::hb_lpc`]. The narrowband path
-//! interpolates the frame LSP across its four sub-frames (§9.1); §10.1
-//! states the high-band LP is *"very similar to narrowband"*, so the
-//! analogous per-sub-frame high-band LSP interpolation is a follow-up.
-//! Until that primitive is staged, this assembly uses the frame-level
-//! high-band LPC set for all four sub-frames — the synthesis chain is
-//! otherwise complete and produces a finite, input-responsive high-band
-//! signal. The per-sub-frame interpolation refines the spectral
-//! envelope within the frame; it does not change the chain's structure.
+//! LSP vector. Per manual §10.1 the high-band linear prediction is
+//! *"very similar to narrowband. The only difference is that we use only
+//! 12 bits"* — the manual names exactly one difference, so the §9.1
+//! per-sub-frame LSP interpolation applies verbatim to the high band.
+//! [`synthesise_high_band_frame_interp`] therefore interpolates the
+//! high-band LSP vector across the four sub-frames
+//! ([`crate::hb_lsp_interp::HbSubFrameLsp`], the high-band analogue of
+//! [`crate::lsp_interp::NbSubFrameLsp`]) and reconstructs a **separate
+//! order-8 LPC set per sub-frame** via
+//! [`crate::lsp_to_lpc::hb_subframe_lpc_set_with_base`], so the
+//! high-band spectral envelope evolves smoothly within the frame exactly
+//! as the narrowband path does. The previous frame's high-band LSP set
+//! is carried by the caller (the wideband decoder) so the interpolation
+//! is continuous across frames.
+//!
+//! [`synthesise_high_band_frame`] is retained as the **single-frame /
+//! stateless** entry: it delegates to the interpolating path with the
+//! first-frame convention (`prev = curr`), which makes every sub-frame
+//! equal to the current LSP set — i.e. the previous frame-level-LPC
+//! behaviour, with no spurious transient at stream start.
 //!
 //! ## QMF synthesis gap (documented, not fished)
 //!
@@ -89,7 +100,9 @@
 
 use crate::codebooks::HB_LPC_ORDER;
 use crate::hb_innovation::{HbInnovationError, HB_SUBFRAME_SAMPLES};
+use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::hb_synthesis::HbSynthesisFilter;
+use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
 use crate::wideband::{WidebandHighBandBody, WidebandHighBandSubmode};
 
 /// Number of high-band sub-frames per 20 ms wideband frame.
@@ -130,18 +143,78 @@ pub const HB_FRAME_SAMPLES: usize = HB_SUBFRAMES_PER_FRAME * HB_SUBFRAME_SAMPLES
 /// synthesis filterbank. For modes 0 / 1 (silence / gain-only) the
 /// high-band excitation is all-zero, so the output rings only from any
 /// residual filter history (zero at stream start).
+///
+/// This **single-frame / stateless** entry delegates to
+/// [`synthesise_high_band_frame_interp`] with the first-frame convention
+/// (`prev = curr`): every sub-frame uses the current frame's LSP set, so
+/// for a one-shot call the result matches the earlier frame-level-LPC
+/// behaviour with no spurious transient. A continuous decoder that wants
+/// per-frame interpolation across the four sub-frames threads the
+/// previous frame's high-band LSP via the `_interp` entry instead.
 pub fn synthesise_high_band_frame(
     body: &WidebandHighBandBody,
     submode: &WidebandHighBandSubmode,
     filter: &mut HbSynthesisFilter,
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
-    // Order-8 high-band LPC for the frame (frame-level LSP; per-sub-frame
-    // interpolation is a follow-up — see module docs). Silence mode 0
-    // skips the LSP field → A_hb(z) = 1 (zero coefficients).
-    let lpc: [f64; HB_LPC_ORDER] = body.hb_lpc(submode).unwrap_or([0.0; HB_LPC_ORDER]);
+    let mut prev = None;
+    synthesise_high_band_frame_interp(body, submode, filter, &mut prev)
+}
+
+/// Synthesise one wideband **high-band** frame with **per-sub-frame LSP
+/// interpolation** (round r350), threading the previous frame's
+/// high-band LSP through `prev_hb_lsp_delta_q10` for cross-frame
+/// continuity.
+///
+/// Identical to [`synthesise_high_band_frame`] except the order-8
+/// high-band LPC is reconstructed **per sub-frame** from the §9.1/§10.1
+/// four-way linear interpolation of the previous and current frame's
+/// high-band LSP codebook-delta vectors
+/// ([`crate::hb_lsp_interp::HbSubFrameLsp`] →
+/// [`crate::lsp_to_lpc::hb_subframe_lpc_set_with_base`]), rather than a
+/// single frame-level set for all four sub-frames.
+///
+/// `prev_hb_lsp_delta_q10` holds the previous frame's reconstructed
+/// high-band LSP codebook-delta vector (Q10, pre-base). On the first
+/// wideband frame (or after a silence frame that transmitted no LSP) it
+/// is `None`, and the interpolation falls back to the first-frame
+/// convention (`prev = curr`). After a frame that transmits an LSP field
+/// this routine updates the slot to the current frame's LSP delta so the
+/// next frame interpolates against it. Silence (mode 0, no LSP field)
+/// leaves the slot untouched — the previous spectral envelope persists,
+/// matching the narrowband silence convention.
+pub fn synthesise_high_band_frame_interp(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    filter: &mut HbSynthesisFilter,
+    prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    // Current frame's reconstructed high-band LSP codebook-delta vector
+    // (Q10, pre-base). Silence mode 0 transmits no LSP field → None.
+    let curr_lsp = body.reconstructed_lsp_q10(submode);
+
+    // Build the four per-sub-frame order-8 LPC sets.
+    //
+    // * LSP transmitted: interpolate prev→curr across the four
+    //   sub-frames (first-frame convention when there is no prev), then
+    //   reconstruct one LPC set per sub-frame with the pinned base.
+    // * No LSP (silence): the absent-envelope convention — A_hb(z) = 1
+    //   (zero coefficients) for all four sub-frames. (The previous LSP
+    //   delta is preserved for the next frame; silence does not update
+    //   the spectral envelope.)
+    let lpc_sets: [[f64; HB_LPC_ORDER]; HB_SUBFRAMES_PER_FRAME] = match curr_lsp {
+        Some(curr) => {
+            let sub_lsp = match *prev_hb_lsp_delta_q10 {
+                Some(prev) => HbSubFrameLsp::new(&prev, &curr),
+                None => HbSubFrameLsp::first_frame(&curr),
+            };
+            hb_subframe_lpc_set_with_base(&sub_lsp)
+        }
+        None => [[0.0; HB_LPC_ORDER]; HB_SUBFRAMES_PER_FRAME],
+    };
 
     let mut out = [0.0f64; HB_FRAME_SAMPLES];
     for sf in 0..HB_SUBFRAMES_PER_FRAME {
+        let lpc = lpc_sets[sf];
         let e_hb = crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body(
             body, submode, sf,
         )?;
@@ -153,6 +226,13 @@ pub fn synthesise_high_band_frame(
         let x = filter.process_subframe(&lpc, &e64);
         out[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES].copy_from_slice(&x);
     }
+
+    // Update the prev-LSP state only when this frame transmitted an LSP
+    // field (silence leaves it untouched).
+    if let Some(curr) = curr_lsp {
+        *prev_hb_lsp_delta_q10 = Some(curr);
+    }
+
     Ok(out)
 }
 

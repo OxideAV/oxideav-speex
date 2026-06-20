@@ -52,7 +52,7 @@ use crate::narrowband_decoder::{
     NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -144,6 +144,12 @@ impl From<WidebandBodyError> for WidebandDecodeError {
 pub struct WidebandDecoder {
     low_band: NarrowbandDecoder,
     high_band_filter: HbSynthesisFilter,
+    /// Previous wideband frame's reconstructed high-band LSP
+    /// codebook-delta vector (Q10, pre-base), carried so the per-frame
+    /// high-band LSP interpolation (§9.1 / §10.1) is continuous across
+    /// frames. `None` at stream start and after a high-band silence
+    /// frame that transmitted no LSP.
+    prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
 }
 
 impl Default for WidebandDecoder {
@@ -159,6 +165,7 @@ impl WidebandDecoder {
         Self {
             low_band: NarrowbandDecoder::new(),
             high_band_filter: HbSynthesisFilter::new(),
+            prev_hb_lsp_delta_q10: None,
         }
     }
 
@@ -195,9 +202,13 @@ impl WidebandDecoder {
         };
         let hb_body = WidebandHighBandBody::parse(&mut reader, &hb_submode)
             .map_err(WidebandDecodeError::from)?;
-        let high_band =
-            synthesise_high_band_frame(&hb_body, &hb_submode, &mut self.high_band_filter)
-                .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
+        let high_band = synthesise_high_band_frame_interp(
+            &hb_body,
+            &hb_submode,
+            &mut self.high_band_filter,
+            &mut self.prev_hb_lsp_delta_q10,
+        )
+        .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
 
         Ok(WidebandFrame {
             low_band,

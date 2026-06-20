@@ -41,7 +41,7 @@ use crate::narrowband_decoder::{
 };
 use crate::packet::{PacketError, PacketFrame, PacketFrames};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
 use crate::wideband::WidebandSubmode;
 use core::fmt;
 
@@ -132,6 +132,10 @@ impl From<NarrowbandDecodeError> for DecodeError {
 pub struct SpeexDecoder {
     narrowband: NarrowbandDecoder,
     high_band_filter: HbSynthesisFilter,
+    /// Previous wideband frame's reconstructed high-band LSP
+    /// codebook-delta vector (Q10, pre-base) for the continuous
+    /// per-frame high-band LSP interpolation (§9.1 / §10.1).
+    prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
 }
 
 impl Default for SpeexDecoder {
@@ -146,6 +150,7 @@ impl SpeexDecoder {
         Self {
             narrowband: NarrowbandDecoder::new(),
             high_band_filter: HbSynthesisFilter::new(),
+            prev_hb_lsp_delta_q10: None,
         }
     }
 
@@ -196,9 +201,13 @@ impl SpeexDecoder {
                         return Err(DecodeError::HighBandReserved { mode_id: id })
                     }
                 };
-                let high_band =
-                    synthesise_high_band_frame(&high_band, &hb_submode, &mut self.high_band_filter)
-                        .map_err(|_| DecodeError::HighBandUndocumented)?;
+                let high_band = synthesise_high_band_frame_interp(
+                    &high_band,
+                    &hb_submode,
+                    &mut self.high_band_filter,
+                    &mut self.prev_hb_lsp_delta_q10,
+                )
+                .map_err(|_| DecodeError::HighBandUndocumented)?;
 
                 Ok(DecodedFrame::Wideband {
                     low_band: Box::new(low_band),
