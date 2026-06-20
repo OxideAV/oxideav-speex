@@ -30,6 +30,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   against reference Speex output additionally requires the cosine-series
   fixed-point evaluation order, which is not pinned by the staged manual
   prose (recorded docs gap).
+- Round r347: **LSP_MARGIN minimum-spacing enforcement** — `lsp_base`
+  now pins the documented Speex `LSP_MARGIN` constant (`.002` rad NB /
+  `.05` rad HB, recorded in
+  `docs/audio/speex/provenance/02-speex-gain-quant.md`) and applies the
+  order-preserving minimum-spacing safeguard
+  (`enforce_lsp_margin_radians`) inside the base-aware NB / HB /
+  per-sub-frame LSP→LPC paths. A forward + backward clamp pass keeps
+  every reconstructed LSP angle strictly inside `[margin, π − margin]`,
+  ascending with ≥ `2·margin` spacing, so the auxiliary-polynomial root
+  split always yields a stable filter even for a degenerate / corrupt
+  quantiser output. Exposes `enforce_lsp_margin_radians`,
+  `nb/hb_lsp_margin_radians`, and the `*_LSP_MARGIN_Q10` /
+  `*_LSP_MARGIN_RADIANS` constants.
 - Round r340: **wideband high-band synthesis assembly + UWB framing
   recursion** — new `wb_synthesis` module composes the high-band
   primitives into the complete high-band branch of the wideband decode

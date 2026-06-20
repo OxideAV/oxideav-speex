@@ -98,6 +98,96 @@ pub const HB_LSP_BASE_SLOPE_Q10: i32 = 320;
 /// (`.75 rad × 1024`).
 pub const HB_LSP_BASE_INTERCEPT_Q10: i32 = 768;
 
+/// Narrowband LSP minimum-spacing margin `LSP_MARGIN`, in Q10-radian
+/// units. Staged float value `.002` rad
+/// (`docs/audio/speex/provenance/02-speex-gain-quant.md`, `nb_celp.c`):
+/// `.002 × 1024 = 2.048`, taken as `2` (the integer-Q10 representation;
+/// the float path uses `.002` exactly — see [`nb_lsp_margin_radians`]).
+pub const NB_LSP_MARGIN_Q10: i32 = 2;
+
+/// High-band LSP minimum-spacing margin `LSP_MARGIN`, in Q10-radian
+/// units. Staged float value `.05` rad (`sb_celp.c`):
+/// `.05 × 1024 = 51.2`, taken as `51`.
+pub const HB_LSP_MARGIN_Q10: i32 = 51;
+
+/// The narrowband `LSP_MARGIN` re-expressed in radians (staged float
+/// form `.002`).
+pub const NB_LSP_MARGIN_RADIANS: f64 = 0.002;
+
+/// The high-band `LSP_MARGIN` re-expressed in radians (staged float
+/// form `.05`).
+pub const HB_LSP_MARGIN_RADIANS: f64 = 0.05;
+
+/// Returns the narrowband LSP minimum-spacing margin in radians
+/// (`.002`, the staged float `LSP_MARGIN`).
+pub const fn nb_lsp_margin_radians() -> f64 {
+    NB_LSP_MARGIN_RADIANS
+}
+
+/// Returns the high-band LSP minimum-spacing margin in radians (`.05`,
+/// the staged float `LSP_MARGIN`).
+pub const fn hb_lsp_margin_radians() -> f64 {
+    HB_LSP_MARGIN_RADIANS
+}
+
+/// Enforce the Speex `LSP_MARGIN` minimum-spacing constraint on an
+/// **ascending** vector of LSP angular frequencies (radians), in place.
+///
+/// Speex's `lsp_enforce_margin` (the `lsp_interpolate` safeguard that
+/// `LSP_MARGIN` parameterises — recorded as a numeric fact in
+/// `docs/audio/speex/provenance/02-speex-gain-quant.md`) guarantees the
+/// reconstructed LSP set stays a **valid, strictly-interlaced** set so
+/// the LSP→LPC auxiliary-polynomial root split (see
+/// [`crate::lsp_to_lpc`]) yields a stable filter:
+///
+/// 1. **forward pass** — clamp `lsp[0]` up to at least `margin`
+///    (off `ω = 0`), then for each `i` raise `lsp[i]` to at least
+///    `lsp[i-1] + 2·margin` (lower spacing);
+/// 2. **backward pass** — clamp `lsp[n-1]` down to at most `π − margin`
+///    (off `ω = π`), then for each `i` (descending) lower `lsp[i]` to at
+///    most `lsp[i+1] − 2·margin` (upper spacing).
+///
+/// The two passes together guarantee every coefficient lands in
+/// `[margin, π − margin]` strictly ascending with at least `2·margin`
+/// spacing — feasible because `n·2·margin ≪ π` for both bands
+/// (NB `10·2·.002 = .04`; HB `8·2·.05 = .8`). For a well-formed frame
+/// whose angles are already inside the band and adequately spaced this
+/// is the identity.
+///
+/// The margin *constant* (`.002` NB / `.05` HB) is the pinned Speex
+/// fact; the clamping procedure itself is the generic order-preserving
+/// safeguard every CELP LSP path applies (companion §"minimum-spacing
+/// enforcement"; the `lsp_to_lpc` module notes "most CELP codecs enforce
+/// `ω_{i+1} − ω_i ≥ Δ_min`").
+pub fn enforce_lsp_margin_radians(lsp: &mut [f64], margin: f64) {
+    if lsp.is_empty() {
+        return;
+    }
+    let pi = core::f64::consts::PI;
+    let n = lsp.len();
+    let gap = 2.0 * margin;
+    // Forward pass: lower bound + lower spacing.
+    if lsp[0] < margin {
+        lsp[0] = margin;
+    }
+    for i in 1..n {
+        let lo = lsp[i - 1] + gap;
+        if lsp[i] < lo {
+            lsp[i] = lo;
+        }
+    }
+    // Backward pass: upper bound + upper spacing.
+    if lsp[n - 1] > pi - margin {
+        lsp[n - 1] = pi - margin;
+    }
+    for i in (0..n - 1).rev() {
+        let hi = lsp[i + 1] - gap;
+        if lsp[i] > hi {
+            lsp[i] = hi;
+        }
+    }
+}
+
 /// The narrowband LSP linear base vector `LSP_LINEAR(i)` expressed in
 /// the Q[`NB_LSP_OUTPUT_Q`] = Q10 radian unit (`256·i + 256` for
 /// `i = 0..10`).
@@ -295,5 +385,102 @@ mod tests {
             let expected = if i == 4 { 100 } else { 0 };
             assert_eq!(b[i] - a[i], expected, "coeff {i}");
         }
+    }
+
+    // ---- LSP_MARGIN minimum-spacing enforcement ----
+
+    /// The staged margin constants match their Q10/float forms.
+    #[test]
+    fn margin_constants_match_staged_values() {
+        assert!((nb_lsp_margin_radians() - 0.002).abs() < 1e-12);
+        assert!((hb_lsp_margin_radians() - 0.05).abs() < 1e-12);
+        // Q10 forms: .002*1024 = 2.048 → 2; .05*1024 = 51.2 → 51.
+        assert_eq!(NB_LSP_MARGIN_Q10, 2);
+        assert_eq!(HB_LSP_MARGIN_Q10, 51);
+    }
+
+    /// A well-formed, well-spaced ascending set is unchanged (identity).
+    #[test]
+    fn margin_is_identity_on_well_spaced_set() {
+        let mut lsp = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5];
+        let before = lsp;
+        enforce_lsp_margin_radians(&mut lsp, 0.002);
+        assert_eq!(lsp, before);
+    }
+
+    /// The first coefficient is pushed up off zero; the last down off π.
+    #[test]
+    fn margin_clamps_band_endpoints() {
+        let pi = core::f64::consts::PI;
+        let mut lsp = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 2.8, 3.0, pi - 0.04, pi];
+        enforce_lsp_margin_radians(&mut lsp, 0.05);
+        assert!(lsp[0] >= 0.05 - 1e-12, "first not clamped up");
+        assert!(lsp[9] <= pi - 0.05 + 1e-12, "last not clamped down");
+    }
+
+    /// A pair closer than `2·margin` is separated to at least `2·margin`,
+    /// preserving order.
+    #[test]
+    fn margin_separates_too_close_pair() {
+        let margin = 0.05;
+        // Coeffs 3 and 4 are only 0.01 apart — far below 2*margin=0.1.
+        let mut lsp = [0.2, 0.4, 0.6, 1.00, 1.01, 1.4, 1.6, 1.8, 2.0, 2.2];
+        enforce_lsp_margin_radians(&mut lsp, margin);
+        // After enforcement every consecutive gap is >= 2*margin (minus
+        // float slack).
+        for i in 1..lsp.len() {
+            assert!(
+                lsp[i] - lsp[i - 1] >= 2.0 * margin - 1e-9,
+                "gap {i} = {} below 2*margin",
+                lsp[i] - lsp[i - 1]
+            );
+        }
+        // Order preserved.
+        for i in 1..lsp.len() {
+            assert!(lsp[i] > lsp[i - 1], "order broken at {i}");
+        }
+    }
+
+    /// Enforcement keeps the whole set strictly inside `(0, π)`,
+    /// ascending with ≥ `2·margin` spacing, even for a degenerate
+    /// near-collapsed input clustered at both band edges.
+    #[test]
+    fn margin_keeps_set_inside_band() {
+        let pi = core::f64::consts::PI;
+        let m = 0.002;
+        // A degenerate near-collapsed set: five clustered near 0, five
+        // clustered near π.
+        let mut lsp = [
+            0.001,
+            0.001,
+            0.002,
+            0.002,
+            0.003,
+            pi - 0.01,
+            pi - 0.005,
+            pi - 0.002,
+            pi - 0.001,
+            pi - 0.0005,
+        ];
+        enforce_lsp_margin_radians(&mut lsp, m);
+        for (i, &w) in lsp.iter().enumerate() {
+            assert!(w > 0.0 && w < pi, "coeff {i} = {w} outside (0, π)");
+            if i > 0 {
+                assert!(w - lsp[i - 1] >= 2.0 * m - 1e-9, "gap {i} below 2*margin");
+            }
+        }
+    }
+
+    /// Empty / single-element inputs do not panic.
+    #[test]
+    fn margin_handles_trivial_lengths() {
+        let mut empty: [f64; 0] = [];
+        enforce_lsp_margin_radians(&mut empty, 0.002);
+        let mut one = [1.5f64];
+        enforce_lsp_margin_radians(&mut one, 0.002);
+        assert_eq!(one, [1.5]);
+        let mut one_low = [0.0001f64];
+        enforce_lsp_margin_radians(&mut one_low, 0.002);
+        assert!(one_low[0] >= 0.002 - 1e-12);
     }
 }

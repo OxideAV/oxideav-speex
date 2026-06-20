@@ -279,11 +279,17 @@ pub fn nb_lsp_with_base_q10(lsp_delta_q10: &[i32; NB_LSP_ORDER]) -> [i32; NB_LSP
 /// per-frame path (round r347).
 ///
 /// This is the base-aware counterpart of [`lpc_from_lsp_q10`]: it first
-/// adds the [`crate::lsp_base`] linear-init base offset, then runs the
-/// Q10→radian→LPC pipeline. The decoder's per-frame LPC reconstruction
-/// uses this so the synthesis filter sees the documented LSP band.
+/// adds the [`crate::lsp_base`] linear-init base offset, then enforces
+/// the pinned `LSP_MARGIN` minimum-spacing safeguard
+/// ([`crate::lsp_base::enforce_lsp_margin_radians`], margin `.002` rad),
+/// then runs the Q10→radian→LPC pipeline. The decoder's per-frame LPC
+/// reconstruction uses this so the synthesis filter sees a documented,
+/// strictly-interlaced LSP set.
 pub fn lpc_from_lsp_delta_q10(lsp_delta_q10: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORDER] {
-    lpc_from_lsp_q10(&nb_lsp_with_base_q10(lsp_delta_q10))
+    let based = nb_lsp_with_base_q10(lsp_delta_q10);
+    let mut rad = lsp_vector_q10_to_radians(&based);
+    crate::lsp_base::enforce_lsp_margin_radians(&mut rad, crate::lsp_base::nb_lsp_margin_radians());
+    lsp_to_lpc(&rad)
 }
 
 /// Convert one Q[[`NB_LSP_INTERP_OUTPUT_Q`]] = Q12 interpolated
@@ -352,7 +358,17 @@ pub fn subframe_lpc_set_with_base(
         for (v, &b) in sf_based.iter_mut().zip(base_q10.iter()) {
             *v += b << shift;
         }
-        *slot = lpc_from_subframe_lsp_q12(&sf_based);
+        // Convert to radians, enforce the pinned LSP_MARGIN spacing
+        // safeguard (`.002` rad), then run the polynomial core.
+        let mut rad = [0.0_f64; NB_LSP_ORDER];
+        for (r, &v) in rad.iter_mut().zip(sf_based.iter()) {
+            *r = lsp_qn_to_radians(v, NB_LSP_INTERP_OUTPUT_Q);
+        }
+        crate::lsp_base::enforce_lsp_margin_radians(
+            &mut rad,
+            crate::lsp_base::nb_lsp_margin_radians(),
+        );
+        *slot = lsp_to_lpc(&rad);
     }
     out
 }
@@ -424,13 +440,20 @@ pub fn hb_lsp_with_base_q10(lsp_delta_q10: &[i32; HB_LPC_ORDER_OUT]) -> [i32; HB
 }
 
 /// Convert a Q10 high-band LSP **codebook-delta** vector to high-band
-/// LPC coefficients **with the pinned base vector added** — the bounded
-/// high-band path (round r347). The base-aware counterpart of
-/// [`lpc_from_hb_lsp_q10`].
+/// LPC coefficients **with the pinned base vector added** and the pinned
+/// high-band `LSP_MARGIN` (`.05` rad) minimum-spacing safeguard applied
+/// — the bounded high-band path (round r347). The base-aware counterpart
+/// of [`lpc_from_hb_lsp_q10`].
 pub fn lpc_from_hb_lsp_delta_q10(
     lsp_delta_q10: &[i32; HB_LPC_ORDER_OUT],
 ) -> [f64; HB_LPC_ORDER_OUT] {
-    lpc_from_hb_lsp_q10(&hb_lsp_with_base_q10(lsp_delta_q10))
+    let based = hb_lsp_with_base_q10(lsp_delta_q10);
+    let mut rad = [0.0_f64; HB_LPC_ORDER_OUT];
+    for (r, &v) in rad.iter_mut().zip(based.iter()) {
+        *r = hb_lsp_q10_to_radians(v);
+    }
+    crate::lsp_base::enforce_lsp_margin_radians(&mut rad, crate::lsp_base::hb_lsp_margin_radians());
+    hb_lsp_to_lpc(&rad)
 }
 
 #[cfg(test)]

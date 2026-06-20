@@ -519,9 +519,11 @@ pub use lsp::{
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
 pub use lsp_base::{
-    add_hb_lsp_base, add_nb_lsp_base, hb_lsp_base_q10, hb_lsp_base_radians, nb_lsp_base_q10,
-    nb_lsp_base_radians, HB_LSP_BASE_INTERCEPT_Q10, HB_LSP_BASE_SLOPE_Q10,
-    NB_LSP_BASE_INTERCEPT_Q10, NB_LSP_BASE_SLOPE_Q10,
+    add_hb_lsp_base, add_nb_lsp_base, enforce_lsp_margin_radians, hb_lsp_base_q10,
+    hb_lsp_base_radians, hb_lsp_margin_radians, nb_lsp_base_q10, nb_lsp_base_radians,
+    nb_lsp_margin_radians, HB_LSP_BASE_INTERCEPT_Q10, HB_LSP_BASE_SLOPE_Q10, HB_LSP_MARGIN_Q10,
+    HB_LSP_MARGIN_RADIANS, NB_LSP_BASE_INTERCEPT_Q10, NB_LSP_BASE_SLOPE_Q10, NB_LSP_MARGIN_Q10,
+    NB_LSP_MARGIN_RADIANS,
 };
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 pub use lsp_to_lpc::{

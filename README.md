@@ -144,10 +144,14 @@ stream through the top-level `SpeexDecoder`.
   small signed codebook delta), no longer relying on the radian-clamp
   fallback. The narrowband decoder loop and the wideband `hb_lpc`
   accessor reconstruct LPC through the bounded base-aware path
-  (`subframe_lpc_set_with_base` / `lpc_from_hb_lsp_delta_q10`). The
-  Q10-radian base vector is exact — both the `LSP_PI = 25736` Q15-domain
-  path and the `M_PI` float path pin the same integers (cross-checked in
-  `lsp_base` tests). What remains for *reference-equivalence* (the
+  (`subframe_lpc_set_with_base` / `lpc_from_hb_lsp_delta_q10`), which
+  also apply the pinned `LSP_MARGIN` minimum-spacing safeguard (`.002`
+  rad NB / `.05` rad HB, `enforce_lsp_margin_radians`) so the LSP set
+  stays strictly interlaced and the resulting filter is always stable.
+  The Q10-radian base vector is exact — both the `LSP_PI = 25736`
+  Q15-domain path and the `M_PI` float path pin the same integers
+  (cross-checked in `lsp_base` tests). What remains for
+  *reference-equivalence* (the
   bit-exactness half) is the exact **cosine-series fixed-point evaluation
   order** the reference decoder uses for `cos(ω)` (Q-precision +
   rounding), which the staged manual prose does not pin — recorded docs
