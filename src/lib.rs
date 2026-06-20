@@ -426,6 +426,7 @@ mod gain_scaled_pitch;
 mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
+mod hb_lsp_interp;
 mod hb_synthesis;
 mod header;
 mod innovation;
@@ -505,6 +506,7 @@ pub use hb_lsp::{
     reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
     HB_LSP_PACKED_BITS, HB_LSP_STAGE_BITS,
 };
+pub use hb_lsp_interp::{HbSubFrameLsp, HB_LSP_INTERP_OUTPUT_Q, HB_LSP_SUBFRAMES_PER_FRAME};
 pub use hb_synthesis::HbSynthesisFilter;
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,
