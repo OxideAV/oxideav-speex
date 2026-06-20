@@ -389,16 +389,21 @@ impl WidebandHighBandBody {
     /// Returns `None` for high-band sub-modes that skip the LSP field
     /// (mode 0 / silence), matching [`Self::reconstructed_lsp_q10`].
     /// As with the narrowband path the returned coefficients are signed
-    /// so the high-band synthesis recurrence adds them directly; the
-    /// numeric LSP fixed-point pin for *bit-exactness* is the same
-    /// recorded docs gap as the narrowband conversion (see
-    /// [`crate::lsp_to_lpc`] module docs).
+    /// so the high-band synthesis recurrence adds them directly.
+    ///
+    /// Round r347: the pinned high-band LSP **base vector**
+    /// (`LSP_LINEAR_HIGH(i)`, recorded in
+    /// `docs/audio/speex/provenance/02-speex-gain-quant.md`) is added via
+    /// [`crate::lpc_from_hb_lsp_delta_q10`] before the conversion, so the
+    /// high-band LSP angles land inside the conformant `(0, π)` band by
+    /// construction — the high-band counterpart of the narrowband
+    /// boundedness pin.
     pub fn hb_lpc(
         &self,
         submode: &WidebandHighBandSubmode,
     ) -> Option<[f64; crate::codebooks::HB_LPC_ORDER]> {
-        let lsp_q10 = self.reconstructed_lsp_q10(submode)?;
-        Some(crate::lsp_to_lpc::lpc_from_hb_lsp_q10(&lsp_q10))
+        let lsp_delta_q10 = self.reconstructed_lsp_q10(submode)?;
+        Some(crate::lsp_to_lpc::lpc_from_hb_lsp_delta_q10(&lsp_delta_q10))
     }
 
     /// Decode the fixed-codebook excitation sub-vector for one

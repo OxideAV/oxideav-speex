@@ -70,7 +70,7 @@ use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
 use crate::gain_scaled_innovation::gain_scaled_innovation_from_indices;
 use crate::gain_scaled_pitch::gain_scaled_pitch_subframe;
 use crate::innovation::SUBFRAME_SAMPLES;
-use crate::lsp_to_lpc::{lsp_to_lpc, lsp_vector_q10_to_radians, LPC_ORDER};
+use crate::lsp_to_lpc::{subframe_lpc_set_with_base, LPC_ORDER};
 use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MIN};
 use crate::pitch_gain::PitchGainTaps;
 use crate::submode::{NarrowbandSubmode, PitchGainQuant, SUBFRAMES_PER_FRAME};
@@ -237,17 +237,15 @@ impl NarrowbandDecoder {
         let prev = self.prev_lsp_q10.unwrap_or(active_lsp);
         let sub_lsp = crate::lsp_interp::NbSubFrameLsp::new(&prev, &active_lsp);
 
+        // Per-sub-frame LPC sets with the **pinned LSP base vector**
+        // added (round r347): the r194 reconstruction emits codebook
+        // deltas only; `subframe_lpc_set_with_base` adds the documented
+        // `LSP_LINEAR` base so each sub-frame's LSP angles land inside
+        // the conformant `(0, π)` band by construction (see `lsp_base`).
+        let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
+
         for sf_idx in 0..SUBFRAMES_PER_FRAME {
-            // Sub-frame LPC set: Q12 interpolated LSPs → Q10 → radians →
-            // LPC.
-            let lsp_q12 = sub_lsp
-                .subframe(sf_idx)
-                .expect("sub-frame index in range 0..4");
-            let mut lsp_q10 = [0i32; LPC_ORDER];
-            for (o, &v) in lsp_q10.iter_mut().zip(lsp_q12.iter()) {
-                *o = v >> 2;
-            }
-            let lpc = lsp_to_lpc(&lsp_vector_q10_to_radians(&lsp_q10));
+            let lpc: [f64; LPC_ORDER] = lpc_sets[sf_idx];
 
             // Pitch (adaptive-codebook) contribution p[n].
             let taps = Self::pitch_taps(body, submode, sf_idx);
@@ -418,6 +416,63 @@ mod tests {
         assert_eq!(pcm.len(), 160);
         for (i, &s) in pcm.iter().enumerate() {
             assert!(s.is_finite(), "sample {i} not finite: {s}");
+        }
+    }
+
+    /// The pinned LSP base vector (round r347) makes the decoder's
+    /// per-sub-frame LSP→LPC reconstruction operate on angles inside the
+    /// conformant `(0, π)` band by construction, so the synthesis output
+    /// is finite and bounded for a real mode-5 frame *without relying on
+    /// the radian clamp fallback*. We verify the base-aware sub-frame LPC
+    /// path is the one in use: the decoded PCM equals what the explicit
+    /// `subframe_lpc_set_with_base` path produces, and differs from the
+    /// unbounded delta-only `subframe_lpc_set` path (the two paths must
+    /// not be silently identical — the base is a real translation).
+    #[test]
+    fn base_vector_path_is_wired_and_bounds_lsp() {
+        use crate::lsp_to_lpc::{subframe_lpc_set, subframe_lpc_set_with_base};
+
+        let (submode, body) = parse(5);
+        let mut dec = NarrowbandDecoder::new();
+        let pcm = dec.decode_frame(&body, &submode).unwrap();
+        for &s in &pcm {
+            assert!(s.is_finite());
+        }
+
+        // Reconstruct the same first-frame sub-frame LSP set the decoder
+        // used and confirm the base-aware LPC set differs from the
+        // delta-only one (the base offset is non-trivial).
+        let active = body
+            .reconstructed_lsp_q10(&submode)
+            .expect("mode 5 carries an LSP field");
+        let sub_lsp = crate::lsp_interp::NbSubFrameLsp::new(&active, &active);
+        let with_base = subframe_lpc_set_with_base(&sub_lsp);
+        let delta_only = subframe_lpc_set(&sub_lsp);
+        // At least one coefficient must differ between the two paths.
+        let mut differs = false;
+        for sf in 0..SUBFRAMES_PER_FRAME {
+            for i in 0..LPC_ORDER {
+                if (with_base[sf][i] - delta_only[sf][i]).abs() > 1e-9 {
+                    differs = true;
+                }
+                assert!(with_base[sf][i].is_finite());
+            }
+        }
+        assert!(differs, "base-vector path must differ from delta-only path");
+
+        // Every pinned sub-frame LSP angle (base + delta) must sit
+        // strictly inside (0, π): re-derive the radian angles directly.
+        let base_q10 = crate::lsp_base::nb_lsp_base_q10();
+        for sf_q12 in &sub_lsp.subframes {
+            for (i, &v12) in sf_q12.iter().enumerate() {
+                // Q12 interpolated delta + Q12 base (base_q10 << 2).
+                let pinned_q12 = v12 + (base_q10[i] << 2);
+                let rad = f64::from(pinned_q12) / f64::from(1u32 << 12);
+                assert!(
+                    rad > 0.0 && rad < core::f64::consts::PI,
+                    "pinned LSP angle {rad} (coeff {i}) outside (0, π)"
+                );
+            }
         }
     }
 

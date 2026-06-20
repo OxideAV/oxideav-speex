@@ -430,6 +430,7 @@ mod hb_synthesis;
 mod header;
 mod innovation;
 mod lsp;
+mod lsp_base;
 mod lsp_interp;
 mod lsp_to_lpc;
 mod narrowband_body;
@@ -517,11 +518,18 @@ pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
+pub use lsp_base::{
+    add_hb_lsp_base, add_nb_lsp_base, hb_lsp_base_q10, hb_lsp_base_radians, nb_lsp_base_q10,
+    nb_lsp_base_radians, HB_LSP_BASE_INTERCEPT_Q10, HB_LSP_BASE_SLOPE_Q10,
+    NB_LSP_BASE_INTERCEPT_Q10, NB_LSP_BASE_SLOPE_Q10,
+};
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
 pub use lsp_to_lpc::{
-    hb_lsp_q10_to_radians, hb_lsp_to_lpc, lpc_from_hb_lsp_q10, lpc_from_lsp_q10,
-    lpc_from_subframe_lsp_q12, lsp_q10_to_radians, lsp_qn_to_radians, lsp_to_lpc,
-    lsp_vector_q10_to_radians, subframe_lpc_set, HB_LPC_ORDER_OUT, LPC_ORDER,
+    hb_lsp_q10_to_radians, hb_lsp_to_lpc, hb_lsp_with_base_q10, lpc_from_hb_lsp_delta_q10,
+    lpc_from_hb_lsp_q10, lpc_from_lsp_delta_q10, lpc_from_lsp_q10, lpc_from_subframe_lsp_q12,
+    lsp_q10_to_radians, lsp_qn_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians,
+    nb_lsp_with_base_q10, subframe_lpc_set, subframe_lpc_set_with_base, HB_LPC_ORDER_OUT,
+    LPC_ORDER,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,

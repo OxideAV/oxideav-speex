@@ -6,12 +6,17 @@
 //! [`oxideav_speex::WidebandHighBandBody::parse`], and verifies that the
 //! new [`oxideav_speex::WidebandHighBandBody::hb_lpc`] accessor composes
 //! the r214 high-band LSP reconstruction with the order-8 LSP→LPC core
-//! and matches a direct [`oxideav_speex::lpc_from_hb_lsp_q10`] call
-//! against the reconstructed Q10 vector. This is the high-band
+//! and matches a direct base-aware
+//! [`oxideav_speex::lpc_from_hb_lsp_delta_q10`] call against the
+//! reconstructed Q10 codebook-delta vector. This is the high-band
 //! counterpart of the narrowband r286 LSP→LPC path.
 
+// Round r347: `hb_lpc` now adds the pinned high-band LSP base vector
+// (`LSP_LINEAR_HIGH`) before conversion, so the accessor tracks the
+// base-aware `lpc_from_hb_lsp_delta_q10` (base + delta), not the
+// delta-only `lpc_from_hb_lsp_q10`.
 use oxideav_speex::{
-    lpc_from_hb_lsp_q10, reconstruct_hb_lsp_q10, BitReader, BitWriter, HbLspStages,
+    lpc_from_hb_lsp_delta_q10, reconstruct_hb_lsp_q10, BitReader, BitWriter, HbLspStages,
     WidebandHighBandBody, WidebandHighBandSubmode, HB_LPC_ORDER, HB_LSP_STAGE_BITS,
     HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
 };
@@ -60,7 +65,7 @@ fn hb_lpc_matches_direct_conversion_for_synthesised_body() {
         stage2: 42,
     })
     .unwrap();
-    let via_direct = lpc_from_hb_lsp_q10(&lsp_q10);
+    let via_direct = lpc_from_hb_lsp_delta_q10(&lsp_q10);
 
     assert_eq!(via_body.len(), HB_LPC_ORDER);
     assert_eq!(via_body, via_direct);
@@ -93,7 +98,7 @@ fn hb_lpc_round_trips_for_every_documented_mode() {
             stage2: s2,
         })
         .unwrap();
-        let via_direct = lpc_from_hb_lsp_q10(&lsp_q10);
+        let via_direct = lpc_from_hb_lsp_delta_q10(&lsp_q10);
 
         assert_eq!(via_body, via_direct, "mode {} mismatch", sm_idx);
         assert_eq!(via_body.len(), HB_LPC_ORDER);

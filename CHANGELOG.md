@@ -8,6 +8,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r347: **LSP base-vector / Q-format pin (NB + HB boundedness)** —
+  new `lsp_base` module pins the documented Speex LSP linear-init base
+  vector (`LSP_LINEAR(i) = .25·i + .25` rad NB; `LSP_LINEAR_HIGH(i) =
+  .3125·i + .75` rad HB) recorded as numeric facts in
+  `docs/audio/speex/provenance/02-speex-gain-quant.md`. The r194 LSP
+  reconstruction emits only the per-stage VQ codebook **deltas**; this
+  round adds the base offset so the reconstructed LSP angles land inside
+  the conformant `(0, π)` band **by construction** rather than via the
+  radian-clamp fallback. The Q10-radian base vector is exact (both the
+  `LSP_PI = 25736` Q15-domain path and the `M_PI` float path pin the
+  same integers — cross-checked in tests). New base-aware LSP→LPC
+  helpers `lpc_from_lsp_delta_q10` / `lpc_from_hb_lsp_delta_q10` /
+  `subframe_lpc_set_with_base` / `nb_lsp_with_base_q10` /
+  `hb_lsp_with_base_q10`; the narrowband decoder loop and the wideband
+  `hb_lpc` accessor now reconstruct LPC through the bounded base-aware
+  path. Exposes `nb_lsp_base_q10`, `hb_lsp_base_q10`,
+  `nb_lsp_base_radians`, `hb_lsp_base_radians`, `add_nb_lsp_base`,
+  `add_hb_lsp_base`, and the slope/intercept constants. This is the
+  boundedness half of the LSP Q-format milestone; full bit-exactness
+  against reference Speex output additionally requires the cosine-series
+  fixed-point evaluation order, which is not pinned by the staged manual
+  prose (recorded docs gap).
 - Round r340: **wideband high-band synthesis assembly + UWB framing
   recursion** — new `wb_synthesis` module composes the high-band
   primitives into the complete high-band branch of the wideband decode

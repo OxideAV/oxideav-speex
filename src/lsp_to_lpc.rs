@@ -257,6 +257,35 @@ pub fn lpc_from_lsp_q10(lsp_q10: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORDER] {
     lsp_to_lpc(&lsp_vector_q10_to_radians(lsp_q10))
 }
 
+/// Add the pinned narrowband LSP **base vector**
+/// ([`crate::lsp_base::nb_lsp_base_q10`]) to a reconstructed Q10
+/// codebook-delta vector, returning the **pinned** LSP angles (the
+/// actual Speex LSP value, base + codebook delta — round r347 scope).
+///
+/// The r194 reconstruction emits only the codebook delta sum; the
+/// staged `LSP_LINEAR(i)` base offset (recorded as a numeric fact in
+/// `docs/audio/speex/provenance/02-speex-gain-quant.md`) is the fixed
+/// vector those deltas refine. Adding it lands every well-formed frame's
+/// LSP angles inside the conformant `(0, π)` band by construction rather
+/// than via the clamp fallback — the boundedness pin this round delivers.
+pub fn nb_lsp_with_base_q10(lsp_delta_q10: &[i32; NB_LSP_ORDER]) -> [i32; NB_LSP_ORDER] {
+    let mut v = *lsp_delta_q10;
+    crate::lsp_base::add_nb_lsp_base(&mut v);
+    v
+}
+
+/// Convert a Q10 narrowband LSP **codebook-delta** vector to LPC
+/// coefficients **with the pinned base vector added** — the bounded
+/// per-frame path (round r347).
+///
+/// This is the base-aware counterpart of [`lpc_from_lsp_q10`]: it first
+/// adds the [`crate::lsp_base`] linear-init base offset, then runs the
+/// Q10→radian→LPC pipeline. The decoder's per-frame LPC reconstruction
+/// uses this so the synthesis filter sees the documented LSP band.
+pub fn lpc_from_lsp_delta_q10(lsp_delta_q10: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORDER] {
+    lpc_from_lsp_q10(&nb_lsp_with_base_q10(lsp_delta_q10))
+}
+
 /// Convert one Q[[`NB_LSP_INTERP_OUTPUT_Q`]] = Q12 interpolated
 /// sub-frame LSP vector to its ten LPC coefficients.
 ///
@@ -293,6 +322,37 @@ pub fn subframe_lpc_set(lsp: &NbSubFrameLsp) -> [[f64; LPC_ORDER]; NB_LSP_SUBFRA
     let mut out = [[0.0_f64; LPC_ORDER]; NB_LSP_SUBFRAMES_PER_FRAME];
     for (slot, sf) in out.iter_mut().zip(lsp.subframes.iter()) {
         *slot = lpc_from_subframe_lsp_q12(sf);
+    }
+    out
+}
+
+/// Convert a whole frame's four interpolated sub-frame LSP vectors into
+/// four LPC sets **with the pinned base vector added** — the bounded
+/// per-sub-frame path (round r347).
+///
+/// The r200 interpolation runs on the **codebook-delta** LSP vectors
+/// (prev / curr deltas) and emits Q12 sub-frame vectors. Because the
+/// linear base offset is identical for `prev` and `curr`, it survives
+/// the interpolation as a pure translation
+/// (`((4−k)(d_p+B) + k(d_c+B))/4 = interp(d_p,d_c) + B`), so the pinned
+/// sub-frame angle is the interpolated delta plus the **Q12** base
+/// (`base_q10 × 4`, since `NB_LSP_INTERP_OUTPUT_Q = NB_LSP_OUTPUT_Q + 2`).
+/// This routine adds that Q12 base to each sub-frame vector before the
+/// LSP→LPC conversion, so every sub-frame's LPC set is reconstructed
+/// from angles inside the conformant `(0, π)` band.
+pub fn subframe_lpc_set_with_base(
+    lsp: &NbSubFrameLsp,
+) -> [[f64; LPC_ORDER]; NB_LSP_SUBFRAMES_PER_FRAME] {
+    // Base re-expressed in the Q12 interpolation domain (Q10 × 4).
+    let base_q10 = crate::lsp_base::nb_lsp_base_q10();
+    let shift = NB_LSP_INTERP_OUTPUT_Q - NB_LSP_OUTPUT_Q; // = 2
+    let mut out = [[0.0_f64; LPC_ORDER]; NB_LSP_SUBFRAMES_PER_FRAME];
+    for (slot, sf) in out.iter_mut().zip(lsp.subframes.iter()) {
+        let mut sf_based = *sf;
+        for (v, &b) in sf_based.iter_mut().zip(base_q10.iter()) {
+            *v += b << shift;
+        }
+        *slot = lpc_from_subframe_lsp_q12(&sf_based);
     }
     out
 }
@@ -351,6 +411,26 @@ pub fn lpc_from_hb_lsp_q10(lsp_q10: &[i32; HB_LPC_ORDER_OUT]) -> [f64; HB_LPC_OR
         *r = hb_lsp_q10_to_radians(v);
     }
     hb_lsp_to_lpc(&rad)
+}
+
+/// Add the pinned high-band LSP **base vector**
+/// ([`crate::lsp_base::hb_lsp_base_q10`]) to a reconstructed Q10
+/// codebook-delta vector, returning the **pinned** high-band LSP angles
+/// (round r347).
+pub fn hb_lsp_with_base_q10(lsp_delta_q10: &[i32; HB_LPC_ORDER_OUT]) -> [i32; HB_LPC_ORDER_OUT] {
+    let mut v = *lsp_delta_q10;
+    crate::lsp_base::add_hb_lsp_base(&mut v);
+    v
+}
+
+/// Convert a Q10 high-band LSP **codebook-delta** vector to high-band
+/// LPC coefficients **with the pinned base vector added** — the bounded
+/// high-band path (round r347). The base-aware counterpart of
+/// [`lpc_from_hb_lsp_q10`].
+pub fn lpc_from_hb_lsp_delta_q10(
+    lsp_delta_q10: &[i32; HB_LPC_ORDER_OUT],
+) -> [f64; HB_LPC_ORDER_OUT] {
+    lpc_from_hb_lsp_q10(&hb_lsp_with_base_q10(lsp_delta_q10))
 }
 
 #[cfg(test)]

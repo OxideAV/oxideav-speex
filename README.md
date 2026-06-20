@@ -133,21 +133,28 @@ stream through the top-level `SpeexDecoder`.
   domain, and the composed excitation `e[n] = p[n] + c[n]` is now
   **threaded end-to-end** through the closed `NarrowbandDecoder` loop
   (the float → `i16` excitation-buffer feedback for the next sub-frame's
-  pitch lookup is wired). What remains for *reference-equivalence* is the
-  **LSP angular-unit / fixed-point domain pin**: the in-repo manual is
-  silent on whether a reconstructed LSP value is the angle `ω`, `cos(ω)`,
-  or a scaled variant, and on the exact Q-format the reference decoder
-  evaluates the cosine series in (recorded docs gap, isolated to the
-  single `lsp_q*_to_radians` helper). Under the current placeholder
-  angular-unit assumption the closed-loop output is finite and
-  responsive but **not magnitude-bounded** — the un-pinned LSP unit can
-  produce an LPC set outside the unit circle, which the now-live
-  excitation feedback amplifies (the earlier innovation-only path masked
-  this because it carried no feedback). Pinning the LSP unit closes both
-  the boundedness and the bit-exactness gap. The framework `Decoder`
-  endpoints return `Error::NotImplemented` until that closes; the
-  free-function `SpeexDecoder` / `NarrowbandDecoder` / `WidebandDecoder`
-  decode paths are the public surface in the meantime.
+  pitch lookup is wired). The **LSP base vector + Q-format** is now
+  **pinned** (round r347, `lsp_base` module): the documented linear-init
+  base vector `LSP_LINEAR(i) = .25·i + .25` rad (NB) / `LSP_LINEAR_HIGH(i)
+  = .3125·i + .75` rad (HB) — recorded as numeric facts in
+  `docs/audio/speex/provenance/02-speex-gain-quant.md` — is added to the
+  r194 codebook-delta reconstruction, so every well-formed frame's LSP
+  angles land **strictly inside the conformant `(0, π)` band by
+  construction** (base `0.25 … 2.5` rad NB / `0.75 … 2.94` rad HB plus a
+  small signed codebook delta), no longer relying on the radian-clamp
+  fallback. The narrowband decoder loop and the wideband `hb_lpc`
+  accessor reconstruct LPC through the bounded base-aware path
+  (`subframe_lpc_set_with_base` / `lpc_from_hb_lsp_delta_q10`). The
+  Q10-radian base vector is exact — both the `LSP_PI = 25736` Q15-domain
+  path and the `M_PI` float path pin the same integers (cross-checked in
+  `lsp_base` tests). What remains for *reference-equivalence* (the
+  bit-exactness half) is the exact **cosine-series fixed-point evaluation
+  order** the reference decoder uses for `cos(ω)` (Q-precision +
+  rounding), which the staged manual prose does not pin — recorded docs
+  gap, isolated to the `lsp_q*_to_radians` / LSP→LPC core. The framework
+  `Decoder` endpoints return `Error::NotImplemented` until that closes;
+  the free-function `SpeexDecoder` / `NarrowbandDecoder` /
+  `WidebandDecoder` decode paths are the public surface in the meantime.
 * Encoder.
 * **QMF synthesis filterbank** — the final recombination of the low-band
   (narrowband) + high-band 8 kHz half-band signals into 16 kHz wideband
