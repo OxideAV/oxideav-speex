@@ -100,7 +100,7 @@ pub const HB_LSP_BASE_INTERCEPT_Q10: i32 = 768;
 
 /// Narrowband LSP minimum-spacing margin `LSP_MARGIN`, in Q10-radian
 /// units. Staged float value `.002` rad
-/// (`docs/audio/speex/provenance/02-speex-gain-quant.md`, `nb_celp.c`):
+/// (`docs/audio/speex/provenance/02-speex-gain-quant.md`):
 /// `.002 × 1024 = 2.048`, taken as `2` (the integer-Q10 representation;
 /// the float path uses `.002` exactly — see [`nb_lsp_margin_radians`]).
 pub const NB_LSP_MARGIN_Q10: i32 = 2;
