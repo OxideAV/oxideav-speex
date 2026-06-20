@@ -106,7 +106,8 @@ pub const HB_LSP_BASE_INTERCEPT_Q10: i32 = 768;
 pub const NB_LSP_MARGIN_Q10: i32 = 2;
 
 /// High-band LSP minimum-spacing margin `LSP_MARGIN`, in Q10-radian
-/// units. Staged float value `.05` rad (`sb_celp.c`):
+/// units. Staged float value `.05` rad
+/// (`docs/audio/speex/provenance/02-speex-gain-quant.md`):
 /// `.05 × 1024 = 51.2`, taken as `51`.
 pub const HB_LSP_MARGIN_Q10: i32 = 51;
 
