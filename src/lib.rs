@@ -417,6 +417,7 @@ mod codebooks;
 mod decoder;
 mod excitation;
 mod fixed_codebook_gain;
+mod forced_pitch_gain;
 mod frame;
 mod gain_reconstruction;
 mod gain_scaled_excitation;
@@ -468,6 +469,10 @@ pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITAT
 pub use fixed_codebook_gain::{
     fixed_codebook_gain_indices, FixedCodebookGainIndices, FrameInnovationGainIndex,
     SubFrameInnovationGainCorrection, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
+};
+pub use forced_pitch_gain::{
+    forced_pitch_coef, forced_pitch_gain_taps, FORCED_PITCH_GAIN_BITS, FORCED_PITCH_GAIN_LEVELS,
+    FORCED_PITCH_GAIN_STEP,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 pub use gain_reconstruction::{
