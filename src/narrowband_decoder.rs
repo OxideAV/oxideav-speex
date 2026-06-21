@@ -182,18 +182,49 @@ impl NarrowbandDecoder {
         }
     }
 
-    /// Resolve the 3-tap pitch gains for sub-frame `sf_idx`. The silence
-    /// regime returns the all-zero taps without consulting a codebook.
+    /// Resolve the pitch gains for sub-frame `sf_idx`, dispatching on
+    /// whichever of the two Table 9.1 pitch-gain rows the sub-mode
+    /// carries (they are mutually exclusive):
+    ///
+    /// * **Per-sub-frame 3-tap VQ** (`Pitch gain` row, modes 2..=7):
+    ///   look up the `(g0, g1, g2)` triple from the sub-frame's VQ index.
+    /// * **Frame-level forced gain** (`OL pitch gain` row = 4 bits,
+    ///   modes 1 and 8): reconstruct the single-centre-tap forced gain
+    ///   from the frame-level 4-bit
+    ///   [`NarrowbandFrameBody::ol_pitch_gain_index`]
+    ///   ([`crate::forced_pitch_gain_taps`]). The same forced taps apply
+    ///   to all four sub-frames (the field is frame-level), mirroring the
+    ///   frame-level open-loop pitch period.
+    /// * **Silence** (mode 0, neither row): the all-zero taps, no
+    ///   codebook consulted.
+    ///
+    /// The two pitch-gain rows are mutually exclusive per Table 9.1: a
+    /// mode that carries the per-sub-frame `Pitch gain` VQ (modes 2..=7)
+    /// has `OL pitch gain` = 0, and the two forced-gain modes (1, 8) have
+    /// `Pitch gain` = 0. The VQ branch is therefore selected by
+    /// `submode.pitch_gain`; the forced branch only fires when there is
+    /// no per-sub-frame VQ *and* the frame carries a forced `OL pitch
+    /// gain` field.
     fn pitch_taps(
         body: &NarrowbandFrameBody,
         submode: &NarrowbandSubmode,
         sf_idx: usize,
     ) -> PitchGainTaps {
         match submode.pitch_gain {
-            PitchGainQuant::None => PitchGainTaps::SILENCE,
-            _ => body.subframes[sf_idx]
+            // Per-sub-frame 3-tap VQ (modes 2..=7).
+            PitchGainQuant::Vq5Bit | PitchGainQuant::Vq7Bit => body.subframes[sf_idx]
                 .pitch_gain_taps(submode)
                 .unwrap_or(PitchGainTaps::SILENCE),
+            // No per-sub-frame VQ: either the frame-level forced gain
+            // (modes 1 / 8, OL pitch gain = 4 bits) or true silence
+            // (mode 0, no pitch field at all).
+            PitchGainQuant::None => {
+                if submode.ol_pitch_gain_bits != 0 {
+                    crate::forced_pitch_gain::forced_pitch_gain_taps(body.ol_pitch_gain_index)
+                } else {
+                    PitchGainTaps::SILENCE
+                }
+            }
         }
     }
 
@@ -582,6 +613,80 @@ mod tests {
                 "mode {} carries both OL and fine pitch",
                 s.mode_id
             );
+        }
+    }
+
+    /// The forced (open-loop) pitch-gain modes (1 and 8) now resolve a
+    /// non-silent pitch tap from the frame-level `OL pitch gain` field —
+    /// before round r356 they fell back to `SILENCE`. The all-ones frame
+    /// sets the 4-bit field to 15 (unit gain → Q6 centre tap 64).
+    #[test]
+    fn forced_pitch_gain_modes_resolve_nonsilent_centre_tap() {
+        for mode in [1u8, 8] {
+            let (submode, body) = parse(mode);
+            assert_eq!(
+                submode.ol_pitch_gain_bits, 4,
+                "mode {mode} should carry a 4-bit OL pitch gain"
+            );
+            assert_eq!(
+                body.ol_pitch_gain_index, 15,
+                "all-ones frame sets the 4-bit field to 15"
+            );
+            for sf in 0..SUBFRAMES_PER_FRAME {
+                let taps = NarrowbandDecoder::pitch_taps(&body, &submode, sf).taps;
+                // Single-centre-tap forced gain: g0 = g2 = 0, g1 = Q6 64.
+                assert_eq!(taps, [0, 64, 0], "mode {mode} sf {sf}");
+            }
+        }
+    }
+
+    /// Mode 0 (true silence — no pitch field at all) still resolves the
+    /// all-zero taps; the forced branch only fires when a frame actually
+    /// carries the `OL pitch gain` field.
+    #[test]
+    fn silence_mode_pitch_taps_stay_silent() {
+        let (submode, body) = parse(0);
+        assert_eq!(submode.ol_pitch_gain_bits, 0);
+        for sf in 0..SUBFRAMES_PER_FRAME {
+            assert_eq!(
+                NarrowbandDecoder::pitch_taps(&body, &submode, sf),
+                PitchGainTaps::SILENCE,
+                "silence sf {sf}"
+            );
+        }
+    }
+
+    /// End-to-end: mode 8 (forced OL pitch gain + documented innovation)
+    /// now feeds a real pitch contribution. Decoding two frames, the
+    /// second frame's adaptive codebook reads the first frame's
+    /// excitation through the forced centre tap, so its output is no
+    /// longer the innovation-only stand-in. Cross-check that a decoder
+    /// with the forced gain zeroed (index 0) produces a *different*
+    /// second frame — proving the forced pitch path is load-bearing.
+    #[test]
+    fn forced_pitch_gain_changes_mode8_second_frame() {
+        let (submode, mut body) = parse(8);
+        // Unit forced gain (all-ones frame → index 15).
+        assert_eq!(body.ol_pitch_gain_index, 15);
+        let mut dec = NarrowbandDecoder::new();
+        let _f0 = dec.decode_frame(&body, &submode).unwrap();
+        let f1_forced = dec.decode_frame(&body, &submode).unwrap();
+
+        // Same stream, but with the forced pitch gain set to 0 (no pitch
+        // contribution). The first frames are identical (empty history →
+        // zero pitch either way), but the second frame must differ once
+        // the forced tap reads the non-zero history.
+        body.ol_pitch_gain_index = 0;
+        let mut dec0 = NarrowbandDecoder::new();
+        let _g0 = dec0.decode_frame(&body, &submode).unwrap();
+        let g1_zero = dec0.decode_frame(&body, &submode).unwrap();
+
+        assert!(
+            f1_forced.iter().zip(g1_zero.iter()).any(|(&a, &b)| a != b),
+            "forced pitch gain should change the second-frame output"
+        );
+        for &s in &f1_forced {
+            assert!(s.is_finite());
         }
     }
 }

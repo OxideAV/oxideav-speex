@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r356: **Forced (open-loop) pitch-gain reconstruction (modes 1 /
+  8)** — narrowband Table 9.1 modes 1 and 8 carry a frame-level 4-bit
+  *forced* pitch-gain field (the `OL pitch gain` row) instead of the
+  per-sub-frame 3-tap pitch-gain VQ. The field was parsed
+  (`NarrowbandFrameBody::ol_pitch_gain_index`) but discarded, so those
+  modes fell back to `PitchGainTaps::SILENCE` and their
+  adaptive-codebook contribution `p[n]` was always zero — only the
+  innovation `c[n]` drove synthesis. New `forced_pitch_gain` module
+  reconstructs the forced coefficient from the numeric law pinned in
+  `docs/audio/speex/provenance/02-speex-gain-quant.md`: decode
+  `pitch_coef = 0.066667 · quant` (`quant ∈ 0..=15`, unit gain at 15).
+  The forced path is a single-tap predictor `p[n] = pitch_coef · e[n−T]`,
+  so the coefficient is expressed as a Q6 centre tap
+  `round(0.066667 · quant · 64)` with zero side taps, reusing the
+  existing §9.2 `gain_scaled_pitch` convolution (which divides the Q6
+  dot product by 64). `NarrowbandDecoder::pitch_taps` now dispatches on
+  the two mutually-exclusive Table 9.1 pitch-gain rows: per-sub-frame VQ
+  (modes 2..=7), frame-level forced gain (modes 1, 8), or true silence
+  (mode 0). New `forced_pitch_coef` / `forced_pitch_gain_taps` public
+  helpers + `FORCED_PITCH_GAIN_{BITS,LEVELS,STEP}` constants. 7 module
+  unit tests + 3 decoder tests (the load-bearing one proves a non-zero
+  forced gain changes the mode-8 second-frame output versus a zeroed
+  gain).
 - Round r350: **High-band per-sub-frame LSP interpolation** — the
   wideband high-band synthesis now reconstructs a **separate order-8 LPC
   set per sub-frame** from the §9.1 four-way linear interpolation of the
