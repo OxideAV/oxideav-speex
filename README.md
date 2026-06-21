@@ -56,6 +56,17 @@ return `Error::NotImplemented`. What is implemented and tested:
   contributions now share one domain, so the §8.4 sum `e[n] = p[n] +
   c[n]` is well-posed. Stream-start and silence-tap cases vanish to
   `0.0`.
+* **Forced (open-loop) pitch gain** — narrowband modes 1 and 8 carry a
+  frame-level 4-bit *forced* pitch-gain field (Table 9.1 `OL pitch gain`
+  row) instead of the per-sub-frame 3-tap VQ. `forced_pitch_gain`
+  reconstructs the coefficient from the `provenance/02` decode law
+  `pitch_coef = 0.066667 · quant` (`quant ∈ 0..=15`, unit gain at 15) and
+  applies it as a single Q6 centre tap `round(0.066667 · quant · 64)`, so
+  the forced path reuses the same §9.2 convolution as the VQ path. The
+  narrowband decoder now dispatches the two mutually-exclusive Table 9.1
+  pitch-gain rows (per-sub-frame VQ for modes 2..=7, forced gain for
+  modes 1/8, silence for mode 0) — modes 1 and 8 previously fell back to
+  silence and produced no pitch contribution.
 * **Float-domain excitation composition** — joins the two gain-scaled
   contributions into the final per-sub-frame excitation `e[n] = p[n] +
   c[n]` (§8.4 / companion §2.3). Because the gain-scaled pitch `p[n]` and
