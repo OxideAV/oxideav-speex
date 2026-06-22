@@ -177,12 +177,31 @@ stream through the top-level `SpeexDecoder`.
   stays strictly interlaced and the resulting filter is always stable.
   The Q10-radian base vector is exact — both the `LSP_PI = 25736`
   Q15-domain path and the `M_PI` float path pin the same integers
-  (cross-checked in `lsp_base` tests). What remains for
-  *reference-equivalence* (the
-  bit-exactness half) is the exact **cosine-series fixed-point evaluation
-  order** the reference decoder uses for `cos(ω)` (Q-precision +
-  rounding), which the staged manual prose does not pin — recorded docs
-  gap, isolated to the `lsp_q*_to_radians` / LSP→LPC core. The framework
+  (cross-checked in `lsp_base` tests).
+
+  The **LSP angular interpretation is now a provenance-confirmed fact**
+  (round r359, `lsp_pi_domain` module), no longer a documented assumption:
+  the codec stores LSP frequencies in an angular domain where the staged
+  constant `LSP_PI = 25736`
+  (`docs/audio/speex/provenance/02-speex-gain-quant.md`) measures `π`, so
+  `ω = v_storage · π / LSP_PI` radians exactly. The new module pins
+  `LSP_PI`, the staged Q15-storage `LSP_LINEAR(i) = (i+1)·2048` /
+  `LSP_LINEAR_HIGH(i) = i·2560 + 6144` base vectors, and the
+  storage↔radian / storage→Q10 conversions, and **cross-checks** that the
+  `LSP_PI`-domain conversion of the storage base vector lands on the same
+  Q10-radian base vector `lsp_base` derived independently from the float
+  `LSP_LINEAR` form (two staged numeric facts pinning one angle). The
+  internal `lsp_q*_to_radians` path's `ω = value / 2^Q rad` is therefore
+  the same angle re-expressed at `2^10` LSB/rad, confirmed rather than
+  assumed.
+
+  What remains for *reference-equivalence* (the bit-exactness half) is the
+  exact **cosine-series fixed-point evaluation order** the reference
+  decoder uses for `cos(ω)` inside the LSP→LPC conversion — Speex
+  evaluates `cos` through a fixed-point `lsp_cos` lookup table +
+  interpolation whose table is not staged — recorded docs gap, isolated to
+  the cosine evaluation and independent of the now-pinned angular unit. The
+  framework
   `Decoder` endpoints return `Error::NotImplemented` until that closes;
   the free-function `SpeexDecoder` / `NarrowbandDecoder` /
   `WidebandDecoder` decode paths are the public surface in the meantime.

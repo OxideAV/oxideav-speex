@@ -434,6 +434,7 @@ mod innovation;
 mod lsp;
 mod lsp_base;
 mod lsp_interp;
+mod lsp_pi_domain;
 mod lsp_to_lpc;
 mod narrowband_body;
 mod narrowband_decoder;
@@ -533,6 +534,10 @@ pub use lsp_base::{
     NB_LSP_MARGIN_RADIANS,
 };
 pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+pub use lsp_pi_domain::{
+    hb_lsp_linear_storage, lsp_storage_to_q10, lsp_storage_to_radians, nb_lsp_linear_storage,
+    radians_to_lsp_storage, LSP_PI,
+};
 pub use lsp_to_lpc::{
     hb_lsp_q10_to_radians, hb_lsp_to_lpc, hb_lsp_with_base_q10, hb_subframe_lpc_set_with_base,
     lpc_from_hb_lsp_delta_q10, lpc_from_hb_lsp_q10, lpc_from_hb_subframe_lsp_q12,

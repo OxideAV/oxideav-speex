@@ -141,6 +141,14 @@ pub fn lsp_q10_to_radians(value: i32) -> f64 {
 /// Sharing one helper across both scales keeps the angular-unit
 /// assumption pinned in a single place: a future docs-gap fill changes
 /// only this function regardless of which Q-format feeds it.
+// The angular interpretation `ω = value / 2^q rad` used here is now a
+// **provenance-confirmed fact**, not an assumption: the codec's LSP
+// angular storage domain measures `π` as `LSP_PI = 25736`
+// (`docs/audio/speex/provenance/02-speex-gain-quant.md`), and the
+// crate's Q10-radian accumulation unit is the same angle re-expressed at
+// `2^10` LSB/rad. [`crate::lsp_pi_domain`] cross-checks that the
+// `LSP_PI`-domain conversion of the staged `LSP_LINEAR` base vector
+// agrees with the Q10-radian base vector to sub-LSB precision.
 pub fn lsp_qn_to_radians(value: i32, q: u32) -> f64 {
     let omega = f64::from(value) / f64::from(1u32 << q);
     // Keep strictly inside (0, π): the auxiliary-polynomial root split

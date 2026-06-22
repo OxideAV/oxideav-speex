@@ -8,6 +8,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r359: **`LSP_PI` angular-domain pin — closes the LSP
+  angular-unit gap.** The Speex decoder stores LSP frequencies in a
+  fixed-point angular domain where the staged constant `LSP_PI = 25736`
+  (`docs/audio/speex/provenance/02-speex-gain-quant.md`, "LSP→LPC
+  reconstruction path constants") measures the angle `π`. Earlier rounds
+  flagged the angular interpretation of a stored LSP value as a
+  *documented assumption* (`lsp_q*_to_radians` treated the stored value as
+  `ω = value / 2^Q` rad without a staged confirmation). New
+  `lsp_pi_domain` module pins this as a **provenance-confirmed fact**:
+  `ω = v_storage · π / LSP_PI` exactly. It exposes `LSP_PI`, the
+  storage↔radian conversions (`lsp_storage_to_radians` /
+  `radians_to_lsp_storage`), the storage→Q10-radian bridge
+  (`lsp_storage_to_q10`), and the Q15-storage `LSP_LINEAR` base vectors
+  (`nb_lsp_linear_storage` = `(i+1)·2048`, `hb_lsp_linear_storage` =
+  `i·2560 + 6144`). Seven module tests cross-check that the
+  `LSP_PI`-domain conversion of the storage base vector lands on the
+  **same** Q10-radian base vector the `lsp_base` module derived
+  independently from the float `LSP_LINEAR` form — two staged numeric
+  facts (`LSP_LINEAR`, `LSP_PI`) pinning one angle, the provenance
+  cross-check that closes the angular-unit half of the bit-exactness gap.
+  `lsp_to_lpc::lsp_qn_to_radians` doc updated to record the conversion as
+  confirmed, not assumed. The remaining bit-exactness gap is now isolated
+  purely to the reference decoder's fixed-point `lsp_cos` lookup-table
+  evaluation order (table not staged) — independent of the now-pinned
+  angular unit.
 - Round r356: **Forced (open-loop) pitch-gain reconstruction (modes 1 /
   8)** — narrowband Table 9.1 modes 1 and 8 carry a frame-level 4-bit
   *forced* pitch-gain field (the `OL pitch gain` row) instead of the
