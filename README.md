@@ -167,6 +167,21 @@ return `Error::NotImplemented`. What is implemented and tested:
   frames with continuous state (a wideband frame's low band *is* an
   embedded narrowband frame, so the shared narrowband state stays
   continuous; RFC 5574 §3.1).
+* **`i16` PCM convenience surface** (round r369) — a single
+  round-to-nearest-and-clamp quantiser (`saturate_i16`) shared by every
+  PCM-out path so the float reconstruction reduces identically wherever
+  the same sample appears. `NarrowbandDecoder::decode_frame_i16` (8 kHz),
+  `WidebandFrame::wideband_pcm_i16` / `WidebandDecoder::decode_packet_i16`
+  (16 kHz), `DecodedFrame::pcm_i16` (band-correct full-rate, `None` for a
+  control frame) with a matching `DecodedFrame::sample_rate_hz`, and
+  `SpeexDecoder::decode_packet_pcm_i16` — the whole-packet flat `Vec<i16>`
+  that concatenates the audio frames and drops the control pseudo-frames.
+* **Header rate accessors** (round r369) — `SpeexHeader::is_narrowband` /
+  `is_wideband` / `is_ultrawideband`, the canonical mode-class rate
+  `mode_sampling_rate_hz` (NB 8 k / WB 16 k / UWB 32 k, §2.2 / §7.3) and
+  `rate_matches_mode` (flags a header whose declared `rate` contradicts
+  its mode class), plus `UwbFrameLayout::for_header_mode` linking the
+  header's mode field to the embedded sub-band recursion descriptor.
 
 The narrowband decode loop and the **full wideband decode-to-16 kHz-PCM
 path** (NB low band + HB synthesis + QMF recombination) are wired
