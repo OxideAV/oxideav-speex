@@ -8,6 +8,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r369: **`UwbFrameLayout::for_header_mode` — header → sub-band
+  framing descriptor.** Maps a `SpeexHeader::mode` field value (`0` /
+  `1` / `2` = the `SPEEX_MODE_NARROWBAND` / `_WIDEBAND` / `_ULTRAWIDEBAND`
+  constants, manual §7.3) to its embedded sub-band recursion layout,
+  returning `None` for the unknown modes `SpeexHeader::is_known_mode`
+  rejects. Links a parsed stream header to the layer-ladder descriptor so
+  a caller can size the embedded recursion depth and the reconstructed
+  rate from the header alone, before walking any packet; a test pins the
+  layout's reconstructed rate against the header's canonical mode-rate.
+
 - Round r369: **Header mode-class accessors + canonical-rate cross-check
   (`SpeexHeader`).** New `is_narrowband` / `is_wideband` /
   `is_ultrawideband` predicates over the `mode` field, plus

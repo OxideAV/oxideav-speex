@@ -293,6 +293,25 @@ impl UwbFrameLayout {
         top: SubBandLayer::UltraWidebandHighBand,
     };
 
+    /// Map a [`crate::SpeexHeader::mode`] field value to its sub-band
+    /// framing layout: `0` → [`Self::NARROWBAND`], `1` → [`Self::WIDEBAND`],
+    /// `2` → [`Self::ULTRA_WIDEBAND`] (the [`crate::header::SPEEX_MODE_NARROWBAND`]
+    /// / `_WIDEBAND` / `_ULTRAWIDEBAND` constants, manual §7.3). Returns
+    /// `None` for an unknown mode — the same set
+    /// [`crate::SpeexHeader::is_known_mode`] accepts.
+    ///
+    /// This links a parsed stream header to the recursion descriptor so a
+    /// caller can size the embedded layer ladder (and the reconstructed
+    /// rate) from the header alone, before walking any packet.
+    pub fn for_header_mode(mode: u32) -> Option<Self> {
+        match mode {
+            crate::header::SPEEX_MODE_NARROWBAND => Some(Self::NARROWBAND),
+            crate::header::SPEEX_MODE_WIDEBAND => Some(Self::WIDEBAND),
+            crate::header::SPEEX_MODE_ULTRAWIDEBAND => Some(Self::ULTRA_WIDEBAND),
+            _ => None,
+        }
+    }
+
     /// The embedded sub-band layers from base (narrowband) up to and
     /// including [`Self::top`], in decode order (the wideband-flag
     /// recursion is walked outermost-first on the wire, but the layers
@@ -445,6 +464,36 @@ mod tests {
                 SubBandLayer::UltraWidebandHighBand
             ]
         );
+    }
+
+    #[test]
+    fn for_header_mode_maps_mode_field_to_layout() {
+        use crate::header::{SPEEX_MODE_NARROWBAND, SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND};
+        assert_eq!(
+            UwbFrameLayout::for_header_mode(SPEEX_MODE_NARROWBAND),
+            Some(UwbFrameLayout::NARROWBAND)
+        );
+        assert_eq!(
+            UwbFrameLayout::for_header_mode(SPEEX_MODE_WIDEBAND),
+            Some(UwbFrameLayout::WIDEBAND)
+        );
+        assert_eq!(
+            UwbFrameLayout::for_header_mode(SPEEX_MODE_ULTRAWIDEBAND),
+            Some(UwbFrameLayout::ULTRA_WIDEBAND)
+        );
+        // Unknown modes have no layout (matches is_known_mode).
+        assert_eq!(UwbFrameLayout::for_header_mode(3), None);
+        assert_eq!(UwbFrameLayout::for_header_mode(7), None);
+        // The layout's reconstructed rate agrees with the header's
+        // canonical mode-rate for every known mode.
+        for (mode, rate) in [
+            (SPEEX_MODE_NARROWBAND, 8_000),
+            (SPEEX_MODE_WIDEBAND, 16_000),
+            (SPEEX_MODE_ULTRAWIDEBAND, 32_000),
+        ] {
+            let layout = UwbFrameLayout::for_header_mode(mode).unwrap();
+            assert_eq!(layout.reconstructed_rate_hz(), rate);
+        }
     }
 
     #[test]
