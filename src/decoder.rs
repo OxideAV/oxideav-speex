@@ -217,6 +217,30 @@ impl SpeexDecoder {
         Ok(out)
     }
 
+    /// Decode a whole packet straight to a flat `i16` PCM buffer,
+    /// concatenating every audio frame's full-rate output and skipping the
+    /// non-audio control pseudo-frames.
+    ///
+    /// Convenience over [`Self::decode_packet`] for the common case of
+    /// driving a homogeneous-rate stream: each [`DecodedFrame`]'s
+    /// [`DecodedFrame::pcm_i16`] is appended in packet order, so a
+    /// narrowband packet yields a flat mono 8 kHz buffer and a wideband
+    /// packet a flat mono 16 kHz buffer. Mixing rate classes within one
+    /// returned buffer is the caller's responsibility — a packet is a
+    /// single sampling-rate class in every conformant Speex stream
+    /// (§7.3), and [`DecodedFrame::sample_rate_hz`] is available on the
+    /// typed [`Self::decode_packet`] output when finer control is needed.
+    pub fn decode_packet_pcm_i16(&mut self, packet: &[u8]) -> Result<Vec<i16>, DecodeError> {
+        let mut pcm = Vec::new();
+        for frame in PacketFrames::new(packet) {
+            let frame = frame?;
+            if let Some(samples) = self.decode_one(frame)?.pcm_i16() {
+                pcm.extend_from_slice(&samples);
+            }
+        }
+        Ok(pcm)
+    }
+
     /// Decode a single already-parsed [`PacketFrame`] to a
     /// [`DecodedFrame`], advancing the relevant decoder state.
     fn decode_one(&mut self, frame: PacketFrame) -> Result<DecodedFrame, DecodeError> {
@@ -476,6 +500,63 @@ mod tests {
             }
             _ => panic!("expected wideband frame"),
         }
+    }
+
+    #[test]
+    fn decode_packet_pcm_i16_equals_flattened_typed_decode() {
+        // The flat convenience must equal the per-frame pcm_i16() output of
+        // the typed decode_packet, concatenated in packet order (the core
+        // contract). Use mode 3 (160 bits = 20 bytes, byte-aligned) so a
+        // byte-concatenation of two frame bodies is a well-formed two-frame
+        // packet.
+        let mut pkt = nb_frame(3);
+        pkt.extend(nb_frame(3));
+
+        let mut dec_flat = SpeexDecoder::new();
+        let flat = dec_flat
+            .decode_packet_pcm_i16(&pkt)
+            .expect("flat decode ok");
+
+        let mut dec_typed = SpeexDecoder::new();
+        let typed = dec_typed.decode_packet(&pkt).expect("typed decode ok");
+        let expected: Vec<i16> = typed.iter().filter_map(|f| f.pcm_i16()).flatten().collect();
+
+        // Two byte-aligned mode-3 frames → 320 flat 8 kHz samples.
+        assert_eq!(flat.len(), 320, "two 160-sample NB frames");
+        assert_eq!(flat, expected, "flat == concatenated per-frame i16");
+    }
+
+    #[test]
+    fn decode_packet_pcm_i16_skips_control_pseudo_frames() {
+        // A leading in-band signalling frame contributes no audio; the
+        // flat output equals only the audio frames' concatenated i16, so it
+        // matches the typed decode with control frames filtered out. The
+        // 6 trailing zero bits after the 10-bit mode-14 frame parse as a
+        // mode-0 silence frame (audio), so this also exercises the "control
+        // dropped, audio kept" split in one packet.
+        let mut w = BitWriter::new();
+        w.write_bit(0).unwrap(); // narrowband flag
+        w.write(14, 4).unwrap(); // mode 14 = in-band signalling
+        w.write(0, 4).unwrap(); // code 0 (perceptual enhancement)
+        w.write_bit(1).unwrap(); // 1-bit payload
+        let pkt = w.into_bytes();
+
+        let mut dec_flat = SpeexDecoder::new();
+        let flat = dec_flat.decode_packet_pcm_i16(&pkt).expect("decodes");
+
+        let mut dec_typed = SpeexDecoder::new();
+        let typed = dec_typed.decode_packet(&pkt).expect("decodes");
+        let control_count = typed
+            .iter()
+            .filter(|f| matches!(f, DecodedFrame::Control))
+            .count();
+        let expected: Vec<i16> = typed.iter().filter_map(|f| f.pcm_i16()).flatten().collect();
+
+        assert!(control_count >= 1, "packet carries a control frame");
+        assert_eq!(
+            flat, expected,
+            "flat output drops control frames, keeps audio"
+        );
     }
 
     #[test]

@@ -8,6 +8,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r369: **Whole-packet flat-`i16` decode convenience
+  (`SpeexDecoder::decode_packet_pcm_i16`).** Decodes a Speex packet
+  straight to a flat `Vec<i16>`, concatenating every audio frame's
+  full-rate output in packet order and skipping the non-audio control
+  pseudo-frames — the natural "decode this packet to playable samples"
+  entry point over the typed [`decode_packet`] output. A narrowband
+  packet yields a flat mono 8 kHz buffer, a wideband packet a flat mono
+  16 kHz buffer (a packet is one sampling-rate class in every conformant
+  Speex stream, §7.3). Tests pin the flat output against the flattened
+  `pcm_i16()` of the typed decode and the control-frame-dropped split.
+
 - Round r369: **`i16` PCM convenience across the wideband + top-level
   decode paths.** The narrowband path already had
   `NarrowbandDecoder::decode_frame_i16`; this round extends the same
