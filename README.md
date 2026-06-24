@@ -135,22 +135,43 @@ return `Error::NotImplemented`. What is implemented and tested:
   out on zero excitation. `decode_frame` / `decode_frame_i16` emit the
   full 160-sample frame with the live pitch path — earlier rounds fed the
   synthesis filter the innovation alone because the feedback was unwired.
+* **QMF synthesis filterbank** (`QmfSynthesis`, round r365) — the final
+  wideband recombination of the two reconstructed 8 kHz half-band signals
+  (low band 0–4 kHz + high band 4–8 kHz folded) into a single 16 kHz
+  wideband PCM stream, the §10 stage earlier rounds stopped short of. The
+  reconstruction is the **classical two-band quadrature-mirror filterbank**
+  (Croisier–Esteban–Galand) driven by the staged 64-tap prototype `h0`
+  (`qmf-filter-h0-float.csv`, surfaced via the new `qmf_h0_float()`
+  accessor) — a textbook multirate-DSP construction, the same clean-room
+  category the staged LSP→LPC trace grants for the LSP polynomial step.
+  Synthesis relations `g0 = 2·h0`, `g1 = -2·(-1)ⁿ·h0`, implemented in
+  **polyphase** form and unit-pinned identical to the direct
+  upsample-filter-sum reference. The prototype is normalised `Σh0 ≈ 1`
+  (`Σh0_even = Σh0_odd ≈ 0.5`), so the factor-2 synthesis gain gives a
+  **unity passband** — a constant low band reconstructs to the same
+  constant. The §10.2 4–8 kHz → 4–0 kHz frequency fold is intrinsic to the
+  `(-1)ⁿ` synthesis modulation. FIR band histories persist across frames
+  for seamless streaming.
 * **Wideband sub-band decode loop** (`WidebandDecoder`) — walks an
   embedded wideband packet (manual §10.4: narrowband frame packed first,
   then the high band) and returns both reconstructed 8 kHz half-band
-  signals (`WidebandFrame { low_band, high_band }`), each band carrying
-  its persistent IIR state across packets.
+  signals **plus the QMF-recombined 16 kHz wideband PCM**
+  (`WidebandFrame { low_band, high_band, wideband_pcm }`), each band
+  carrying its persistent IIR state — and the QMF its FIR history — across
+  packets.
 * **Top-level packet decoder** (`SpeexDecoder`) — drives the
   `PacketFrames` iterator through the per-frame decode loops, decoding a
   whole multi-frame Speex packet to a `Vec<DecodedFrame>` (narrowband
-  PCM, wideband half-band pair, or a control pseudo-frame). One decoder
-  instance handles a stream mixing NB / WB frames with continuous state
-  (a wideband frame's low band *is* an embedded narrowband frame, so the
-  shared narrowband state stays continuous; RFC 5574 §3.1).
+  PCM, wideband half-band pair **+ 16 kHz `wideband_pcm`**, or a control
+  pseudo-frame). One decoder instance handles a stream mixing NB / WB
+  frames with continuous state (a wideband frame's low band *is* an
+  embedded narrowband frame, so the shared narrowband state stays
+  continuous; RFC 5574 §3.1).
 
-The narrowband + wideband decode loops are wired end-to-end and produce
-finite, input-responsive, deterministic PCM from a real `speexenc`
-stream through the top-level `SpeexDecoder`.
+The narrowband decode loop and the **full wideband decode-to-16 kHz-PCM
+path** (NB low band + HB synthesis + QMF recombination) are wired
+end-to-end and produce finite, input-responsive, deterministic PCM from a
+real `speexenc` stream through the top-level `SpeexDecoder`.
 
 ## Not yet supported
 
@@ -206,15 +227,16 @@ stream through the top-level `SpeexDecoder`.
   the free-function `SpeexDecoder` / `NarrowbandDecoder` /
   `WidebandDecoder` decode paths are the public surface in the meantime.
 * Encoder.
-* **QMF synthesis filterbank** — the final recombination of the low-band
-  (narrowband) + high-band 8 kHz half-band signals into 16 kHz wideband
-  PCM. The staged material provides the 64-tap QMF prototype `h0` as
-  pure data and states structurally that a QMF splits / recombines the
-  bands, but does **not** specify the synthesis filterbank algorithm
-  (polyphase recombination structure, the `h0 → {h0, h1}` analysis /
-  synthesis pair derivation, the 2× interpolation + decimation factors,
-  or the inter-band delay alignment). Recorded docs gap; the high-band
-  branch stops at the reconstructed half-band signal.
+* **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
+  **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
+  into 16 kHz wideband PCM via the textbook two-band quadrature-mirror
+  reconstruction from the staged prototype `h0` (see the "QMF synthesis
+  filterbank" entry above). What is *not* pinned by the staged manual is
+  the exact polyphase **delay / phase** convention the reference decoder
+  uses (the inter-band group-delay alignment and the absolute output
+  offset) — these are bit-exactness details, not sample-correctness ones;
+  the sample-correct textbook reconstruction is what ships. Recorded docs
+  gap, isolated to the delay convention.
 * **Ultra-wideband high-band bit allocation** — the UWB framing
   *recursion* is surfaced (`UwbFrameLayout`), but the per-mode UWB
   high-band bit budget (a "Table 11.x" analogue of Table 10.1 for the
