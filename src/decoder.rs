@@ -77,6 +77,46 @@ impl DecodedFrame {
             DecodedFrame::Control => 0,
         }
     }
+
+    /// The frame's full-rate PCM, rounded + saturated to `i16`.
+    ///
+    /// Returns the ready-to-play full-band output for an audio frame —
+    /// the 160-sample 8 kHz narrowband PCM for a [`Self::Narrowband`]
+    /// frame, or the 320-sample 16 kHz QMF-recombined wideband PCM for a
+    /// [`Self::Wideband`] frame — quantised through the crate-wide
+    /// [`crate::saturate_i16`] convention. A [`Self::Control`]
+    /// pseudo-frame carries no audio and yields `None`.
+    ///
+    /// This is the convenience that lets a caller drive the top-level
+    /// [`SpeexDecoder`] and collect playable `i16` PCM without matching on
+    /// the band layout: narrowband frames give mono 8 kHz, wideband frames
+    /// give mono 16 kHz, both already saturated.
+    pub fn pcm_i16(&self) -> Option<Vec<i16>> {
+        match self {
+            DecodedFrame::Narrowband(pcm) => {
+                Some(pcm.iter().map(|&s| crate::saturate_i16(s)).collect())
+            }
+            DecodedFrame::Wideband { wideband_pcm, .. } => Some(
+                wideband_pcm
+                    .iter()
+                    .map(|&s| crate::saturate_i16(s))
+                    .collect(),
+            ),
+            DecodedFrame::Control => None,
+        }
+    }
+
+    /// The frame's full-rate output sampling rate in Hz (`8000` for
+    /// narrowband, `16000` for wideband), or `None` for a control
+    /// pseudo-frame. Pairs with [`Self::pcm_i16`] so a caller knows the
+    /// rate of the samples it just collected.
+    pub fn sample_rate_hz(&self) -> Option<u32> {
+        match self {
+            DecodedFrame::Narrowband(_) => Some(8_000),
+            DecodedFrame::Wideband { .. } => Some(16_000),
+            DecodedFrame::Control => None,
+        }
+    }
 }
 
 /// Errors from [`SpeexDecoder::decode_packet`].
@@ -398,5 +438,65 @@ mod tests {
                 _ => panic!("expected wideband frames"),
             }
         }
+    }
+
+    #[test]
+    fn narrowband_frame_pcm_i16_matches_saturated_f64_at_8khz() {
+        let pkt = nb_frame(5);
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let frame = &frames[0];
+        let pcm = frame.pcm_i16().expect("audio frame yields PCM");
+        assert_eq!(pcm.len(), 160);
+        assert_eq!(frame.sample_rate_hz(), Some(8_000));
+        match frame {
+            DecodedFrame::Narrowband(f64_pcm) => {
+                for (i, (&q, &f)) in pcm.iter().zip(f64_pcm.iter()).enumerate() {
+                    assert_eq!(q, crate::saturate_i16(f), "sample {i}");
+                }
+            }
+            _ => panic!("expected narrowband frame"),
+        }
+    }
+
+    #[test]
+    fn wideband_frame_pcm_i16_is_16khz_320_samples() {
+        let pkt = wb_frame(5, 2);
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let frame = &frames[0];
+        let pcm = frame.pcm_i16().expect("audio frame yields PCM");
+        assert_eq!(pcm.len(), 320, "wideband i16 PCM is the 16 kHz full band");
+        assert_eq!(frame.sample_rate_hz(), Some(16_000));
+        match frame {
+            DecodedFrame::Wideband { wideband_pcm, .. } => {
+                for (i, (&q, &f)) in pcm.iter().zip(wideband_pcm.iter()).enumerate() {
+                    assert_eq!(q, crate::saturate_i16(f), "sample {i}");
+                }
+            }
+            _ => panic!("expected wideband frame"),
+        }
+    }
+
+    #[test]
+    fn control_frame_has_no_pcm_or_sample_rate() {
+        // In-band signalling frame (mode 14, code 0 = perceptual
+        // enhancement on/off, 1-bit payload) decodes to a Control
+        // pseudo-frame carrying no audio.
+        let mut w = BitWriter::new();
+        w.write_bit(0).unwrap(); // narrowband flag
+        w.write(14, 4).unwrap(); // mode 14 = in-band signalling
+        w.write(0, 4).unwrap(); // code 0
+        w.write_bit(1).unwrap(); // 1-bit payload
+        let pkt = w.into_bytes();
+
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let control = frames
+            .iter()
+            .find(|f| matches!(f, DecodedFrame::Control))
+            .expect("an in-band signalling control frame is present");
+        assert!(control.pcm_i16().is_none());
+        assert_eq!(control.sample_rate_hz(), None);
     }
 }

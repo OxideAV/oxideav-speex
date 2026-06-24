@@ -78,6 +78,25 @@ pub struct WidebandFrame {
     pub wideband_pcm: [f64; QMF_WIDEBAND_FRAME],
 }
 
+impl WidebandFrame {
+    /// The QMF-recombined 16 kHz wideband PCM, rounded + saturated to
+    /// `i16`.
+    ///
+    /// Convenience over the `f64` [`Self::wideband_pcm`] field that
+    /// applies the crate-wide [`crate::saturate_i16`] rounding convention
+    /// (round-to-nearest, clamp to `[i16::MIN, i16::MAX]`) — the same
+    /// quantiser the narrowband [`NarrowbandDecoder::decode_frame_i16`]
+    /// path uses, so a low-band-only sample reduces identically whether it
+    /// is read from the narrowband or the wideband output.
+    pub fn wideband_pcm_i16(&self) -> [i16; QMF_WIDEBAND_FRAME] {
+        let mut out = [0i16; QMF_WIDEBAND_FRAME];
+        for (o, &s) in out.iter_mut().zip(self.wideband_pcm.iter()) {
+            *o = crate::narrowband_decoder::saturate_i16(s);
+        }
+        out
+    }
+}
+
 /// Errors from [`WidebandDecoder::decode_packet`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidebandDecodeError {
@@ -230,6 +249,23 @@ impl WidebandDecoder {
         })
     }
 
+    /// Decode one wideband packet straight to rounded, saturated `i16`
+    /// 16 kHz wideband PCM.
+    ///
+    /// Convenience over [`Self::decode_packet`] that returns only the
+    /// QMF-recombined 320-sample 16 kHz output, quantised through the
+    /// crate-wide [`crate::saturate_i16`] convention (the same one the
+    /// narrowband [`NarrowbandDecoder::decode_frame_i16`] path uses). The
+    /// decoder's internal half-band IIR / excitation / QMF state advances
+    /// in full `f64` precision regardless, so the `i16` reduction affects
+    /// only the returned PCM, not the carried-across-frame state.
+    pub fn decode_packet_i16(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<[i16; QMF_WIDEBAND_FRAME], WidebandDecodeError> {
+        Ok(self.decode_packet(packet)?.wideband_pcm_i16())
+    }
+
     /// Read-only view of the embedded narrowband decoder (diagnostics).
     pub fn low_band_decoder(&self) -> &NarrowbandDecoder {
         &self.low_band
@@ -303,6 +339,59 @@ mod tests {
             frame.wideband_pcm.iter().any(|&s| s != 0.0),
             "recombined wideband PCM should be non-silent"
         );
+    }
+
+    #[test]
+    fn wideband_pcm_i16_matches_saturated_f64_path() {
+        // The i16 convenience must be exactly saturate_i16() of the f64
+        // wideband PCM, and the decoder's carried state must be unaffected
+        // by which output form the caller reads. Decode the same packet on
+        // two fresh decoders, reading f64 from one and i16 from the other.
+        let pkt = wideband_packet(5, 2);
+
+        let mut dec_f = WidebandDecoder::new();
+        let frame = dec_f.decode_packet(&pkt).expect("decodes");
+        let via_frame = frame.wideband_pcm_i16();
+
+        let mut dec_i = WidebandDecoder::new();
+        let direct = dec_i.decode_packet_i16(&pkt).expect("decodes");
+
+        assert_eq!(via_frame.len(), 320);
+        for (i, ((&f, &q_frame), &q_direct)) in frame
+            .wideband_pcm
+            .iter()
+            .zip(via_frame.iter())
+            .zip(direct.iter())
+            .enumerate()
+        {
+            assert_eq!(q_frame, crate::saturate_i16(f), "frame method sample {i}");
+            assert_eq!(q_direct, crate::saturate_i16(f), "direct method sample {i}");
+        }
+    }
+
+    #[test]
+    fn wideband_pcm_i16_saturates_out_of_range_samples() {
+        // The saturation clamp pins extreme f64 values into i16 range.
+        let frame = WidebandFrame {
+            low_band: [0.0; NARROWBAND_FRAME_SAMPLES],
+            high_band: [0.0; HB_FRAME_SAMPLES],
+            wideband_pcm: {
+                let mut p = [0.0; QMF_WIDEBAND_FRAME];
+                p[0] = 1.0e9; // far above i16::MAX
+                p[1] = -1.0e9; // far below i16::MIN
+                p[2] = 0.5; // ties-away-from-zero rounds to 1
+                p[3] = -0.5; // rounds to -1
+                p
+            },
+        };
+        let q = frame.wideband_pcm_i16();
+        assert_eq!(q[0], i16::MAX);
+        assert_eq!(q[1], i16::MIN);
+        assert_eq!(q[2], 1);
+        assert_eq!(q[3], -1);
+        for &s in &q[4..] {
+            assert_eq!(s, 0);
+        }
     }
 
     #[test]

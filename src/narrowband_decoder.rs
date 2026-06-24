@@ -378,8 +378,16 @@ fn round_to_i16(v: f32) -> i16 {
 }
 
 /// Round to nearest and saturate an `f64` into the signed-16-bit range.
+///
+/// The single rounding convention shared by every `*_i16` PCM
+/// convenience in the crate (narrowband [`NarrowbandDecoder::decode_frame_i16`],
+/// the wideband 16 kHz path, and the top-level packet decoder): round to
+/// nearest (ties away from zero, per [`f64::round`]) then clamp to
+/// `[i16::MIN, i16::MAX]`. Centralising it here keeps the narrowband and
+/// wideband `i16` outputs bit-identical wherever the same `f64` sample
+/// appears.
 #[inline]
-fn saturate_i16(v: f64) -> i16 {
+pub fn saturate_i16(v: f64) -> i16 {
     let r = v.round();
     if r >= f64::from(i16::MAX) {
         i16::MAX

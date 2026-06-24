@@ -550,7 +550,9 @@ pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
     PITCH_PERIOD_MIN,
 };
-pub use narrowband_decoder::{NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES};
+pub use narrowband_decoder::{
+    saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
+};
 pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};

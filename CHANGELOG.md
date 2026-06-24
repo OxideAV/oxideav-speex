@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r369: **`i16` PCM convenience across the wideband + top-level
+  decode paths.** The narrowband path already had
+  `NarrowbandDecoder::decode_frame_i16`; this round extends the same
+  rounding/saturation convention to the rest of the public surface so a
+  caller can collect ready-to-play `i16` PCM without re-implementing the
+  float→`i16` quantiser. The previously-private narrowband `saturate_i16`
+  (round-to-nearest, clamp to `[i16::MIN, i16::MAX]`) is promoted to a
+  crate-root `pub fn` and reused everywhere: `WidebandFrame::wideband_pcm_i16`
+  + `WidebandDecoder::decode_packet_i16` quantise the 320-sample 16 kHz
+  wideband output, and `DecodedFrame::pcm_i16` returns the band-correct
+  full-rate PCM (mono 8 kHz for a narrowband frame, mono 16 kHz for a
+  wideband frame, `None` for a control pseudo-frame) with a matching
+  `DecodedFrame::sample_rate_hz`. Centralising one quantiser keeps a
+  low-band sample bit-identical whether it is read from the narrowband or
+  the wideband `i16` output. Tests pin every new path against
+  `saturate_i16` of the `f64` reference, the saturation clamp at the
+  `i16` extremes (ties-away rounding), and the control-frame `None` case.
+
 - Round r365: **QMF synthesis filterbank — wideband half-band → 16 kHz
   PCM recombination (`qmf` module).** New `QmfSynthesis` recombines the
   two reconstructed 8 kHz half-band signals (low band 0–4 kHz + high
