@@ -278,6 +278,100 @@ mod tests {
         assert!(out.iter().all(|&v| v == 0.0));
     }
 
+    /// Two-band QMF **analysis** reference (test-only; the decoder needs
+    /// only synthesis). Splits a 16 kHz signal `x` into the two 8 kHz
+    /// half-bands: `lb = downsample2(h0 * x)`, `hb = downsample2(h1 * x)`
+    /// with `h1[n] = (-1)^n h0[n]`. `x` is indexed with zero extension for
+    /// negative indices (start-of-stream).
+    fn analysis(x: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let h0 = qmf_h0_float();
+        let n = x.len();
+        let mut lb = Vec::with_capacity(n / 2);
+        let mut hb = Vec::with_capacity(n / 2);
+        // Keep every other full-rate output sample (decimate by 2).
+        let mut m = 0;
+        while m < n {
+            let mut acc_l = 0.0f64;
+            let mut acc_h = 0.0f64;
+            for (k, &h) in h0.iter().enumerate() {
+                if k > m {
+                    break;
+                }
+                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                acc_l += h * x[m - k];
+                acc_h += sign * h * x[m - k];
+            }
+            lb.push(acc_l);
+            hb.push(acc_h);
+            m += 2;
+        }
+        (lb, hb)
+    }
+
+    /// **Perfect-reconstruction** pin: a 16 kHz full-band signal pushed
+    /// through QMF analysis (split → 2 half-bands) and back through the
+    /// synthesis filterbank recovers the **original signal up to the
+    /// filterbank group delay** in the steady-state region. This is the
+    /// decisive sample-correctness check for the two-band QMF: the
+    /// alias-cancellation + amplitude-distortion-free property of the
+    /// CEG mirror relation must hold for the staged prototype.
+    #[test]
+    fn analysis_synthesis_perfect_reconstruction() {
+        // Build a multi-frame 16 kHz test signal with both low- and
+        // high-frequency content so both bands are exercised.
+        let total = 4 * QMF_WIDEBAND_FRAME;
+        let mut x = vec![0.0f64; total];
+        for (i, s) in x.iter_mut().enumerate() {
+            let t = i as f64;
+            *s = (t * 0.05).sin() + 0.5 * (t * 0.9).sin() + 0.3 * (t * 1.7).cos();
+        }
+        // Analysis → two half-bands (length total/2 each).
+        let (lb, hb) = analysis(&x);
+
+        // Synthesis frame-by-frame through the stateful bank.
+        let mut q = QmfSynthesis::new();
+        let mut y = vec![0.0f64; total];
+        let frames = (lb.len()) / QMF_HALF_BAND_FRAME;
+        for f in 0..frames {
+            let mut lbf = [0.0f64; QMF_HALF_BAND_FRAME];
+            let mut hbf = [0.0f64; QMF_HALF_BAND_FRAME];
+            lbf.copy_from_slice(&lb[f * QMF_HALF_BAND_FRAME..(f + 1) * QMF_HALF_BAND_FRAME]);
+            hbf.copy_from_slice(&hb[f * QMF_HALF_BAND_FRAME..(f + 1) * QMF_HALF_BAND_FRAME]);
+            let out = q.reconstruct_frame(&lbf, &hbf);
+            y[f * QMF_WIDEBAND_FRAME..(f + 1) * QMF_WIDEBAND_FRAME].copy_from_slice(&out);
+        }
+
+        // The analysis-synthesis cascade delays by ≈ QMF_FILTER_LEN-1
+        // samples. Search the small delay window for the offset that best
+        // aligns y to x, then assert the steady-state error is tiny.
+        let mut best_delay = 0usize;
+        let mut best_err = f64::INFINITY;
+        for d in 0..QMF_FILTER_LEN {
+            let mut err = 0.0f64;
+            let lo = QMF_FILTER_LEN;
+            let hi = total - QMF_FILTER_LEN;
+            for i in lo..hi {
+                if i + d < total {
+                    let e = y[i + d] - x[i];
+                    err += e * e;
+                }
+            }
+            if err < best_err {
+                best_err = err;
+                best_delay = d;
+            }
+        }
+        // Energy of the reference in the same window for a relative bound.
+        let lo = QMF_FILTER_LEN;
+        let hi = total - QMF_FILTER_LEN;
+        let ref_energy: f64 = x[lo..hi].iter().map(|&s| s * s).sum();
+        let rel = best_err / ref_energy;
+        assert!(
+            rel < 1e-3,
+            "QMF perfect reconstruction failed: rel err {rel} at delay {best_delay}"
+        );
+    }
+
     /// Polyphase output equals the direct upsample-filter-sum reference
     /// on the first frame (zero history), pinning the two forms identical.
     #[test]

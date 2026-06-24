@@ -32,6 +32,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   synthesis docs gap for the **sample-correct** (textbook-DSP) path; the
   bit-exact polyphase delay convention the reference uses remains
   unpinned by the staged manual.
+- Round r365: **QMF perfect-reconstruction sample-correctness pin.** A
+  test-only two-band QMF *analysis* reference (`lb = downsample2(h0*x)`,
+  `hb = downsample2((-1)ⁿh0*x)`) splits a synthetic 16 kHz full-band
+  signal into the two half-bands; pushing those back through the
+  `QmfSynthesis` filterbank recovers the original signal (relative error
+  `< 1e-3` in the steady-state region, up to the filterbank group delay).
+  This validates the CEG mirror relation's alias-cancellation +
+  amplitude-distortion-free property for the staged prototype — the
+  decisive sample-correctness check that the synthesis sign conventions,
+  factor-2 gain, and polyphase decomposition are all correct.
 - Round r365: **`WidebandDecoder` now emits 16 kHz wideband PCM.**
   `WidebandFrame` gains a `wideband_pcm: [f64; 320]` field carrying the
   QMF-recombined full-band signal; `WidebandDecoder` holds a persistent
