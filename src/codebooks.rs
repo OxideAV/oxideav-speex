@@ -131,6 +131,28 @@ fn parse_column(body: &'static str, expected_rows: usize) -> Vec<i16> {
     rows
 }
 
+/// Parse a single-column float CSV body into a `Vec<f64>`, asserting the
+/// expected row count (the float-variant companion to [`parse_column`]).
+fn parse_float_column(body: &'static str, expected_rows: usize) -> Vec<f64> {
+    let rows: Vec<f64> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.trim()
+                .parse::<f64>()
+                .expect("speex single-column float CSV: token must be a decimal float")
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        expected_rows,
+        "speex single-column float CSV row count mismatch: got {}, expected {}",
+        rows.len(),
+        expected_rows
+    );
+    rows
+}
+
 // ---------------------------------------------------------------------------
 // Narrowband LSP VQ codebooks (§9.1).
 //
@@ -412,10 +434,12 @@ pub const QMF_FILTER_LEN: usize = 64;
 const LPC_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-analysis-window-q15.csv");
 const LAG_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-autocorr-lag-window-q15.csv");
 const QMF_H0_Q15_CSV: &str = include_str!("../tables/qmf-filter-h0-q15.csv");
+const QMF_H0_FLOAT_CSV: &str = include_str!("../tables/qmf-filter-h0-float.csv");
 
 static LPC_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
 static LAG_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
 static QMF_H0_Q15: OnceLock<Vec<i16>> = OnceLock::new();
+static QMF_H0_FLOAT: OnceLock<Vec<f64>> = OnceLock::new();
 
 /// 200-sample asymmetric LPC analysis window (Q15 fixed-point).
 pub fn lpc_analysis_window_q15() -> &'static [i16] {
@@ -431,6 +455,14 @@ pub fn lpc_lag_window_q15() -> &'static [i16] {
 /// wideband 8 kHz/8 kHz split.
 pub fn qmf_h0_q15() -> &'static [i16] {
     QMF_H0_Q15.get_or_init(|| parse_column(QMF_H0_Q15_CSV, QMF_FILTER_LEN))
+}
+
+/// 64-tap QMF prototype lowpass filter `h0` (float variant), the
+/// reconstruction-side input for the [`crate::qmf`] two-band synthesis
+/// filterbank. Same prototype as [`qmf_h0_q15`] at full float precision
+/// (the staged `qmf-filter-h0-float.csv`).
+pub fn qmf_h0_float() -> &'static [f64] {
+    QMF_H0_FLOAT.get_or_init(|| parse_float_column(QMF_H0_FLOAT_CSV, QMF_FILTER_LEN))
 }
 
 // ---------------------------------------------------------------------------

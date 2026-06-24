@@ -440,6 +440,7 @@ mod narrowband_body;
 mod narrowband_decoder;
 mod packet;
 mod pitch_gain;
+mod qmf;
 mod signalling;
 mod submode;
 mod synthesis;
@@ -460,7 +461,7 @@ pub use codebooks::{
     innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
     innovation_8_128, lpc_analysis_window_q15, lpc_lag_window_q15, nb_lsp_high1, nb_lsp_high2,
     nb_lsp_low1, nb_lsp_low2, nb_lsp_scale, nb_lsp_stage0, pitch_gain_5bit, pitch_gain_7bit,
-    qmf_h0_q15, InnovationShape, NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES,
+    qmf_h0_float, qmf_h0_q15, InnovationShape, NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES,
     LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN, NB_LSP_ORDER, NB_LSP_SPLIT_HALF,
     NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS,
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
@@ -552,6 +553,7 @@ pub use narrowband_body::{
 pub use narrowband_decoder::{NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES};
 pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
+pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
 pub use signalling::{
     inband_code_spec, CustomInbandMessage, InbandCodeSpec, InbandKind, InbandMessage,
     SignallingError, CUSTOM_INBAND_MAX_BYTES, CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS,

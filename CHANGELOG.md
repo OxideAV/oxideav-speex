@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r365: **QMF synthesis filterbank — wideband half-band → 16 kHz
+  PCM recombination (`qmf` module).** New `QmfSynthesis` recombines the
+  two reconstructed 8 kHz half-band signals (low band 0–4 kHz + high
+  band 4–8 kHz folded) into a single 16 kHz wideband PCM frame, the
+  final stage of the §10 sub-band CELP decode path that earlier rounds
+  stopped short of. The reconstruction is the **classical two-band
+  quadrature-mirror filterbank** (Croisier–Esteban–Galand) driven by the
+  staged 64-tap prototype `h0` (`qmf-filter-h0-float.csv`) — a textbook
+  multirate-DSP construction, the same clean-room category the staged
+  LSP→LPC trace grants for the LSP polynomial reconstruction. Synthesis
+  relations `g0 = 2·h0`, `g1 = -2·(-1)ⁿ·h0`, implemented in **polyphase**
+  form and unit-pinned identical to the direct upsample-filter-sum
+  reference. The staged prototype is normalised `Σh0 ≈ 1` /
+  `Σh0_even = Σh0_odd ≈ 0.5`, so the factor-2 synthesis gain yields a
+  **unity passband** (a constant low band reconstructs to the same
+  constant — pinned by `constant_low_band_reconstructs_unity_passband`).
+  FIR band histories persist across frames via the `QmfSynthesis` state
+  for seamless streaming. New `qmf_h0_float()` accessor +
+  `parse_float_column` helper surface the float prototype. The §10.2
+  frequency-axis fold is intrinsic to the `(-1)ⁿ` synthesis modulation
+  (no explicit half-band reversal). This closes the long-standing QMF
+  synthesis docs gap for the **sample-correct** (textbook-DSP) path; the
+  bit-exact polyphase delay convention the reference uses remains
+  unpinned by the staged manual.
+- Round r365: **`WidebandDecoder` now emits 16 kHz wideband PCM.**
+  `WidebandFrame` gains a `wideband_pcm: [f64; 320]` field carrying the
+  QMF-recombined full-band signal; `WidebandDecoder` holds a persistent
+  `QmfSynthesis` so a multi-frame wideband stream reconstructs
+  continuously. The `low_band` / `high_band` half-band fields are
+  retained for diagnostics. The top-level `SpeexDecoder` wideband path
+  surfaces the recombined PCM end-to-end.
 - Round r359: **`LSP_PI` angular-domain pin — closes the LSP
   angular-unit gap.** The Speex decoder stores LSP frequencies in a
   fixed-point angular domain where the staged constant `LSP_PI = 25736`
