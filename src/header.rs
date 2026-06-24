@@ -234,6 +234,50 @@ impl SpeexHeader {
             SPEEX_MODE_NARROWBAND | SPEEX_MODE_WIDEBAND | SPEEX_MODE_ULTRAWIDEBAND
         )
     }
+
+    /// `true` for a narrowband-mode stream (`mode == 0`, 8 kHz).
+    pub fn is_narrowband(&self) -> bool {
+        self.mode == SPEEX_MODE_NARROWBAND
+    }
+
+    /// `true` for a wideband-mode stream (`mode == 1`, 16 kHz).
+    pub fn is_wideband(&self) -> bool {
+        self.mode == SPEEX_MODE_WIDEBAND
+    }
+
+    /// `true` for an ultra-wideband-mode stream (`mode == 2`, 32 kHz).
+    pub fn is_ultrawideband(&self) -> bool {
+        self.mode == SPEEX_MODE_ULTRAWIDEBAND
+    }
+
+    /// The **canonical** output sampling rate the `mode` class implies,
+    /// in Hz — narrowband `8000`, wideband `16000`, ultra-wideband
+    /// `32000` (manual §2.2 "Embedded wideband structure": each sub-band
+    /// layer doubles the rate; §7.3). Returns `None` for an unknown mode.
+    ///
+    /// This is derived from the *mode class*, independent of the
+    /// self-declared [`SpeexHeader::rate`] field, so a consumer can
+    /// cross-check the two (a conformant header has `rate ==
+    /// mode_sampling_rate_hz()`) or default the playback rate from the
+    /// mode alone. It matches the per-frame full-rate output the
+    /// [`crate::SpeexDecoder`] produces ([`crate::DecodedFrame::sample_rate_hz`])
+    /// for the narrowband / wideband decode paths.
+    pub fn mode_sampling_rate_hz(&self) -> Option<u32> {
+        match self.mode {
+            SPEEX_MODE_NARROWBAND => Some(8_000),
+            SPEEX_MODE_WIDEBAND => Some(16_000),
+            SPEEX_MODE_ULTRAWIDEBAND => Some(32_000),
+            _ => None,
+        }
+    }
+
+    /// `true` when the self-declared [`SpeexHeader::rate`] field agrees
+    /// with the rate the `mode` class implies
+    /// ([`SpeexHeader::mode_sampling_rate_hz`]). Always `false` for an
+    /// unknown mode (no canonical rate to compare against).
+    pub fn rate_matches_mode(&self) -> bool {
+        self.mode_sampling_rate_hz() == Some(self.rate)
+    }
 }
 
 #[cfg(test)]
@@ -370,5 +414,43 @@ mod tests {
         buf.extend_from_slice(&[0xAB; 32]);
         let h = SpeexHeader::parse(&buf).expect("must parse");
         assert_eq!(h.rate, 8000);
+    }
+
+    #[test]
+    fn mode_class_predicates_and_canonical_rate() {
+        let nb = SpeexHeader::parse(&synth_header(8000, SPEEX_MODE_NARROWBAND, 160, 1)).unwrap();
+        assert!(nb.is_narrowband() && !nb.is_wideband() && !nb.is_ultrawideband());
+        assert_eq!(nb.mode_sampling_rate_hz(), Some(8_000));
+        assert!(nb.rate_matches_mode());
+
+        let wb = SpeexHeader::parse(&synth_header(16000, SPEEX_MODE_WIDEBAND, 320, 1)).unwrap();
+        assert!(wb.is_wideband() && !wb.is_narrowband() && !wb.is_ultrawideband());
+        assert_eq!(wb.mode_sampling_rate_hz(), Some(16_000));
+        assert!(wb.rate_matches_mode());
+
+        let uwb =
+            SpeexHeader::parse(&synth_header(32000, SPEEX_MODE_ULTRAWIDEBAND, 640, 1)).unwrap();
+        assert!(uwb.is_ultrawideband() && !uwb.is_narrowband() && !uwb.is_wideband());
+        assert_eq!(uwb.mode_sampling_rate_hz(), Some(32_000));
+        assert!(uwb.rate_matches_mode());
+    }
+
+    #[test]
+    fn unknown_mode_has_no_canonical_rate() {
+        // mode 7 is not one of the three documented classes.
+        let h = SpeexHeader::parse(&synth_header(8000, 7, 160, 1)).unwrap();
+        assert!(!h.is_known_mode());
+        assert_eq!(h.mode_sampling_rate_hz(), None);
+        assert!(!h.rate_matches_mode());
+    }
+
+    #[test]
+    fn rate_field_disagreeing_with_mode_is_flagged() {
+        // A header whose self-declared rate contradicts its mode class
+        // (16 kHz rate but narrowband mode) is detected by rate_matches_mode.
+        let h = SpeexHeader::parse(&synth_header(16000, SPEEX_MODE_NARROWBAND, 160, 1)).unwrap();
+        assert!(h.is_narrowband());
+        assert_eq!(h.mode_sampling_rate_hz(), Some(8_000));
+        assert!(!h.rate_matches_mode(), "rate 16000 contradicts NB mode");
     }
 }

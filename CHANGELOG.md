@@ -8,6 +8,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r369: **Header mode-class accessors + canonical-rate cross-check
+  (`SpeexHeader`).** New `is_narrowband` / `is_wideband` /
+  `is_ultrawideband` predicates over the `mode` field, plus
+  `mode_sampling_rate_hz` — the canonical output rate the mode class
+  implies (NB 8 kHz / WB 16 kHz / UWB 32 kHz, manual §2.2 embedded
+  sub-band layering / §7.3), derived from the mode class independent of
+  the self-declared `rate` field — and `rate_matches_mode`, which flags a
+  header whose declared `rate` contradicts its mode class. The canonical
+  rate matches the per-frame full-rate output the decoder produces
+  (`DecodedFrame::sample_rate_hz`), so a consumer can default playback
+  rate from the header alone or validate a stream before decoding.
+
 - Round r369: **Whole-packet flat-`i16` decode convenience
   (`SpeexDecoder::decode_packet_pcm_i16`).** Decodes a Speex packet
   straight to a flat `Vec<i16>`, concatenating every audio frame's
