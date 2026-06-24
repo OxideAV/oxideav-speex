@@ -31,18 +31,19 @@
 //! that follows, returning both half-band signals with their respective
 //! persistent IIR state carried across frames.
 //!
-//! ## QMF synthesis gap (documented, not fished)
+//! ## QMF synthesis recombination (round r365)
 //!
 //! The final recombination `(x_lb, x_hb) → 16 kHz wideband PCM` runs the
-//! two half-band signals back through the QMF **synthesis** filterbank.
-//! The staged material provides the 64-tap QMF prototype `h0` as pure
-//! data but does **not** specify the synthesis filterbank algorithm
-//! (polyphase recombination, the `h0 → {h0, h1}` analysis/synthesis pair
-//! derivation, the 2× interpolation / decimation factors, the inter-band
-//! delay alignment). That recombination is therefore a recorded docs gap
-//! (see [`crate::wb_synthesis`] module docs + the README). This decoder
-//! stops at the two reconstructed half-band signals, which is the
-//! furthest the staged material uniquely pins.
+//! two half-band signals back through the QMF **synthesis** filterbank
+//! ([`crate::QmfSynthesis`]). The staged material provides the 64-tap
+//! prototype `h0` as pure data; the synthesis structure is the classical
+//! two-band quadrature-mirror reconstruction (textbook multirate DSP,
+//! see the [`crate::qmf`] module docs). This decoder now carries a
+//! persistent [`QmfSynthesis`] and emits the recombined 16 kHz PCM as
+//! [`WidebandFrame::wideband_pcm`] alongside the two half-band signals.
+//! The bit-exact polyphase **delay** convention the reference decoder
+//! uses is not pinned by the staged manual; the sample-correct
+//! textbook-DSP reconstruction is what lands here.
 
 use crate::bitreader::BitReader;
 use crate::frame::NarrowbandFrameHeader;
@@ -51,6 +52,7 @@ use crate::narrowband_body::NarrowbandFrameBody;
 use crate::narrowband_decoder::{
     NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
+use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::submode::Submode;
 use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
 use crate::wideband::{
@@ -58,11 +60,13 @@ use crate::wideband::{
 };
 use core::fmt;
 
-/// The two reconstructed 8 kHz half-band signals of one wideband frame.
+/// One decoded wideband frame: the two reconstructed 8 kHz half-band
+/// signals **plus** the QMF-recombined 16 kHz wideband PCM.
 ///
-/// Both are 160-sample (`= NARROWBAND_FRAME_SAMPLES = HB_FRAME_SAMPLES`)
-/// 8 kHz half-band signals. The (gap-documented) QMF synthesis
-/// filterbank recombines them into the 16 kHz wideband PCM.
+/// `low_band` / `high_band` are 160-sample (`= NARROWBAND_FRAME_SAMPLES
+/// = HB_FRAME_SAMPLES`) 8 kHz half-band signals, retained for
+/// diagnostics. `wideband_pcm` is the [`crate::QmfSynthesis`]-recombined
+/// 320-sample 16 kHz full-band output (the §10 final stage).
 #[derive(Debug, Clone)]
 pub struct WidebandFrame {
     /// Low-band (0–4 kHz) reconstructed signal `x_lb[n]` — the embedded
@@ -70,6 +74,8 @@ pub struct WidebandFrame {
     pub low_band: [f64; NARROWBAND_FRAME_SAMPLES],
     /// High-band (4–8 kHz folded) reconstructed signal `x_hb[n]`.
     pub high_band: [f64; HB_FRAME_SAMPLES],
+    /// QMF-recombined 16 kHz wideband PCM (`2 × 160 = 320` samples).
+    pub wideband_pcm: [f64; QMF_WIDEBAND_FRAME],
 }
 
 /// Errors from [`WidebandDecoder::decode_packet`].
@@ -150,6 +156,9 @@ pub struct WidebandDecoder {
     /// frames. `None` at stream start and after a high-band silence
     /// frame that transmitted no LSP.
     prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
+    /// QMF synthesis filterbank state (FIR band histories) for the final
+    /// half-band → 16 kHz recombination, carried across frames.
+    qmf: QmfSynthesis,
 }
 
 impl Default for WidebandDecoder {
@@ -166,6 +175,7 @@ impl WidebandDecoder {
             low_band: NarrowbandDecoder::new(),
             high_band_filter: HbSynthesisFilter::new(),
             prev_hb_lsp_delta_q10: None,
+            qmf: QmfSynthesis::new(),
         }
     }
 
@@ -210,9 +220,13 @@ impl WidebandDecoder {
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
 
+        // --- QMF synthesis: recombine the two half-bands → 16 kHz PCM ---
+        let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);
+
         Ok(WidebandFrame {
             low_band,
             high_band,
+            wideband_pcm,
         })
     }
 
@@ -274,12 +288,44 @@ mod tests {
         let frame = dec.decode_packet(&pkt).expect("wideband packet decodes");
         assert_eq!(frame.low_band.len(), 160);
         assert_eq!(frame.high_band.len(), 160);
+        assert_eq!(frame.wideband_pcm.len(), 320);
         for &s in &frame.low_band {
             assert!(s.is_finite(), "low-band sample not finite");
         }
         for &s in &frame.high_band {
             assert!(s.is_finite(), "high-band sample not finite");
         }
+        for &s in &frame.wideband_pcm {
+            assert!(s.is_finite(), "wideband PCM sample not finite");
+        }
+        // A non-silent wideband frame produces non-silent 16 kHz PCM.
+        assert!(
+            frame.wideband_pcm.iter().any(|&s| s != 0.0),
+            "recombined wideband PCM should be non-silent"
+        );
+    }
+
+    #[test]
+    fn wideband_pcm_recombination_is_continuous_across_frames() {
+        // The QMF state must carry across packets: re-running frame 2 from
+        // a fresh decoder differs from the continued decode (live FIR
+        // history), confirming the recombination is stateful.
+        let pkt = wideband_packet(5, 2);
+        let mut cont = WidebandDecoder::new();
+        let _ = cont.decode_packet(&pkt).unwrap();
+        let f1_cont = cont.decode_packet(&pkt).unwrap();
+
+        let mut fresh = WidebandDecoder::new();
+        let f1_fresh = fresh.decode_packet(&pkt).unwrap();
+
+        assert!(
+            f1_cont
+                .wideband_pcm
+                .iter()
+                .zip(f1_fresh.wideband_pcm.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-9),
+            "QMF history should influence the continued frame's PCM"
+        );
     }
 
     #[test]

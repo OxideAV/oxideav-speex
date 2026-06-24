@@ -40,6 +40,7 @@ use crate::narrowband_decoder::{
     NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
 use crate::packet::{PacketError, PacketFrame, PacketFrames};
+use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::submode::Submode;
 use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
 use crate::wideband::WidebandSubmode;
@@ -51,14 +52,16 @@ pub enum DecodedFrame {
     /// A narrowband frame decoded to 160 samples of 8 kHz PCM.
     Narrowband(Box<[f64; NARROWBAND_FRAME_SAMPLES]>),
     /// A wideband frame decoded to its two reconstructed 8 kHz half-band
-    /// signals (low band `x_lb` + high band `x_hb`). The QMF synthesis
-    /// recombination into 16 kHz PCM is a recorded docs gap (see
-    /// [`crate::wideband_decoder`]).
+    /// signals (low band `x_lb` + high band `x_hb`) **and** the
+    /// QMF-recombined 16 kHz wideband PCM ([`crate::QmfSynthesis`], round
+    /// r365).
     Wideband {
         /// Low-band (0–4 kHz) reconstructed signal.
         low_band: Box<[f64; NARROWBAND_FRAME_SAMPLES]>,
         /// High-band (4–8 kHz folded) reconstructed signal.
         high_band: Box<[f64; HB_FRAME_SAMPLES]>,
+        /// QMF-recombined 16 kHz wideband PCM (`2 × 160 = 320` samples).
+        wideband_pcm: Box<[f64; QMF_WIDEBAND_FRAME]>,
     },
     /// A §5.5 in-band signalling or custom-message pseudo-frame — carries
     /// no audio, surfaced so the caller can act on the control message.
@@ -136,6 +139,9 @@ pub struct SpeexDecoder {
     /// codebook-delta vector (Q10, pre-base) for the continuous
     /// per-frame high-band LSP interpolation (§9.1 / §10.1).
     prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
+    /// QMF synthesis filterbank state for the wideband half-band → 16 kHz
+    /// recombination, carried across wideband frames.
+    qmf: QmfSynthesis,
 }
 
 impl Default for SpeexDecoder {
@@ -151,6 +157,7 @@ impl SpeexDecoder {
             narrowband: NarrowbandDecoder::new(),
             high_band_filter: HbSynthesisFilter::new(),
             prev_hb_lsp_delta_q10: None,
+            qmf: QmfSynthesis::new(),
         }
     }
 
@@ -209,9 +216,12 @@ impl SpeexDecoder {
                 )
                 .map_err(|_| DecodeError::HighBandUndocumented)?;
 
+                let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);
+
                 Ok(DecodedFrame::Wideband {
                     low_band: Box::new(low_band),
                     high_band: Box::new(high_band),
+                    wideband_pcm: Box::new(wideband_pcm),
                 })
             }
             PacketFrame::InbandSignalling { .. } | PacketFrame::CustomInband { .. } => {
@@ -307,11 +317,18 @@ mod tests {
             DecodedFrame::Wideband {
                 low_band,
                 high_band,
+                wideband_pcm,
             } => {
                 assert_eq!(low_band.len(), 160);
                 assert_eq!(high_band.len(), 160);
+                assert_eq!(wideband_pcm.len(), 320);
                 assert!(low_band.iter().all(|s| s.is_finite()));
                 assert!(high_band.iter().all(|s| s.is_finite()));
+                assert!(wideband_pcm.iter().all(|s| s.is_finite()));
+                assert!(
+                    wideband_pcm.iter().any(|&s| s != 0.0),
+                    "recombined 16 kHz PCM should be non-silent"
+                );
             }
             other => panic!("expected Wideband, got {other:?}"),
         }
@@ -366,14 +383,17 @@ mod tests {
                     DecodedFrame::Wideband {
                         low_band: la,
                         high_band: ha,
+                        wideband_pcm: pa,
                     },
                     DecodedFrame::Wideband {
                         low_band: lb,
                         high_band: hb,
+                        wideband_pcm: pb,
                     },
                 ) => {
                     assert_eq!(la, lb);
                     assert_eq!(ha, hb);
+                    assert_eq!(pa, pb);
                 }
                 _ => panic!("expected wideband frames"),
             }
