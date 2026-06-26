@@ -553,7 +553,7 @@ pub use narrowband_body::{
 pub use narrowband_decoder::{
     saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
-pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
+pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
 pub use signalling::{

@@ -105,6 +105,40 @@ pub enum PacketFrame {
     },
 }
 
+/// The coarse mode-class of a [`PacketFrame`] — the routing distinction
+/// a consumer makes before deciding how to handle the frame.
+///
+/// Per *The Speex Codec Manual* §5.5 a packet interleaves three kinds of
+/// frame: regular CELP audio (narrowband or the embedded-wideband
+/// sub-band layering), §5.5 control pseudo-frames (mode-14 in-band
+/// signalling and mode-13 custom messages), and the mode-15 terminator
+/// (which the iterator consumes silently — it never reaches a
+/// [`PacketFrame`], so it has no variant here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    /// A standalone narrowband CELP audio frame (8 kHz output).
+    Narrowband,
+    /// An embedded-wideband audio frame (narrowband low band + high
+    /// band → 16 kHz output).
+    Wideband,
+    /// A mode-14 §5.5 in-band signalling pseudo-frame.
+    InbandSignalling,
+    /// A mode-13 §5.5 custom in-band pseudo-frame.
+    CustomInband,
+}
+
+impl FrameKind {
+    /// True for the two audio variants (narrowband / wideband).
+    pub const fn is_audio(self) -> bool {
+        matches!(self, FrameKind::Narrowband | FrameKind::Wideband)
+    }
+
+    /// True for the two §5.5 control variants (in-band / custom).
+    pub const fn is_control(self) -> bool {
+        matches!(self, FrameKind::InbandSignalling | FrameKind::CustomInband)
+    }
+}
+
 impl PacketFrame {
     /// Convenience: the 5-bit prefix that introduced the frame.
     pub fn header(&self) -> &NarrowbandFrameHeader {
@@ -114,6 +148,103 @@ impl PacketFrame {
             | PacketFrame::InbandSignalling { header, .. }
             | PacketFrame::CustomInband { header, .. } => header,
         }
+    }
+
+    /// The coarse [`FrameKind`] of this frame (its mode-class).
+    pub const fn kind(&self) -> FrameKind {
+        match self {
+            PacketFrame::Narrowband { .. } => FrameKind::Narrowband,
+            PacketFrame::Wideband { .. } => FrameKind::Wideband,
+            PacketFrame::InbandSignalling { .. } => FrameKind::InbandSignalling,
+            PacketFrame::CustomInband { .. } => FrameKind::CustomInband,
+        }
+    }
+
+    /// True when this frame produces audio output (narrowband or
+    /// wideband), false for a §5.5 control pseudo-frame.
+    pub const fn is_audio(&self) -> bool {
+        self.kind().is_audio()
+    }
+
+    /// True when this frame is a §5.5 control pseudo-frame (in-band
+    /// signalling or custom message), false for an audio frame.
+    pub const fn is_control(&self) -> bool {
+        self.kind().is_control()
+    }
+
+    /// The mode ID from the leading 5-bit prefix (`0..=15`), the value
+    /// that selected this frame's [`FrameKind`]. CELP audio modes are
+    /// `0..=10` (narrowband) and the embedded wideband marker; the
+    /// control pseudo-frames are mode 13 (custom) and mode 14 (in-band).
+    pub fn mode_id(&self) -> u8 {
+        self.header().mode_id
+    }
+}
+
+/// A structural summary of one Speex packet — the per-frame-kind counts
+/// produced by walking it once, without committing to the full decode.
+///
+/// This is the cheap "what is in this packet" inspection a consumer makes
+/// before / instead of decoding: how many audio frames it carries (and of
+/// which band class), how many §5.5 control pseudo-frames it carries, and
+/// whether the walk terminated cleanly. Pairs with
+/// [`crate::SpeexHeader::frames_per_packet`] for a header-vs-payload
+/// cross-check (manual §7.3: the stream header advertises the constant
+/// frames-per-packet a conformant CBR stream uses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketSummary {
+    /// Number of standalone narrowband audio frames.
+    pub narrowband: u32,
+    /// Number of embedded-wideband audio frames.
+    pub wideband: u32,
+    /// Number of mode-14 in-band signalling pseudo-frames.
+    pub inband_signalling: u32,
+    /// Number of mode-13 custom in-band pseudo-frames.
+    pub custom_inband: u32,
+}
+
+impl PacketSummary {
+    /// Walk `packet` once and tally its frame kinds.
+    ///
+    /// Stops at the first [`PacketError`] (returning it), mirroring the
+    /// halt-on-error contract of [`PacketFrames`]; a clean end-of-packet
+    /// (terminator or `< 5`-bit padding tail) returns the accumulated
+    /// summary. No audio is decoded — only the per-frame prefixes +
+    /// bodies are walked to advance the cursor.
+    pub fn walk(packet: &[u8]) -> Result<Self, PacketError> {
+        let mut s = Self::default();
+        for frame in PacketFrames::new(packet) {
+            match frame?.kind() {
+                FrameKind::Narrowband => s.narrowband += 1,
+                FrameKind::Wideband => s.wideband += 1,
+                FrameKind::InbandSignalling => s.inband_signalling += 1,
+                FrameKind::CustomInband => s.custom_inband += 1,
+            }
+        }
+        Ok(s)
+    }
+
+    /// Total number of audio frames (narrowband + wideband).
+    pub const fn audio_frames(&self) -> u32 {
+        self.narrowband + self.wideband
+    }
+
+    /// Total number of §5.5 control pseudo-frames (in-band + custom).
+    pub const fn control_frames(&self) -> u32 {
+        self.inband_signalling + self.custom_inband
+    }
+
+    /// Total number of frames of every kind.
+    pub const fn total_frames(&self) -> u32 {
+        self.audio_frames() + self.control_frames()
+    }
+
+    /// True when the packet carries at least one wideband audio frame
+    /// (so its audio output is 16 kHz, not 8 kHz). A conformant Speex
+    /// stream is single-rate-class (§7.3), so this also flags the
+    /// packet's output rate class.
+    pub const fn is_wideband(&self) -> bool {
+        self.wideband > 0
     }
 }
 
@@ -769,5 +900,126 @@ mod tests {
         assert_eq!(r.read(4).unwrap(), 0b1110);
         assert_eq!(r.read(4).unwrap(), 0b1000);
         assert_eq!(r.read(8).unwrap(), 0x41);
+    }
+
+    // ---- Frame classification (`FrameKind` / `PacketFrame::kind`) ----
+
+    #[test]
+    fn frame_kind_classifies_narrowband_audio() {
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, false, 0); // mode 0 narrowband
+        p.write(0, 3).unwrap();
+        let buf = p.into_bytes();
+        let f = PacketFrames::new(&buf).next().unwrap().unwrap();
+        assert_eq!(f.kind(), FrameKind::Narrowband);
+        assert!(f.is_audio());
+        assert!(!f.is_control());
+        assert_eq!(f.mode_id(), 0);
+    }
+
+    #[test]
+    fn frame_kind_classifies_inband_signalling_as_control() {
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, false, 14);
+        p.write(0, INBAND_CODE_BITS).unwrap();
+        p.write(1, 1).unwrap();
+        let buf = p.into_bytes();
+        let f = PacketFrames::new(&buf).next().unwrap().unwrap();
+        assert_eq!(f.kind(), FrameKind::InbandSignalling);
+        assert!(f.is_control());
+        assert!(!f.is_audio());
+        assert_eq!(f.mode_id(), 14);
+    }
+
+    #[test]
+    fn frame_kind_classifies_custom_inband_as_control() {
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, false, 13);
+        p.write(0, 5).unwrap();
+        let buf = p.into_bytes();
+        let f = PacketFrames::new(&buf).next().unwrap().unwrap();
+        assert_eq!(f.kind(), FrameKind::CustomInband);
+        assert!(f.is_control());
+        assert_eq!(f.mode_id(), 13);
+    }
+
+    #[test]
+    fn frame_kind_audio_control_partition_is_disjoint() {
+        for k in [
+            FrameKind::Narrowband,
+            FrameKind::Wideband,
+            FrameKind::InbandSignalling,
+            FrameKind::CustomInband,
+        ] {
+            // Every kind is exactly one of audio / control, never both.
+            assert_ne!(k.is_audio(), k.is_control(), "{:?} not partitioned", k);
+        }
+    }
+
+    // ---- Packet structural summary (`PacketSummary::walk`) ----
+
+    #[test]
+    fn packet_summary_counts_mixed_frames() {
+        // in-band signalling + two narrowband silence frames + terminator.
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, false, 14);
+        p.write(0, INBAND_CODE_BITS).unwrap();
+        p.write(1, 1).unwrap();
+        push_prefix(&mut p, false, 0);
+        push_prefix(&mut p, false, 0);
+        push_prefix(&mut p, false, 15); // terminator
+        p.write(0, 4).unwrap();
+        let buf = p.into_bytes();
+
+        let s = PacketSummary::walk(&buf).expect("clean walk");
+        assert_eq!(s.narrowband, 2);
+        assert_eq!(s.wideband, 0);
+        assert_eq!(s.inband_signalling, 1);
+        assert_eq!(s.custom_inband, 0);
+        assert_eq!(s.audio_frames(), 2);
+        assert_eq!(s.control_frames(), 1);
+        assert_eq!(s.total_frames(), 3);
+        assert!(!s.is_wideband());
+    }
+
+    #[test]
+    fn packet_summary_empty_packet_is_all_zero() {
+        let s = PacketSummary::walk(&[]).expect("clean walk");
+        assert_eq!(s, PacketSummary::default());
+        assert_eq!(s.total_frames(), 0);
+    }
+
+    #[test]
+    fn packet_summary_propagates_walk_error() {
+        // A reserved narrowband mode (11) makes the iterator yield an
+        // error, which the summary surfaces.
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, false, 11); // reserved mode → FrameError
+        p.write(0, 3).unwrap();
+        let buf = p.into_bytes();
+        assert!(PacketSummary::walk(&buf).is_err());
+    }
+
+    #[test]
+    fn packet_summary_flags_wideband_rate_class() {
+        // One wideband silence frame: narrowband low band (mode 0) +
+        // high-band flag 0 (mode 0 silence high band).
+        let mut p = BitWriter::new();
+        push_prefix(&mut p, true, 0); // wideband flag = 1, low-band mode 0
+                                      // High-band: 1-bit wideband flag (0 = no further band) + 3-bit
+                                      // high-band mode (0 = silence).
+        p.write(0, 1).unwrap(); // high-band wideband flag = 0
+        p.write(0, 3).unwrap(); // high-band mode 0
+        push_prefix(&mut p, false, 15); // terminator so the trailing
+                                        // zero padding is not parsed as a
+                                        // spurious mode-0 frame
+        p.write(0, 1).unwrap(); // pad to a whole byte
+        let buf = p.into_bytes();
+
+        let s = PacketSummary::walk(&buf).expect("clean walk");
+        assert_eq!(s.wideband, 1);
+        assert_eq!(s.narrowband, 0);
+        assert!(s.is_wideband());
+        assert_eq!(s.audio_frames(), 1);
     }
 }

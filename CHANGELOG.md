@@ -8,6 +8,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Packet frame classification + structural summary.**
+  A consumer that wanted to know "what is in this packet" before / instead
+  of a full decode had to match on the `PacketFrame` enum by hand. New
+  `FrameKind` enum (`Narrowband` / `Wideband` / `InbandSignalling` /
+  `CustomInband`) with `is_audio()` / `is_control()`, plus
+  `PacketFrame::kind()` / `is_audio()` / `is_control()` / `mode_id()`
+  classification accessors. New `PacketSummary` walks a packet once
+  (without decoding audio) and tallies per-kind frame counts:
+  `narrowband` / `wideband` / `inband_signalling` / `custom_inband`,
+  with `audio_frames()` / `control_frames()` / `total_frames()` /
+  `is_wideband()` aggregates. `PacketSummary::walk` halts on the first
+  `PacketError` (mirroring `PacketFrames`) and returns the accumulated
+  summary on a clean terminator / padding tail. Pairs with
+  `SpeexHeader::frames_per_packet` for a header-vs-payload cross-check
+  (§7.3) and surfaces a packet's rate class (8 kHz vs 16 kHz) and its
+  audio/control split for routing or DTX detection. Spec basis: *The
+  Speex Codec Manual* §5.5. 8 new packet tests; 538 lib tests, up from
+  530. Exports: `FrameKind`, `PacketSummary`.
+
 - Round r372: **In-band signalling semantic interpretation +
   decoder control-frame surfacing.** The §5.5 mode-14 in-band messages
   were parsed to a raw `(code, payload)` `InbandMessage` but their
