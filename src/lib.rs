@@ -552,8 +552,9 @@ pub use lsp_to_lpc::{
     hb_lsp_q10_to_radians, hb_lsp_to_lpc, hb_lsp_with_base_q10, hb_subframe_lpc_set_with_base,
     lpc_from_hb_lsp_delta_q10, lpc_from_hb_lsp_q10, lpc_from_hb_subframe_lsp_q12,
     lpc_from_lsp_delta_q10, lpc_from_lsp_q10, lpc_from_subframe_lsp_q12, lsp_q10_to_radians,
-    lsp_qn_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians, nb_lsp_with_base_q10,
-    subframe_lpc_set, subframe_lpc_set_with_base, HB_LPC_ORDER_OUT, LPC_ORDER,
+    lsp_qn_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians, lsp_vector_radians_to_q10,
+    nb_lsp_with_base_q10, radians_to_lsp_q10, subframe_lpc_set, subframe_lpc_set_with_base,
+    HB_LPC_ORDER_OUT, LPC_ORDER,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,

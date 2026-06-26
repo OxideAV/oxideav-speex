@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Encoder bootstrap — radian→Q10 LSP bridge + full envelope
+  encode chain.** `radians_to_lsp_q10` / `lsp_vector_radians_to_q10` are
+  the encode-direction inverse of the decoder's `lsp_q10_to_radians` /
+  `lsp_vector_q10_to_radians` (`value = round(ω · 2¹⁰)`), the bridge from
+  the `lpc_to_lsp` root-finder output (radians) into the Q10 domain the
+  `lsp_quant` VQ search consumes. This closes the complete short-term
+  envelope encode path end-to-end:
+  `signal → lpc_analyse → lpc_to_lsp → radians→Q10 → (− base) →
+  quantise_lsp_q10 → pack_lsp_index → [wire] → from_packed →
+  reconstruct_q10 → (+ base) → lsp_to_lpc`. New
+  `tests/encoder_envelope_chain.rs` drives the whole chain on an analysed
+  AR signal through both the 18-bit and 30-bit regimes and asserts the
+  reconstructed LPC envelope is a faithful match to the analysed one (VQ
+  envelope error below the coefficient energy), plus the on-wire
+  `pack → from_packed` round-trip and the silence-mode skip. Exports:
+  `radians_to_lsp_q10`, `lsp_vector_radians_to_q10`. 3 new unit tests +
+  3 integration tests; 567 lib tests, up from 564.
+
 - Round r372: **Encoder bootstrap — narrowband LSP-VQ quantiser
   (`lsp_quant` module).** The encode inverse of the r194 decoder LSP
   reconstruction (`lsp::reconstruct_q10`). Given the order-10 Q10 LSP

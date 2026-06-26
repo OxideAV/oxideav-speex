@@ -234,6 +234,14 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   field. Closes the LSP encode→pack→decode round-trip through the existing
   decoder path. So the envelope path is now analyse → LPC → LSP →
   quantise → pack.
+* **Encoder front-end — full envelope chain wired** (round r372). The
+  `radians_to_lsp_q10` bridge (encode inverse of `lsp_q10_to_radians`)
+  joins the pieces so the complete short-term envelope encode path runs
+  end-to-end: `signal → lpc_analyse → lpc_to_lsp → radians→Q10 → (−base) →
+  quantise_lsp_q10 → pack_lsp_index → [wire] → from_packed →
+  reconstruct_q10 → (+base) → lsp_to_lpc`, validated by
+  `tests/encoder_envelope_chain.rs` (the reconstructed envelope faithfully
+  matches the analysed one through both LSP regimes).
 
 ## Not yet supported
 

@@ -167,6 +167,30 @@ pub fn lsp_vector_q10_to_radians(lsp_q10: &[i32; NB_LSP_ORDER]) -> [f64; NB_LSP_
     out
 }
 
+/// Convert an angular frequency in radians to a Q[`NB_LSP_OUTPUT_Q`]
+/// fixed-point LSP value — the **encode-direction inverse** of
+/// [`lsp_q10_to_radians`].
+///
+/// `value = round(ω · 2^Q)` with `Q = `[`NB_LSP_OUTPUT_Q`]`= 10`, the
+/// exact inverse of the decoder's `ω = value / 2^Q` (the
+/// provenance-confirmed angular-unit fact, see [`crate::lsp_pi_domain`]).
+/// Round-to-nearest is used so the value and its decode are mutually
+/// nearest. This is the bridge from the [`crate::lpc_to_lsp`] root-finder
+/// output (radians) into the Q10 domain [`crate::lsp_quant`] searches.
+pub fn radians_to_lsp_q10(omega: f64) -> i32 {
+    (omega * f64::from(1u32 << NB_LSP_OUTPUT_Q)).round() as i32
+}
+
+/// Convert a full ten-coefficient radian LSP vector to a Q10 vector via
+/// [`radians_to_lsp_q10`] (the inverse of [`lsp_vector_q10_to_radians`]).
+pub fn lsp_vector_radians_to_q10(lsp_rad: &[f64; NB_LSP_ORDER]) -> [i32; NB_LSP_ORDER] {
+    let mut out = [0i32; NB_LSP_ORDER];
+    for (o, &w) in out.iter_mut().zip(lsp_rad.iter()) {
+        *o = radians_to_lsp_q10(w);
+    }
+    out
+}
+
 /// Multiply two polynomials given as coefficient slices (ascending
 /// powers of `z⁻¹`). `out` must have length `a.len() + b.len() − 1`.
 fn poly_mul(a: &[f64], b: &[f64], out: &mut Vec<f64>) {
@@ -950,5 +974,32 @@ mod tests {
             let want = -0.5 * (p[i + 1] + q[i + 1]);
             assert!(approx(a[i], want, 1e-12), "coeff {i}");
         }
+    }
+
+    #[test]
+    fn radians_to_q10_is_inverse_of_q10_to_radians() {
+        // For every representable Q10 value in the LSP band, the
+        // round-trip value → radians → value is identity (no clamp).
+        for v in (50i32..3200).step_by(37) {
+            let omega = lsp_q10_to_radians(v);
+            assert_eq!(radians_to_lsp_q10(omega), v, "round-trip v={v}");
+        }
+    }
+
+    #[test]
+    fn radians_to_q10_rounds_to_nearest() {
+        // ω = 1.0 rad → 1024 in Q10 (round of 1024.0).
+        assert_eq!(radians_to_lsp_q10(1.0), 1024);
+        // ω just above a half-LSB rounds up.
+        let half = 0.5 / f64::from(1u32 << NB_LSP_OUTPUT_Q);
+        assert_eq!(radians_to_lsp_q10(1.0 + half + 1e-9), 1025);
+    }
+
+    #[test]
+    fn lsp_vector_radians_q10_round_trips() {
+        let q10: [i32; NB_LSP_ORDER] = [100, 300, 500, 700, 900, 1100, 1500, 1900, 2400, 3000];
+        let rad = lsp_vector_q10_to_radians(&q10);
+        let back = lsp_vector_radians_to_q10(&rad);
+        assert_eq!(back, q10);
     }
 }
