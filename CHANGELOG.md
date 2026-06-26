@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Encoder bootstrap — narrowband LSP-VQ quantiser
+  (`lsp_quant` module).** The encode inverse of the r194 decoder LSP
+  reconstruction (`lsp::reconstruct_q10`). Given the order-10 Q10 LSP
+  vector from `lpc_to_lsp`, `quantise_lsp_q10` runs the multi-stage VQ
+  search that picks the per-stage 6-bit indices (`NbLspStages`) best
+  representing it: a sequential greedy search — stage 0 (full 10-coeff VQ,
+  scale 1/256) → split low/high first refinement (stages 1/3, scale 1/512)
+  → split low/high second refinement (stages 2/4, scale 1/1024, 30-bit
+  regime only). Each stage minimises the squared error of the residual it
+  sees against the staged `nb_lsp_*` codebooks, with the exact per-stage
+  Q10 scaling the decoder uses, so the chosen indices reconstruct through
+  the existing decoder path. `LspQuant::None` (mode 0) returns `None`. New
+  `pack_lsp_index` packs the per-stage indices into the on-wire
+  `lsp_index` field (MSB-first, the layout `NbLspStages::from_packed`
+  parses) — closing the LSP encode→pack→decode round-trip. Grounded on
+  §9.1's multi-stage-VQ structure + the staged codebook data; no external
+  source consulted. 8 new tests (the monotone-refinement invariant, the
+  pack↔from_packed round-trips for both regimes, the full
+  quantise→pack→decode chain, and an error-reduction-vs-arbitrary-index
+  check). 564 lib tests, up from 556.
+
 - Round r372: **Encoder bootstrap — LPC→LSP conversion (`lpc_to_lsp`
   module).** The encode-direction inverse of the decoder's `lsp_to_lpc`:
   after `lpc_analysis` produces the order-10 LPC predictor, convert it to
