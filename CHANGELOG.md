@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Encoder bootstrap — LPC→LSP conversion (`lpc_to_lsp`
+  module).** The encode-direction inverse of the decoder's `lsp_to_lpc`:
+  after `lpc_analysis` produces the order-10 LPC predictor, convert it to
+  the Line Spectral Pair frequencies for quantisation (manual §9.1: *"LPC
+  are converted to Line Spectral Pairs for quantisation"*). `lpc_to_lsp`
+  forms the symmetric / antisymmetric auxiliary polynomials
+  `P(z) = A(z) + z⁻⁽ᴺ⁺¹⁾A(1/z)` and `Q(z) = A(z) − z⁻⁽ᴺ⁺¹⁾A(1/z)`,
+  deflates the `(1 ± z⁻¹)` boundary roots, and locates each polynomial's
+  unit-circle roots by a dense `ω`-grid sign-change scan + bisection
+  refinement — the `LPC_ORDER` LSP angles `ωₖ ∈ (0, π)` in ascending
+  order, exactly the input convention `lsp_to_lpc` consumes. Round-trip
+  validated against the in-tree `lsp_to_lpc` (`lsp_to_lpc(lpc_to_lsp(a))
+  ≈ a` to < 1e-3 for a minimum-phase filter), so the encoder front-end's
+  envelope path is closed end-to-end (analyse → LPC → LSP →
+  [eventually quantise] → decoder reconstructs the same envelope). New
+  `LpcToLspError`, `LSP_SCAN_STEPS` / `LSP_BISECT_ITERS` constants.
+  Grounded on §9.1's structural prose + the textbook auxiliary-polynomial
+  root-find; no external library source consulted. 6 new tests including
+  the known-LSP round-trip, the flat-filter even-spacing pin, and a real
+  analysed-signal envelope round-trip. 556 lib tests, up from 550.
+
 - Round r372: **Encoder bootstrap — LPC analysis front-end (`lpc_analysis`
   module).** The first stage of the Speex *encoder* (the inverse of the
   decoder's LSP→LPC / synthesis path): turn a frame of input speech into

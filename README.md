@@ -218,6 +218,13 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   staged window data. `lpc_analyse` / `apply_analysis_window` /
   `autocorrelate` / `stabilise_autocorrelation` / `levinson_durbin` /
   `LpcCoefficients`.
+* **Encoder front-end — LPC→LSP conversion** (round r372). The encode
+  inverse of the decoder's `lsp_to_lpc` (`lpc_to_lsp` module): form the
+  auxiliary polynomials `P/Q`, deflate the `(1 ± z⁻¹)` boundary roots, and
+  root-find their unit-circle roots (grid sign-change scan + bisection) to
+  recover the order-10 LSP frequencies for quantisation (§9.1). Round-trip
+  validated against `lsp_to_lpc` (`lsp_to_lpc(lpc_to_lsp(a)) ≈ a`), so the
+  encoder envelope path analyse → LPC → LSP is closed end-to-end.
 
 ## Not yet supported
 
@@ -272,14 +279,15 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   `Decoder` endpoints return `Error::NotImplemented` until that closes;
   the free-function `SpeexDecoder` / `NarrowbandDecoder` /
   `WidebandDecoder` decode paths are the public surface in the meantime.
-* Full encoder. The **LPC analysis front-end** has landed (round r372,
-  `lpc_analysis`): window → autocorrelate → Levinson-Durbin → order-10
-  LPC. Still missing: LPC→LSP conversion (root-find), the LSP-VQ codebook
-  search (the encode inverse of the r194 reconstruction), the
-  open-loop / closed-loop pitch + innovation codebook search, and the
-  packet assembly that bundles the quantised indices into a Speex frame.
-  The gain-quantiser encode direction (`quantise_frame_ol_exc_gain` etc.)
-  already exists.
+* Full encoder. The **LPC analysis front-end + LPC→LSP conversion** have
+  landed (round r372, `lpc_analysis` + `lpc_to_lsp`): window →
+  autocorrelate → Levinson-Durbin → order-10 LPC → LSP frequencies (the
+  whole envelope analysis chain, round-trippable against the decoder's
+  `lsp_to_lpc`). Still missing: the LSP-VQ codebook search (the encode
+  inverse of the r194 reconstruction), the open-loop / closed-loop pitch
+  + innovation codebook search, and the packet assembly that bundles the
+  quantised indices into a Speex frame. The gain-quantiser encode
+  direction (`quantise_frame_ol_exc_gain` etc.) already exists.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror

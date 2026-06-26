@@ -432,6 +432,7 @@ mod hb_synthesis;
 mod header;
 mod innovation;
 mod lpc_analysis;
+mod lpc_to_lsp;
 mod lsp;
 mod lsp_base;
 mod lsp_interp;
@@ -528,6 +529,7 @@ pub use lpc_analysis::{
     analyse as lpc_analyse, apply_analysis_window, autocorrelate, levinson_durbin,
     stabilise_autocorrelation, LpcAnalysisError, LpcCoefficients, AUTOCORR_LAGS, LPC_NOISE_FLOOR,
 };
+pub use lpc_to_lsp::{lpc_to_lsp, LpcToLspError, LSP_BISECT_ITERS, LSP_SCAN_STEPS};
 pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
