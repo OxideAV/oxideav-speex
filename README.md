@@ -242,6 +242,11 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   reconstruct_q10 → (+base) → lsp_to_lpc`, validated by
   `tests/encoder_envelope_chain.rs` (the reconstructed envelope faithfully
   matches the analysed one through both LSP regimes).
+* **Encoder front-end — high-band LSP-VQ quantiser** (round r372). The
+  wideband counterpart (`hb_lsp::quantise_q10` / `pack_hb_lsp_index`):
+  inverts the r214 high-band 2-stage MSVQ reconstruction (stage 1 full
+  8-coeff VQ, stage 2 residual) via the same sequential greedy search,
+  packing into the on-wire 12-bit `lsp_index`.
 
 ## Not yet supported
 

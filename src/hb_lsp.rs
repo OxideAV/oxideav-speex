@@ -77,9 +77,12 @@
 //!   silent on whether high-band LSPs participate in the same
 //!   r200-style four-way linear interpolation as the narrowband
 //!   LSPs (see Spec gaps noted).
-//! * No encoder-side codebook search. The reverse direction (LSPs
-//!   → 12-bit MSVQ index) needs a perceptual-weighted distance
-//!   metric and the two-stage residual search; out of scope here.
+//! * Encoder-side codebook search **lands in round r372**: the reverse
+//!   direction (LSPs → 12-bit MSVQ index) is [`quantise_q10`], a
+//!   sequential greedy two-stage residual search against the same staged
+//!   codebooks, with [`pack_hb_lsp_index`] producing the on-wire field.
+//!   It uses an unweighted squared-error metric (the perceptual weighting
+//!   the reference encoder applies is a refinement, not staged).
 //! * No high-band innovation codebook lookup. The high-band
 //!   excitation VQ is staged at
 //!   [`crate::codebooks::hb_innovation_8_128`] and
@@ -198,6 +201,63 @@ pub fn reconstruct_q10(stages: HbLspStages) -> Option<[i32; HB_LPC_ORDER]> {
     }
 
     Some(out)
+}
+
+/// Quantise an order-8 Q10 high-band LSP vector to the 2-stage MSVQ
+/// indices — the **encode-direction inverse** of [`reconstruct_q10`].
+///
+/// The high-band LSP quantiser is a 2-stage MSVQ (manual §10.1 / the
+/// staged `hb-lsp-cdbk-stage1/stage2`): stage 1 is a full 8-coefficient
+/// VQ (scale 1/256 → ×4 in Q10), stage 2 a residual VQ (scale 1/512 →
+/// ×2). The search is sequential greedy: pick the stage-1 row minimising
+/// squared error to `target`, subtract its scaled contribution, then pick
+/// the stage-2 row minimising the residual. Each stage uses the exact
+/// Q10 scaling [`reconstruct_q10`] applies, so the chosen indices
+/// reconstruct through the existing decoder path. The refinement is
+/// monotone (stage 2 only reduces the residual it sees); the greedy
+/// search is near-optimal, not guaranteed globally optimal.
+pub fn quantise_q10(target: &[i32; HB_LPC_ORDER]) -> HbLspStages {
+    let s1_factor = stage_shift_factor(hb_lsp_scale(1).expect("hb stage 1 scale"));
+    let s2_factor = stage_shift_factor(hb_lsp_scale(2).expect("hb stage 2 scale"));
+
+    // Stage 1: full-vector coarse VQ.
+    let stage1 = search_hb_stage(target, hb_lsp_stage1(), s1_factor);
+    let s1_row = hb_lsp_stage1()[stage1 as usize];
+    let mut residual = *target;
+    for (r, &v) in residual.iter_mut().zip(s1_row.iter()) {
+        *r -= i32::from(v) * s1_factor;
+    }
+
+    // Stage 2: residual refinement VQ.
+    let stage2 = search_hb_stage(&residual, hb_lsp_stage2(), s2_factor);
+
+    HbLspStages { stage1, stage2 }
+}
+
+/// Find the codebook row whose scaled contribution best matches `target`
+/// (least squared error) among an 8-coefficient high-band codebook.
+fn search_hb_stage(target: &[i32; HB_LPC_ORDER], cb: &[[i16; HB_LPC_ORDER]], factor: i32) -> u8 {
+    let mut best = 0u8;
+    let mut best_err = i64::MAX;
+    for (idx, row) in cb.iter().enumerate() {
+        let mut err = 0i64;
+        for (i, &v) in row.iter().enumerate() {
+            let d = i64::from(target[i]) - i64::from(i32::from(v) * factor);
+            err += d * d;
+        }
+        if err < best_err {
+            best_err = err;
+            best = idx as u8;
+        }
+    }
+    best
+}
+
+/// Pack the per-stage 6-bit indices of [`HbLspStages`] into the on-wire
+/// 12-bit `lsp_index` field (MSB-first: stage 1 high, stage 2 low),
+/// matching the layout [`HbLspStages::from_packed`] parses.
+pub fn pack_hb_lsp_index(stages: &HbLspStages) -> u16 {
+    (u16::from(stages.stage1) << HB_LSP_STAGE_BITS) | u16::from(stages.stage2)
 }
 
 #[cfg(test)]
@@ -404,5 +464,105 @@ mod tests {
         for sm in &WIDEBAND_HIGH_BAND_SUBMODES[1..] {
             assert_eq!(u32::from(sm.lsp_bits), HB_LSP_PACKED_BITS);
         }
+    }
+
+    // ---- High-band LSP quantiser (encode inverse) ----
+
+    fn hb_sq_err(recon: &[i32; HB_LPC_ORDER], target: &[i32; HB_LPC_ORDER]) -> i64 {
+        recon
+            .iter()
+            .zip(target.iter())
+            .map(|(a, b)| {
+                let d = i64::from(*a) - i64::from(*b);
+                d * d
+            })
+            .sum()
+    }
+
+    #[test]
+    fn quantise_zero_yields_valid_indices() {
+        let s = quantise_q10(&[0i32; HB_LPC_ORDER]);
+        assert!((s.stage1 as usize) < HB_LSP_STAGE_ENTRIES);
+        assert!((s.stage2 as usize) < HB_LSP_STAGE_ENTRIES);
+    }
+
+    #[test]
+    fn quantise_refinement_is_monotone() {
+        // For every codebook reconstruction the full quantiser error is
+        // no worse than the stage-1-only error.
+        for &(i1, i2) in &[(0u8, 0u8), (1, 2), (30, 50), (63, 63)] {
+            let target = reconstruct_q10(HbLspStages {
+                stage1: i1,
+                stage2: i2,
+            })
+            .unwrap();
+            let q = quantise_q10(&target);
+            let full = hb_sq_err(&reconstruct_q10(q).unwrap(), &target);
+
+            let s1_factor = stage_shift_factor(hb_lsp_scale(1).unwrap());
+            let s1_row = hb_lsp_stage1()[q.stage1 as usize];
+            let mut s1_recon = [0i32; HB_LPC_ORDER];
+            for (o, &v) in s1_recon.iter_mut().zip(s1_row.iter()) {
+                *o = i32::from(v) * s1_factor;
+            }
+            let stage1_err = hb_sq_err(&s1_recon, &target);
+            assert!(full <= stage1_err, "refinement worsened error");
+        }
+    }
+
+    #[test]
+    fn pack_then_from_packed_round_trips() {
+        let stages = HbLspStages {
+            stage1: 0b101010,
+            stage2: 0b010101,
+        };
+        let packed = pack_hb_lsp_index(&stages);
+        // Use a documented (mode 1) sub-mode so from_packed accepts it.
+        let sm = WIDEBAND_HIGH_BAND_SUBMODES[1];
+        let back = HbLspStages::from_packed(packed, &sm).unwrap();
+        assert_eq!(back, stages);
+    }
+
+    #[test]
+    fn quantise_then_pack_then_decode_round_trips() {
+        let stages = HbLspStages {
+            stage1: 12,
+            stage2: 44,
+        };
+        let target = reconstruct_q10(stages).unwrap();
+        let q = quantise_q10(&target);
+        let packed = pack_hb_lsp_index(&q);
+        let sm = WIDEBAND_HIGH_BAND_SUBMODES[1];
+        let decoded = HbLspStages::from_packed(packed, &sm).unwrap();
+        assert_eq!(
+            reconstruct_q10(decoded).unwrap(),
+            reconstruct_q10(q).unwrap()
+        );
+    }
+
+    #[test]
+    fn exact_codebook_stage1_target_quantises_to_zero_error() {
+        // A target that is exactly a stage-1 row (stage2 = 0 contributes a
+        // non-zero row, so use a target built from stage1 alone is not
+        // directly possible; instead confirm stage-1 search finds the
+        // generating row when stage 2 is the zero-row's complement). Simpler
+        // invariant: the chosen stage-1 row's error is the minimum over all
+        // rows for a stage-1-only target.
+        let s1_factor = stage_shift_factor(hb_lsp_scale(1).unwrap());
+        let row = hb_lsp_stage1()[20];
+        let mut target = [0i32; HB_LPC_ORDER];
+        for (t, &v) in target.iter_mut().zip(row.iter()) {
+            *t = i32::from(v) * s1_factor;
+        }
+        let picked = search_hb_stage(&target, hb_lsp_stage1(), s1_factor);
+        // The exact row must achieve zero error, so the search picks a
+        // zero-error row (index 20 unless a duplicate row exists).
+        let picked_row = hb_lsp_stage1()[picked as usize];
+        let mut err = 0i64;
+        for (i, &v) in picked_row.iter().enumerate() {
+            let d = i64::from(target[i]) - i64::from(i32::from(v) * s1_factor);
+            err += d * d;
+        }
+        assert_eq!(err, 0, "stage-1 search must find an exact-match row");
     }
 }

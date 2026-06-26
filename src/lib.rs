@@ -513,6 +513,7 @@ pub use hb_innovation::{
     HbInnovationMapping, HB_SUBFRAME_SAMPLES,
 };
 pub use hb_lsp::{
+    pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10,
     reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
     HB_LSP_PACKED_BITS, HB_LSP_STAGE_BITS,
 };

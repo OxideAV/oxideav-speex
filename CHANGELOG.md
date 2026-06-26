@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Encoder bootstrap — high-band LSP-VQ quantiser.** The
+  wideband counterpart of the narrowband `lsp_quant`: `hb_lsp::quantise_q10`
+  (exported `quantise_hb_lsp_q10`) inverts the r214 high-band LSP
+  reconstruction `hb_lsp::reconstruct_q10`. The high-band LSP quantiser is
+  a 2-stage MSVQ (manual §10.1 / the staged `hb-lsp-cdbk-stage1/stage2`):
+  stage 1 a full 8-coefficient VQ (scale 1/256 → ×4 Q10), stage 2 a
+  residual VQ (scale 1/512 → ×2). The search is sequential greedy — pick
+  the stage-1 row minimising squared error to the target, subtract, then
+  pick the stage-2 row on the residual — with the exact Q10 scaling the
+  decoder uses, so the indices reconstruct through the existing decoder
+  path. New `pack_hb_lsp_index` packs the two 6-bit indices into the
+  on-wire 12-bit `lsp_index` field (the layout `HbLspStages::from_packed`
+  parses). 5 new tests (monotone refinement, pack↔from_packed, the full
+  quantise→pack→decode round-trip, exact-row search). 572 lib tests, up
+  from 567.
+
 - Round r372: **Encoder bootstrap — radian→Q10 LSP bridge + full envelope
   encode chain.** `radians_to_lsp_q10` / `lsp_vector_radians_to_q10` are
   the encode-direction inverse of the decoder's `lsp_q10_to_radians` /
