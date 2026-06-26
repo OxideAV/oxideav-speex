@@ -339,6 +339,182 @@ impl InbandMessage {
     }
 }
 
+/// The acknowledge-policy a [`InbandKind::RequestAcknowledge`] (code 6)
+/// message asks the peer to adopt, per Table 5.1's
+/// "`(0=no, 1=all, 2=only for in-band data)`" content column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcknowledgePolicy {
+    /// `0` — do not acknowledge anything.
+    None,
+    /// `1` — acknowledge every packet.
+    All,
+    /// `2` — acknowledge only packets that carry in-band data.
+    InbandOnly,
+    /// Any other 4-bit value — the spec assigns no meaning; the raw
+    /// value is preserved so a caller can still inspect or log it.
+    Other(u8),
+}
+
+impl AcknowledgePolicy {
+    /// Map the raw 4-bit code-6 payload to its policy.
+    pub const fn from_value(value: u8) -> Self {
+        match value {
+            0 => AcknowledgePolicy::None,
+            1 => AcknowledgePolicy::All,
+            2 => AcknowledgePolicy::InbandOnly,
+            v => AcknowledgePolicy::Other(v),
+        }
+    }
+}
+
+/// The rate-control configuration a [`InbandKind::SetRateMode`] (code 7)
+/// message asks the encoder to adopt, decoded from the 4-bit payload's
+/// documented bitmask `CBR(0), VAD(1), DTX(3), VBR(5), VBR+DTX(7)`
+/// (Table 5.1). The two documented control bits are VBR (bit 2, value
+/// `4`) and the VAD/DTX pair: the manual's enumerated values decompose
+/// as VAD = bit 0 (`1`), DTX implies VAD (`3` = `1 | 2`), so DTX is
+/// signalled by bit 1 (`2`) accompanying the VAD bit. Pure CBR is the
+/// all-zero value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateModeConfig {
+    /// Variable bit-rate requested (value `5` / `7` set bit 2).
+    pub vbr: bool,
+    /// Voice-activity detection requested (value `1` / `3` set bit 0).
+    pub vad: bool,
+    /// Discontinuous transmission requested (value `3` / `7`); DTX
+    /// always implies [`Self::vad`].
+    pub dtx: bool,
+    /// The raw 4-bit value as transmitted, preserved so a caller can
+    /// distinguish an exact documented code from an undocumented
+    /// bit-combination that happens to set the same flags.
+    pub raw: u8,
+}
+
+impl RateModeConfig {
+    /// Decode the 4-bit code-7 payload into its three control flags.
+    ///
+    /// The manual enumerates exactly five values: `0` CBR, `1` VAD,
+    /// `3` DTX (VAD + DTX bit), `5` VBR, `7` VBR+DTX. Decoding the
+    /// individual bits — VBR = bit 2 (`4`), VAD = bit 0 (`1`),
+    /// DTX = bit 1 (`2`) — reproduces every enumerated value exactly
+    /// and degrades gracefully on an out-of-enumeration combination.
+    pub const fn from_value(value: u8) -> Self {
+        let v = value & 0x0F;
+        let vbr = v & 0b100 != 0;
+        let dtx = v & 0b010 != 0;
+        // DTX implies VAD; VAD is also set directly by bit 0.
+        let vad = (v & 0b001 != 0) || dtx;
+        Self {
+            vbr,
+            vad,
+            dtx,
+            raw: v,
+        }
+    }
+
+    /// True when the configuration is plain constant-bit-rate (no VBR,
+    /// no VAD, no DTX — the documented value `0`).
+    pub const fn is_cbr(&self) -> bool {
+        !self.vbr && !self.vad && !self.dtx
+    }
+}
+
+/// The fully-interpreted meaning of a mode-14 in-band signalling
+/// message — the semantic layer over [`InbandMessage`]'s raw `payload`.
+///
+/// [`InbandMessage::parse`] consumes the on-wire `code` + payload bits
+/// and surfaces them as an untyped `u64`; this enum decodes that
+/// payload per the Table 5.1 "Content" column into the typed request
+/// the peer is making. Every documented code maps to a dedicated
+/// variant; the four reserved codes (11 / 13 / 14 / 15) and any payload
+/// a documented code does not further constrain are carried through as
+/// raw values so no information is lost.
+///
+/// Spec basis: *The Speex Codec Manual* §5.5 + Table 5.1. The decoder
+/// is free to "comply or ignore" (the manual's words); this enum lets a
+/// consumer that *wants* to comply read the request without re-deriving
+/// the bit layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InbandRequest {
+    /// Code 0 — set perceptual enhancement off (`false`) / on (`true`).
+    PerceptualEnhancement(bool),
+    /// Code 1 — be less aggressive due to packet loss (`true` = engage).
+    LessAggressive(bool),
+    /// Code 2 — switch to mode `N` (the requested mode id, `0..=15`).
+    SwitchMode(u8),
+    /// Code 3 — switch the low (narrowband) band of a wideband stream
+    /// to mode `N`.
+    SwitchModeLowBand(u8),
+    /// Code 4 — switch the high band of a wideband stream to mode `N`.
+    SwitchModeHighBand(u8),
+    /// Code 5 — switch to VBR quality `N` (`0..=15`).
+    SwitchQualityVbr(u8),
+    /// Code 6 — adopt the given acknowledge policy.
+    RequestAcknowledge(AcknowledgePolicy),
+    /// Code 7 — adopt the given rate-control configuration.
+    SetRateMode(RateModeConfig),
+    /// Code 8 — the transmitted 8-bit character.
+    TransmitCharacter(u8),
+    /// Code 9 — intensity-stereo balance byte. The manual stages only
+    /// "Intensity stereo information (8 bits)"; the byte is surfaced
+    /// verbatim because the stereo *decode* algorithm that consumes it
+    /// is not staged (recorded docs gap).
+    IntensityStereo(u8),
+    /// Code 10 — the peer's maximum acceptable bit-rate in bytes/second.
+    AnnounceMaxBitrate(u16),
+    /// Code 12 — acknowledge receipt of packet number `N`.
+    AcknowledgePacket(u32),
+    /// Codes 11 / 13 / 14 / 15 — reserved by the spec. The raw payload
+    /// (zero-extended into a `u64`) and its declared bit width are
+    /// carried so a caller can still skip / log the message.
+    Reserved {
+        /// The reserved code value (`11`, `13`, `14`, or `15`).
+        code: u8,
+        /// The declared payload width in bits (Table 5.1).
+        payload_bits: u32,
+        /// The raw payload bits, MSB-first into the low end of a `u64`.
+        payload: u64,
+    },
+}
+
+impl InbandMessage {
+    /// Interpret this message's raw `payload` per the Table 5.1 "Content"
+    /// column, returning the typed [`InbandRequest`] the peer is making.
+    ///
+    /// This is a pure decode of the already-parsed `payload` — it reads
+    /// no further bits. The mapping is total: every `code` (`0..=15`)
+    /// produces a variant, with the four reserved codes and any
+    /// unconstrained payload preserved as raw values.
+    pub const fn interpret(&self) -> InbandRequest {
+        let p = self.payload;
+        match self.spec.kind {
+            InbandKind::PerceptualEnhancement => InbandRequest::PerceptualEnhancement(p & 1 != 0),
+            InbandKind::LessAggressive => InbandRequest::LessAggressive(p & 1 != 0),
+            InbandKind::SwitchMode => InbandRequest::SwitchMode((p & 0x0F) as u8),
+            InbandKind::SwitchModeLowBand => InbandRequest::SwitchModeLowBand((p & 0x0F) as u8),
+            InbandKind::SwitchModeHighBand => InbandRequest::SwitchModeHighBand((p & 0x0F) as u8),
+            InbandKind::SwitchQualityVbr => InbandRequest::SwitchQualityVbr((p & 0x0F) as u8),
+            InbandKind::RequestAcknowledge => {
+                InbandRequest::RequestAcknowledge(AcknowledgePolicy::from_value((p & 0x0F) as u8))
+            }
+            InbandKind::SetRateMode => {
+                InbandRequest::SetRateMode(RateModeConfig::from_value((p & 0x0F) as u8))
+            }
+            InbandKind::TransmitCharacter => InbandRequest::TransmitCharacter((p & 0xFF) as u8),
+            InbandKind::IntensityStereo => InbandRequest::IntensityStereo((p & 0xFF) as u8),
+            InbandKind::AnnounceMaxBitrate => {
+                InbandRequest::AnnounceMaxBitrate((p & 0xFFFF) as u16)
+            }
+            InbandKind::AcknowledgePacket => InbandRequest::AcknowledgePacket(p as u32),
+            InbandKind::Reserved => InbandRequest::Reserved {
+                code: self.spec.code,
+                payload_bits: self.spec.payload_bits,
+                payload: p,
+            },
+        }
+    }
+}
+
 /// Helper: a u32 mask that selects the low `n` bits (`n` in 1..=32).
 /// `n == 32` returns `u32::MAX` (avoids the `1 << 32` UB shift).
 fn masked(n: u32) -> u32 {
@@ -930,5 +1106,165 @@ mod tests {
         assert_eq!(parsed_hdr.mode_id, 14);
         assert_eq!(parsed_msg.spec.code, 8);
         assert_eq!(parsed_msg.payload, 0x5A);
+    }
+
+    // ---- Semantic interpretation (`InbandMessage::interpret`) ----
+
+    /// Build an `InbandMessage` for `code` carrying `payload` directly,
+    /// bypassing the bit-stream (the interpret layer reads no bits).
+    fn msg(code: u8, payload: u64) -> InbandMessage {
+        InbandMessage {
+            spec: inband_code_spec(code),
+            payload,
+        }
+    }
+
+    #[test]
+    fn interpret_perceptual_enhancement_toggles_on_low_bit() {
+        assert_eq!(
+            msg(0, 0).interpret(),
+            InbandRequest::PerceptualEnhancement(false)
+        );
+        assert_eq!(
+            msg(0, 1).interpret(),
+            InbandRequest::PerceptualEnhancement(true)
+        );
+    }
+
+    #[test]
+    fn interpret_less_aggressive_toggles_on_low_bit() {
+        assert_eq!(msg(1, 1).interpret(), InbandRequest::LessAggressive(true));
+        assert_eq!(msg(1, 0).interpret(), InbandRequest::LessAggressive(false));
+    }
+
+    #[test]
+    fn interpret_switch_mode_variants_carry_target_mode() {
+        assert_eq!(msg(2, 7).interpret(), InbandRequest::SwitchMode(7));
+        assert_eq!(msg(3, 5).interpret(), InbandRequest::SwitchModeLowBand(5));
+        assert_eq!(msg(4, 4).interpret(), InbandRequest::SwitchModeHighBand(4));
+        assert_eq!(msg(5, 9).interpret(), InbandRequest::SwitchQualityVbr(9));
+        // The mode/quality field is 4 bits — any high bits are masked.
+        assert_eq!(msg(2, 0xFF).interpret(), InbandRequest::SwitchMode(15));
+    }
+
+    #[test]
+    fn interpret_request_acknowledge_maps_all_documented_policies() {
+        assert_eq!(
+            msg(6, 0).interpret(),
+            InbandRequest::RequestAcknowledge(AcknowledgePolicy::None)
+        );
+        assert_eq!(
+            msg(6, 1).interpret(),
+            InbandRequest::RequestAcknowledge(AcknowledgePolicy::All)
+        );
+        assert_eq!(
+            msg(6, 2).interpret(),
+            InbandRequest::RequestAcknowledge(AcknowledgePolicy::InbandOnly)
+        );
+        // Undocumented value preserved.
+        assert_eq!(
+            msg(6, 9).interpret(),
+            InbandRequest::RequestAcknowledge(AcknowledgePolicy::Other(9))
+        );
+    }
+
+    #[test]
+    fn interpret_set_rate_mode_decodes_every_documented_value() {
+        // CBR(0), VAD(1), DTX(3), VBR(5), VBR+DTX(7) — Table 5.1.
+        let cbr = RateModeConfig::from_value(0);
+        assert!(cbr.is_cbr() && !cbr.vbr && !cbr.vad && !cbr.dtx);
+
+        let vad = RateModeConfig::from_value(1);
+        assert!(vad.vad && !vad.dtx && !vad.vbr && !vad.is_cbr());
+
+        let dtx = RateModeConfig::from_value(3);
+        // DTX implies VAD.
+        assert!(dtx.dtx && dtx.vad && !dtx.vbr);
+
+        let vbr = RateModeConfig::from_value(5);
+        assert!(vbr.vbr && vbr.vad && !vbr.dtx);
+
+        let vbr_dtx = RateModeConfig::from_value(7);
+        assert!(vbr_dtx.vbr && vbr_dtx.vad && vbr_dtx.dtx);
+
+        // Through the message interpret path.
+        match msg(7, 3).interpret() {
+            InbandRequest::SetRateMode(c) => {
+                assert!(c.dtx && c.vad && c.raw == 3);
+            }
+            other => panic!("expected SetRateMode, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn interpret_transmit_character_and_intensity_stereo_keep_full_byte() {
+        assert_eq!(
+            msg(8, 0x41).interpret(),
+            InbandRequest::TransmitCharacter(0x41)
+        );
+        assert_eq!(
+            msg(9, 0x80).interpret(),
+            InbandRequest::IntensityStereo(0x80)
+        );
+        // Both are 8-bit fields; payload above 8 bits is masked.
+        assert_eq!(
+            msg(8, 0x1FF).interpret(),
+            InbandRequest::TransmitCharacter(0xFF)
+        );
+    }
+
+    #[test]
+    fn interpret_max_bitrate_and_packet_ack_carry_full_width() {
+        assert_eq!(
+            msg(10, 64_000).interpret(),
+            InbandRequest::AnnounceMaxBitrate(64_000)
+        );
+        assert_eq!(
+            msg(12, 0xDEAD_BEEF).interpret(),
+            InbandRequest::AcknowledgePacket(0xDEAD_BEEF)
+        );
+    }
+
+    #[test]
+    fn interpret_reserved_codes_preserve_raw_payload_and_width() {
+        for &code in &[11u8, 13, 14, 15] {
+            let spec = inband_code_spec(code);
+            let payload = 0x0123_4567_89AB_CDEFu64 & ((1u128 << spec.payload_bits) - 1) as u64;
+            match msg(code, payload).interpret() {
+                InbandRequest::Reserved {
+                    code: c,
+                    payload_bits,
+                    payload: p,
+                } => {
+                    assert_eq!(c, code);
+                    assert_eq!(payload_bits, spec.payload_bits);
+                    assert_eq!(p, payload);
+                }
+                other => panic!("code {} should be Reserved, got {:?}", code, other),
+            }
+        }
+    }
+
+    #[test]
+    fn interpret_is_total_over_every_code() {
+        // Every 4-bit code produces a variant — the match is exhaustive
+        // and never panics, for an arbitrary payload.
+        for code in 0u8..16 {
+            let _ = msg(code, 0xFFFF_FFFF_FFFF_FFFF).interpret();
+        }
+    }
+
+    #[test]
+    fn parse_then_interpret_round_trips_a_dtx_rate_request() {
+        // Full path: pack a code-7 DTX request, parse it, interpret it.
+        let buf = pack_inband_byte(7, 4, 3);
+        let mut r = BitReader::new(&buf);
+        let parsed = InbandMessage::parse(&mut r).unwrap();
+        match parsed.interpret() {
+            InbandRequest::SetRateMode(c) => {
+                assert!(c.dtx && c.vad && !c.vbr);
+            }
+            other => panic!("expected SetRateMode(DTX), got {:?}", other),
+        }
     }
 }

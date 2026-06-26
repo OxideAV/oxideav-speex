@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **In-band signalling semantic interpretation +
+  decoder control-frame surfacing.** The §5.5 mode-14 in-band messages
+  were parsed to a raw `(code, payload)` `InbandMessage` but their
+  meaning was never decoded and the top-level decoder discarded them
+  (`DecodedFrame::Control` was a unit variant). This round adds the
+  semantic layer over Table 5.1's "Content" column. New
+  `InbandMessage::interpret() -> InbandRequest` decodes the raw payload
+  into the typed request the peer is making: `PerceptualEnhancement(bool)`
+  / `LessAggressive(bool)` / `SwitchMode(u8)` / `SwitchModeLowBand(u8)` /
+  `SwitchModeHighBand(u8)` / `SwitchQualityVbr(u8)` /
+  `RequestAcknowledge(AcknowledgePolicy)` / `SetRateMode(RateModeConfig)`
+  / `TransmitCharacter(u8)` / `IntensityStereo(u8)` /
+  `AnnounceMaxBitrate(u16)` / `AcknowledgePacket(u32)` / `Reserved{..}`.
+  Two new typed helpers: `AcknowledgePolicy` (code 6: `None` / `All` /
+  `InbandOnly` / `Other(u8)`) and `RateModeConfig` (code 7: decodes the
+  documented `CBR(0) / VAD(1) / DTX(3) / VBR(5) / VBR+DTX(7)` bitmask
+  into independent `vbr` / `vad` / `dtx` flags — bit 2 = VBR, bit 0 =
+  VAD, bit 1 = DTX-with-VAD — reproducing every enumerated value exactly,
+  plus `is_cbr()`). The interpret mapping is *total* over all sixteen
+  codes and reads no further bits. Spec basis: *The Speex Codec Manual*
+  §5.5 + Table 5.1 (staged in `docs/audio/speex/speex-manual.pdf`).
+  The top-level `SpeexDecoder` now surfaces this end-to-end:
+  `DecodedFrame::Control` carries a typed `ControlMessage`
+  (`Inband { message, request }` for mode 14 / `Custom { size_bytes }`
+  for mode 13), so a consumer can act on a mode-switch / rate-mode /
+  intensity-stereo request without re-parsing the bit-stream. New
+  `DecodedFrame::control_message()` accessor + `ControlMessage` export.
+  13 new unit tests in `signalling::tests` + 3 new decoder tests.
+  530 lib tests, up from 517. The intensity-stereo *decode* algorithm
+  (balance byte → L/R reconstruction) remains a recorded docs gap — the
+  manual stages only the 8-bit field, not the panning law.
+
 - Round r369: **`UwbFrameLayout::for_header_mode` — header → sub-band
   framing descriptor.** Maps a `SpeexHeader::mode` field value (`0` /
   `1` / `2` = the `SPEEX_MODE_NARROWBAND` / `_WIDEBAND` / `_ULTRAWIDEBAND`

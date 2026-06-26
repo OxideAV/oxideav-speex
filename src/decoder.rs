@@ -41,6 +41,7 @@ use crate::narrowband_decoder::{
 };
 use crate::packet::{PacketError, PacketFrame, PacketFrames};
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
+use crate::signalling::{InbandMessage, InbandRequest};
 use crate::submode::Submode;
 use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
 use crate::wideband::WidebandSubmode;
@@ -64,8 +65,40 @@ pub enum DecodedFrame {
         wideband_pcm: Box<[f64; QMF_WIDEBAND_FRAME]>,
     },
     /// A §5.5 in-band signalling or custom-message pseudo-frame — carries
-    /// no audio, surfaced so the caller can act on the control message.
-    Control,
+    /// no audio, surfaced so the caller can act on the control message. The
+    /// payload is the typed [`ControlMessage`] decoded from the §5.5 body
+    /// (round r372), so a caller can read a mode-switch / rate-mode /
+    /// intensity-stereo request without re-parsing the bit-stream.
+    Control(ControlMessage),
+}
+
+/// The decoded content of a §5.5 control pseudo-frame surfaced on
+/// [`DecodedFrame::Control`].
+///
+/// A Speex packet can interleave audio frames with two kinds of
+/// non-audio pseudo-frame (manual §5.5): a **mode-14 in-band signalling**
+/// message (a Table 5.1 request to the peer) and a **mode-13 custom**
+/// message (an application-defined opaque body the decoder only skips).
+/// This enum distinguishes the two and carries the in-band message's
+/// fully-interpreted [`InbandRequest`] for the former.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlMessage {
+    /// A mode-14 in-band signalling request, already interpreted per
+    /// Table 5.1 (the typed [`InbandRequest`]) alongside the raw parsed
+    /// [`InbandMessage`] for callers that want the unprocessed payload.
+    Inband {
+        /// The raw parsed message (code + payload bits).
+        message: InbandMessage,
+        /// The typed interpretation of the message per Table 5.1.
+        request: InbandRequest,
+    },
+    /// A mode-13 custom in-band message — only its declared byte length
+    /// is meaningful at the codec layer (the body is application-opaque,
+    /// §5.5).
+    Custom {
+        /// The opaque body's declared length in bytes.
+        size_bytes: u8,
+    },
 }
 
 impl DecodedFrame {
@@ -74,7 +107,7 @@ impl DecodedFrame {
     pub fn low_band_len(&self) -> usize {
         match self {
             DecodedFrame::Narrowband(_) | DecodedFrame::Wideband { .. } => NARROWBAND_FRAME_SAMPLES,
-            DecodedFrame::Control => 0,
+            DecodedFrame::Control(_) => 0,
         }
     }
 
@@ -102,7 +135,7 @@ impl DecodedFrame {
                     .map(|&s| crate::saturate_i16(s))
                     .collect(),
             ),
-            DecodedFrame::Control => None,
+            DecodedFrame::Control(_) => None,
         }
     }
 
@@ -114,7 +147,17 @@ impl DecodedFrame {
         match self {
             DecodedFrame::Narrowband(_) => Some(8_000),
             DecodedFrame::Wideband { .. } => Some(16_000),
-            DecodedFrame::Control => None,
+            DecodedFrame::Control(_) => None,
+        }
+    }
+
+    /// The control message carried by a [`Self::Control`] pseudo-frame, or
+    /// `None` for an audio frame. Convenience for a caller filtering a
+    /// decoded packet for the §5.5 in-band / custom signalling requests.
+    pub fn control_message(&self) -> Option<ControlMessage> {
+        match self {
+            DecodedFrame::Control(m) => Some(*m),
+            _ => None,
         }
     }
 }
@@ -288,8 +331,17 @@ impl SpeexDecoder {
                     wideband_pcm: Box::new(wideband_pcm),
                 })
             }
-            PacketFrame::InbandSignalling { .. } | PacketFrame::CustomInband { .. } => {
-                Ok(DecodedFrame::Control)
+            PacketFrame::InbandSignalling { message, .. } => {
+                let request = message.interpret();
+                Ok(DecodedFrame::Control(ControlMessage::Inband {
+                    message,
+                    request,
+                }))
+            }
+            PacketFrame::CustomInband { message, .. } => {
+                Ok(DecodedFrame::Control(ControlMessage::Custom {
+                    size_bytes: message.size_bytes,
+                }))
             }
         }
     }
@@ -548,7 +600,7 @@ mod tests {
         let typed = dec_typed.decode_packet(&pkt).expect("decodes");
         let control_count = typed
             .iter()
-            .filter(|f| matches!(f, DecodedFrame::Control))
+            .filter(|f| matches!(f, DecodedFrame::Control(_)))
             .count();
         let expected: Vec<i16> = typed.iter().filter_map(|f| f.pcm_i16()).flatten().collect();
 
@@ -575,9 +627,81 @@ mod tests {
         let frames = dec.decode_packet(&pkt).expect("decodes");
         let control = frames
             .iter()
-            .find(|f| matches!(f, DecodedFrame::Control))
+            .find(|f| matches!(f, DecodedFrame::Control(_)))
             .expect("an in-band signalling control frame is present");
         assert!(control.pcm_i16().is_none());
         assert_eq!(control.sample_rate_hz(), None);
+    }
+
+    #[test]
+    fn control_frame_surfaces_interpreted_inband_request() {
+        // Mode 14, code 0 (perceptual enhancement) with payload bit 1
+        // ("enhancement on") decodes to a Control frame carrying the
+        // interpreted request.
+        let mut w = BitWriter::new();
+        w.write_bit(0).unwrap(); // narrowband flag
+        w.write(14, 4).unwrap(); // mode 14 = in-band signalling
+        w.write(0, 4).unwrap(); // code 0
+        w.write_bit(1).unwrap(); // payload bit = 1
+        let pkt = w.into_bytes();
+
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let control = frames
+            .iter()
+            .find_map(|f| f.control_message())
+            .expect("a control message is present");
+        match control {
+            ControlMessage::Inband { message, request } => {
+                assert_eq!(message.spec.code, 0);
+                assert_eq!(request, InbandRequest::PerceptualEnhancement(true));
+            }
+            other => panic!("expected Inband control, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn control_frame_surfaces_dtx_rate_request() {
+        // Mode 14, code 7 (set rate mode), value 3 = DTX (implies VAD).
+        let mut w = BitWriter::new();
+        w.write_bit(0).unwrap();
+        w.write(14, 4).unwrap();
+        w.write(7, 4).unwrap(); // code 7
+        w.write(3, 4).unwrap(); // value 3 = DTX
+        let pkt = w.into_bytes();
+
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let control = frames
+            .iter()
+            .find_map(|f| f.control_message())
+            .expect("a control message is present");
+        match control {
+            ControlMessage::Inband {
+                request: InbandRequest::SetRateMode(cfg),
+                ..
+            } => {
+                assert!(cfg.dtx && cfg.vad && !cfg.vbr);
+            }
+            other => panic!("expected SetRateMode(DTX), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn control_frame_surfaces_custom_message_size() {
+        // Mode 13 (custom in-band), size_bytes = 0.
+        let mut w = BitWriter::new();
+        w.write_bit(0).unwrap();
+        w.write(13, 4).unwrap(); // mode 13 = custom in-band
+        w.write(0, 5).unwrap(); // size_bytes = 0
+        let pkt = w.into_bytes();
+
+        let mut dec = SpeexDecoder::new();
+        let frames = dec.decode_packet(&pkt).expect("decodes");
+        let control = frames
+            .iter()
+            .find_map(|f| f.control_message())
+            .expect("a control message is present");
+        assert_eq!(control, ControlMessage::Custom { size_bytes: 0 });
     }
 }

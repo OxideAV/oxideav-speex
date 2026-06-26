@@ -466,7 +466,7 @@ pub use codebooks::{
     NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS,
     PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
-pub use decoder::{DecodeError, DecodedFrame, SpeexDecoder};
+pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
 pub use fixed_codebook_gain::{
     fixed_codebook_gain_indices, FixedCodebookGainIndices, FrameInnovationGainIndex,
@@ -557,9 +557,9 @@ pub use packet::{parse_packet, PacketError, PacketFrame, PacketFrames};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
 pub use signalling::{
-    inband_code_spec, CustomInbandMessage, InbandCodeSpec, InbandKind, InbandMessage,
-    SignallingError, CUSTOM_INBAND_MAX_BYTES, CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS,
-    INBAND_TABLE_5_1,
+    inband_code_spec, AcknowledgePolicy, CustomInbandMessage, InbandCodeSpec, InbandKind,
+    InbandMessage, InbandRequest, RateModeConfig, SignallingError, CUSTOM_INBAND_MAX_BYTES,
+    CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS, INBAND_TABLE_5_1,
 };
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
 pub use synthesis::SynthesisFilter;

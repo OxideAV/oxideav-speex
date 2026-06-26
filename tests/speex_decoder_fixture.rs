@@ -73,7 +73,7 @@ fn top_level_decoder_walks_fixture_to_pcm() {
                 DecodedFrame::Wideband { .. } => {
                     panic!("narrowband fixture should not yield wideband frames")
                 }
-                DecodedFrame::Control => {}
+                DecodedFrame::Control(_) => {}
             }
         }
     }
