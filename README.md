@@ -188,6 +188,37 @@ path** (NB low band + HB synthesis + QMF recombination) are wired
 end-to-end and produce finite, input-responsive, deterministic PCM from a
 real `speexenc` stream through the top-level `SpeexDecoder`.
 
+* **In-band signalling — semantic interpretation** (round r372). The §5.5
+  mode-14 in-band messages parse to a raw `(code, payload)` `InbandMessage`
+  *and* now decode to a typed `InbandRequest` via `InbandMessage::interpret`
+  (Table 5.1 "Content" column): perceptual-enhancement / mode-switch /
+  rate-mode (the `CBR/VAD/DTX/VBR` bitmask decoded into independent flags
+  by `RateModeConfig`) / acknowledge-policy (`AcknowledgePolicy`) /
+  intensity-stereo balance / max-bitrate / packet-ack, with reserved-code
+  passthrough. The top-level `SpeexDecoder` surfaces this end-to-end:
+  `DecodedFrame::Control` carries a typed `ControlMessage`
+  (`Inband { message, request }` / `Custom { size_bytes }`), so a consumer
+  can act on a mode-switch / DTX-rate / stereo request without re-parsing
+  the bit-stream.
+* **Packet structural inspection** (round r372). `PacketFrame::kind` /
+  `is_audio` / `is_control` / `mode_id` classify a frame by its mode-class
+  (`FrameKind`); `PacketSummary::walk` walks a packet once (no audio
+  decode) and tallies its per-kind frame counts — `audio_frames` /
+  `control_frames` / `total_frames` / `is_wideband` — for a header-vs-payload
+  cross-check against `SpeexHeader::frames_per_packet` (§7.3) and rate-class
+  routing.
+* **Encoder front-end — LPC analysis** (round r372). The first encoder
+  stage (`lpc_analysis` module): window (the staged 200-sample asymmetric
+  analysis window) → autocorrelate (`R(m) = Σ x[i]·x[i−m]`, order 10) →
+  stabilise (`R(0) *= 1.0001` white-noise floor + the staged lag window) →
+  Levinson-Durbin (`R·a = r` → order-10 LPC). Output `a[0..10]` uses the
+  decoder's `A(z) = 1 − Σ aᵢ z⁻ⁱ` convention, so it is round-trippable
+  against the existing synthesis path. Grounds the encode direction
+  (manual §8.2 / §9.1) on textbook linear-prediction primitives + the
+  staged window data. `lpc_analyse` / `apply_analysis_window` /
+  `autocorrelate` / `stabilise_autocorrelation` / `levinson_durbin` /
+  `LpcCoefficients`.
+
 ## Not yet supported
 
 * Bit-exact full decode. The scalar excitation-gain quantiser levels are
@@ -241,7 +272,14 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   `Decoder` endpoints return `Error::NotImplemented` until that closes;
   the free-function `SpeexDecoder` / `NarrowbandDecoder` /
   `WidebandDecoder` decode paths are the public surface in the meantime.
-* Encoder.
+* Full encoder. The **LPC analysis front-end** has landed (round r372,
+  `lpc_analysis`): window → autocorrelate → Levinson-Durbin → order-10
+  LPC. Still missing: LPC→LSP conversion (root-find), the LSP-VQ codebook
+  search (the encode inverse of the r194 reconstruction), the
+  open-loop / closed-loop pitch + innovation codebook search, and the
+  packet assembly that bundles the quantised indices into a Speex frame.
+  The gain-quantiser encode direction (`quantise_frame_ol_exc_gain` etc.)
+  already exists.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror

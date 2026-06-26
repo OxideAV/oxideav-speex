@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r372: **Encoder bootstrap — LPC analysis front-end (`lpc_analysis`
+  module).** The first stage of the Speex *encoder* (the inverse of the
+  decoder's LSP→LPC / synthesis path): turn a frame of input speech into
+  the order-10 short-term LPC predictor. Per *The Speex Codec Manual* §8.2
+  / §9.1 the chain is window → autocorrelate → stabilise → Levinson-Durbin.
+  New functions: `apply_analysis_window` (the staged 200-sample asymmetric
+  analysis window centred on the 4th sub-frame), `autocorrelate`
+  (`R(m) = Σ x[i]·x[i−m]` to order 10 — the Toeplitz right-hand side),
+  `stabilise_autocorrelation` (the `R(0) *= 1.0001` white-noise floor — the
+  manual's worked value — plus the staged 11-tap autocorrelation lag
+  window), `levinson_durbin` (solves the symmetric Toeplitz system
+  `R·a = r` in `O(N²)`, returning the `LpcCoefficients { a, error }`), and
+  `analyse` running the full pipeline. The output `a[0..10]` uses the same
+  `A(z) = 1 − Σ aᵢ z⁻ⁱ` convention the decoder's `lsp_to_lpc` produces,
+  so the encoder front-end is round-trippable against the existing
+  synthesis path. Grounded entirely on §8.2's structural prose + the staged
+  analysis/lag window **data** (new float accessors
+  `codebooks::lpc_analysis_window_float` / `lpc_lag_window_float`);
+  windowing / autocorrelation / Levinson-Durbin are the textbook
+  linear-prediction primitives the manual names. New constants
+  `LPC_NOISE_FLOOR` (1.0001) / `AUTOCORR_LAGS` (11), `LpcAnalysisError`.
+  13 new unit tests including a known-AR-process recovery check (the
+  recovered predictor's leading coefficients match the generating filter)
+  and the residual-error-in-`[0, R(0)]` invariant. 550 lib tests, up
+  from 538.
+
 - Round r372: **Packet frame classification + structural summary.**
   A consumer that wanted to know "what is in this packet" before / instead
   of a full decode had to match on the `PacketFrame` enum by hand. New

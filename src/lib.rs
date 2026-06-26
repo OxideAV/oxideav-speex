@@ -431,6 +431,7 @@ mod hb_lsp_interp;
 mod hb_synthesis;
 mod header;
 mod innovation;
+mod lpc_analysis;
 mod lsp;
 mod lsp_base;
 mod lsp_interp;
@@ -459,12 +460,12 @@ pub use bitreader::{BitError, BitReader, BitWriter};
 pub use codebooks::{
     hb_innovation_10_32, hb_innovation_8_128, hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2,
     innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
-    innovation_8_128, lpc_analysis_window_q15, lpc_lag_window_q15, nb_lsp_high1, nb_lsp_high2,
-    nb_lsp_low1, nb_lsp_low2, nb_lsp_scale, nb_lsp_stage0, pitch_gain_5bit, pitch_gain_7bit,
-    qmf_h0_float, qmf_h0_q15, InnovationShape, NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES,
-    LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN, NB_LSP_ORDER, NB_LSP_SPLIT_HALF,
-    NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS,
-    PITCH_GAIN_COLS, QMF_FILTER_LEN,
+    innovation_8_128, lpc_analysis_window_float, lpc_analysis_window_q15, lpc_lag_window_float,
+    lpc_lag_window_q15, nb_lsp_high1, nb_lsp_high2, nb_lsp_low1, nb_lsp_low2, nb_lsp_scale,
+    nb_lsp_stage0, pitch_gain_5bit, pitch_gain_7bit, qmf_h0_float, qmf_h0_q15, InnovationShape,
+    NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES, LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN,
+    NB_LSP_ORDER, NB_LSP_SPLIT_HALF, NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES,
+    PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS, PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
 pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
@@ -522,6 +523,10 @@ pub use header::{
 pub use innovation::{
     decode_subframe as decode_innovation_subframe, sub_vector as innovation_sub_vector,
     InnovationCodebook, InnovationError, InnovationMapping, SUBFRAME_SAMPLES,
+};
+pub use lpc_analysis::{
+    analyse as lpc_analyse, apply_analysis_window, autocorrelate, levinson_durbin,
+    stabilise_autocorrelation, LpcAnalysisError, LpcCoefficients, AUTOCORR_LAGS, LPC_NOISE_FLOOR,
 };
 pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,

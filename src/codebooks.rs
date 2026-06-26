@@ -433,11 +433,15 @@ pub const QMF_FILTER_LEN: usize = 64;
 
 const LPC_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-analysis-window-q15.csv");
 const LAG_WINDOW_Q15_CSV: &str = include_str!("../tables/lpc-autocorr-lag-window-q15.csv");
+const LPC_WINDOW_FLOAT_CSV: &str = include_str!("../tables/lpc-analysis-window-float.csv");
+const LAG_WINDOW_FLOAT_CSV: &str = include_str!("../tables/lpc-autocorr-lag-window-float.csv");
 const QMF_H0_Q15_CSV: &str = include_str!("../tables/qmf-filter-h0-q15.csv");
 const QMF_H0_FLOAT_CSV: &str = include_str!("../tables/qmf-filter-h0-float.csv");
 
 static LPC_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
 static LAG_WINDOW_Q15: OnceLock<Vec<i16>> = OnceLock::new();
+static LPC_WINDOW_FLOAT: OnceLock<Vec<f64>> = OnceLock::new();
+static LAG_WINDOW_FLOAT: OnceLock<Vec<f64>> = OnceLock::new();
 static QMF_H0_Q15: OnceLock<Vec<i16>> = OnceLock::new();
 static QMF_H0_FLOAT: OnceLock<Vec<f64>> = OnceLock::new();
 
@@ -449,6 +453,24 @@ pub fn lpc_analysis_window_q15() -> &'static [i16] {
 /// 11-tap autocorrelation lag window (Q15 fixed-point).
 pub fn lpc_lag_window_q15() -> &'static [i16] {
     LAG_WINDOW_Q15.get_or_init(|| parse_column(LAG_WINDOW_Q15_CSV, LPC_LAG_WINDOW_LEN))
+}
+
+/// 200-sample asymmetric LPC analysis window (float variant), the
+/// encoder front-end's pre-autocorrelation window (manual §9.1: an
+/// asymmetric window centred on the 4th sub-frame). Same window as
+/// [`lpc_analysis_window_q15`] at full float precision.
+pub fn lpc_analysis_window_float() -> &'static [f64] {
+    LPC_WINDOW_FLOAT
+        .get_or_init(|| parse_float_column(LPC_WINDOW_FLOAT_CSV, LPC_ANALYSIS_WINDOW_LEN))
+}
+
+/// 11-tap autocorrelation lag window (float variant), applied to the
+/// autocorrelation sequence `R[0..=10]` before the Levinson-Durbin
+/// recursion (manual §8.2: "apply a window to the auto-correlation …
+/// reducing sharp resonances"). Same window as [`lpc_lag_window_q15`]
+/// at full float precision.
+pub fn lpc_lag_window_float() -> &'static [f64] {
+    LAG_WINDOW_FLOAT.get_or_init(|| parse_float_column(LAG_WINDOW_FLOAT_CSV, LPC_LAG_WINDOW_LEN))
 }
 
 /// 64-tap QMF analysis filter `h0` (Q15 fixed-point) used by the
