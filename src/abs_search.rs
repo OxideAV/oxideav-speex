@@ -109,9 +109,9 @@ impl FilteredTaps {
             f64::from(taps.taps[2]) / f64::from(PITCH_GAIN_SCALING),
         ];
         let mut err = 0.0_f64;
-        for n in 0..SUBFRAME_SAMPLES {
+        for (n, &tv) in target.iter().enumerate() {
             let s = g[0] * self.y[0][n] + g[1] * self.y[1][n] + g[2] * self.y[2][n];
-            let d = target[n] - s;
+            let d = tv - s;
             err += d * d;
         }
         err
@@ -141,7 +141,11 @@ fn gain_codebook_len(quant: PitchGainQuant) -> u32 {
     }
 }
 
-/// Closed-loop adaptive-codebook (pitch) search over `[t_min, t_max]`.
+/// Perceptual-weighting factor pair `(γ1, γ2)` for the search.
+pub type WeightFactors = (f64, f64);
+
+/// Closed-loop adaptive-codebook (pitch) search over the inclusive
+/// candidate-period range `periods`.
 ///
 /// For each candidate period the three tap basis vectors are filtered
 /// through the weighted synthesis cascade and every gain-VQ codebook
@@ -149,19 +153,20 @@ fn gain_codebook_len(quant: PitchGainQuant) -> u32 {
 /// sub-frame, zero-input response already removed by the caller). The
 /// `(period, gain-VQ index)` minimising the weighted squared error wins.
 ///
-/// * `quant == None` → returns the silent pitch (all-zero taps), period
-///   `t_min`, no codebook consulted.
+/// * `quant == None` → returns the silent pitch (all-zero taps), the
+///   range's start period, no codebook consulted.
 /// * `history` is the past excitation in `f64` (`history[len-1] = e[−1]`).
+/// * `gammas` is the `(γ1, γ2)` perceptual-weighting pair.
 pub fn closed_loop_pitch_search(
     target: &[f64; SUBFRAME_SAMPLES],
     history: &[f64],
     a: &[f64; LPC_ORDER],
-    gamma1: f64,
-    gamma2: f64,
-    t_min: u16,
-    t_max: u16,
+    gammas: WeightFactors,
+    periods: core::ops::RangeInclusive<u16>,
     quant: PitchGainQuant,
 ) -> ClosedLoopPitch {
+    let (gamma1, gamma2) = gammas;
+    let t_min = *periods.start();
     if matches!(quant, PitchGainQuant::None) {
         let taps = PitchGainTaps::SILENCE;
         // Error of the zero contribution = target energy.
@@ -181,7 +186,7 @@ pub fn closed_loop_pitch_search(
         taps: PitchGainTaps::SILENCE,
         error: f64::INFINITY,
     };
-    for t in t_min..=t_max {
+    for t in periods {
         let ft = FilteredTaps::build(history, t, a, gamma1, gamma2);
         for idx in 0..n_entries {
             let Some(taps) = pitch_gain::reconstruct(idx as u8, quant) else {
@@ -216,8 +221,8 @@ mod tests {
         let a = zero_lpc();
         let exc = [1.0_f64, -2.0, 3.0, 0.5, -4.0];
         let out = weighted_synthesis_zero_state(&a, WEIGHT_GAMMA1, WEIGHT_GAMMA2, &exc);
-        for i in 0..exc.len() {
-            assert!((out[i] - exc[i]).abs() < 1e-9);
+        for (o, e) in out.iter().zip(exc.iter()) {
+            assert!((o - e).abs() < 1e-9);
         }
     }
 
@@ -230,10 +235,8 @@ mod tests {
             &target,
             &hist,
             &a,
-            WEIGHT_GAMMA1,
-            WEIGHT_GAMMA2,
-            17,
-            17,
+            (WEIGHT_GAMMA1, WEIGHT_GAMMA2),
+            17..=17,
             PitchGainQuant::None,
         );
         assert_eq!(r.taps, PitchGainTaps::SILENCE);
@@ -254,8 +257,8 @@ mod tests {
             .collect();
         // Place the pattern so that e[n-T] for n in 0..40 == pattern[n].
         // e[n-T] index in history = hlen - T + n.
-        for n in 0..SUBFRAME_SAMPLES {
-            hist[hlen - t as usize + n] = pattern[n];
+        for (n, &pv) in pattern.iter().enumerate() {
+            hist[hlen - t as usize + n] = pv;
         }
         // Target = pattern with a unit centre-tap gain. Q6 gain 64 = 1.0.
         // With zero LPC, the weighted synthesis of the g1 basis = pattern.
@@ -266,10 +269,8 @@ mod tests {
             &target,
             &hist,
             &a,
-            WEIGHT_GAMMA1,
-            WEIGHT_GAMMA2,
-            35,
-            45,
+            (WEIGHT_GAMMA1, WEIGHT_GAMMA2),
+            35..=45,
             PitchGainQuant::Vq5Bit,
         );
         // The best period should be the planted 40 (the only lag whose
@@ -287,8 +288,8 @@ mod tests {
             hist[hlen - t as usize + n] = (n as f64 * 0.1).sin() * 10.0;
         }
         let mut target = [0.0_f64; SUBFRAME_SAMPLES];
-        for n in 0..SUBFRAME_SAMPLES {
-            target[n] = (n as f64 * 0.1).sin() * 10.0;
+        for (n, slot) in target.iter_mut().enumerate() {
+            *slot = (n as f64 * 0.1).sin() * 10.0;
         }
         let a = zero_lpc();
         let zero_energy: f64 = target.iter().map(|&x| x * x).sum();
@@ -296,10 +297,8 @@ mod tests {
             &target,
             &hist,
             &a,
-            WEIGHT_GAMMA1,
-            WEIGHT_GAMMA2,
-            38,
-            42,
+            (WEIGHT_GAMMA1, WEIGHT_GAMMA2),
+            38..=42,
             PitchGainQuant::Vq7Bit,
         );
         assert!(r.error < zero_energy, "search did not improve on silence");
