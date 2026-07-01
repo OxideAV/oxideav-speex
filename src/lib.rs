@@ -441,6 +441,7 @@ mod lsp_quant;
 mod lsp_to_lpc;
 mod narrowband_body;
 mod narrowband_decoder;
+mod ol_pitch;
 mod packet;
 mod pitch_gain;
 mod qmf;
@@ -565,6 +566,7 @@ pub use narrowband_body::{
 pub use narrowband_decoder::{
     saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
+pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, OpenLoopPitch};
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
