@@ -448,6 +448,7 @@ mod signalling;
 mod submode;
 mod synthesis;
 mod wb_synthesis;
+mod weighting;
 mod wideband;
 mod wideband_decoder;
 
@@ -578,6 +579,7 @@ pub use wb_synthesis::{
     synthesise_high_band_frame, synthesise_high_band_frame_interp, SubBandLayer, UwbFrameLayout,
     HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,
 };
+pub use weighting::{weighted_coeffs, PerceptualWeighting, WEIGHT_GAMMA1, WEIGHT_GAMMA2};
 pub use wideband::{
     HighBandSubFrameIndices, WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader,
     WidebandHighBandSubmode, WidebandSubmode, HIGH_BAND_FRAME_PREFIX_BITS,
