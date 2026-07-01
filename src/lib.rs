@@ -410,6 +410,7 @@
 
 use oxideav_core::RuntimeContext;
 
+mod abs_search;
 mod adaptive_codebook;
 mod adaptive_contribution;
 mod bitreader;
@@ -453,6 +454,7 @@ mod weighting;
 mod wideband;
 mod wideband_decoder;
 
+pub use abs_search::{closed_loop_pitch_search, weighted_synthesis_zero_state, ClosedLoopPitch};
 pub use adaptive_codebook::{
     resolve_lookback, sample_lookback_indices, subframe_lookback_indices, ExcitationBuffer,
     ExcitationError, ADAPTIVE_CODEBOOK_TAPS, EXCITATION_HISTORY_LEN, TAP_PITCH_OFFSETS,
