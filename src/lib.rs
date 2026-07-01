@@ -432,6 +432,7 @@ mod hb_lsp_interp;
 mod hb_synthesis;
 mod header;
 mod innovation;
+mod innovation_search;
 mod lpc_analysis;
 mod lpc_to_lsp;
 mod lsp;
@@ -533,6 +534,7 @@ pub use innovation::{
     decode_subframe as decode_innovation_subframe, sub_vector as innovation_sub_vector,
     InnovationCodebook, InnovationError, InnovationMapping, SUBFRAME_SAMPLES,
 };
+pub use innovation_search::{search_innovation, InnovationChoice};
 pub use lpc_analysis::{
     analyse as lpc_analyse, apply_analysis_window, autocorrelate, levinson_durbin,
     stabilise_autocorrelation, LpcAnalysisError, LpcCoefficients, AUTOCORR_LAGS, LPC_NOISE_FLOOR,
