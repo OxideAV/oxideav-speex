@@ -416,6 +416,7 @@ mod adaptive_contribution;
 mod bitreader;
 mod codebooks;
 mod decoder;
+mod encoder_nb;
 mod excitation;
 mod fixed_codebook_gain;
 mod forced_pitch_gain;
@@ -478,6 +479,7 @@ pub use codebooks::{
     PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS, PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
 pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
+pub use encoder_nb::{EncodeError, NarrowbandEncoder, NB_FRAME_SAMPLES};
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
 pub use fixed_codebook_gain::{
     fixed_codebook_gain_indices, FixedCodebookGainIndices, FrameInnovationGainIndex,
