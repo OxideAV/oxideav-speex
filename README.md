@@ -1,6 +1,7 @@
 # oxideav-speex
 
-A pure-Rust Speex (CELP speech codec) decoder for the
+A pure-Rust Speex (CELP speech codec) decoder — plus a functional
+narrowband encoder — for the
 [oxideav](https://github.com/OxideAV/oxideav) framework. Implemented
 from *The Speex Codec Manual*, RFC 5574, and the clean-room codebook
 material staged at
@@ -301,15 +302,30 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   `Decoder` endpoints return `Error::NotImplemented` until that closes;
   the free-function `SpeexDecoder` / `NarrowbandDecoder` /
   `WidebandDecoder` decode paths are the public surface in the meantime.
-* Full encoder. The **envelope analysis chain** has landed (round r372,
-  `lpc_analysis` + `lpc_to_lsp` + `lsp_quant`): window → autocorrelate →
-  Levinson-Durbin → order-10 LPC → LSP frequencies → multi-stage LSP-VQ
-  quantise → pack `lsp_index` (round-trippable against the decoder's
-  `lsp::reconstruct_q10` / `lsp_to_lpc`). Still missing: the open-loop /
-  closed-loop pitch + innovation codebook search (the excitation encode),
-  and the packet assembly that bundles every quantised index into a Speex
-  frame. The gain-quantiser encode direction (`quantise_frame_ol_exc_gain`
-  etc.) already exists.
+* **Narrowband encoder — end-to-end (functional).** Round r382 drove the
+  encoder from the r372 envelope chain to a full narrowband encode
+  (`NarrowbandEncoder`): LPC analysis → multi-stage LSP-VQ → per-sub-frame
+  residual `A(z)·input` → open/closed-loop pitch search + 3-tap gain VQ →
+  innovation (fixed-codebook) sub-vector search → frame OL exc gain +
+  per-sub-frame correction → Table 9.1 frame packing, with the
+  reconstructed excitation `e = p + g·c` pushed into the live pitch
+  history. `encode_frame` emits a decodable narrowband frame;
+  `encode_frame_body` exposes the quantised indices. The pieces landed as
+  composable modules: `weighting` (perceptual `W(z) = A(z/γ1)/A(z/γ2)`,
+  §8.5), `ol_pitch` (§9.2 normalised-correlation open-loop pitch),
+  `abs_search` (analysis-by-synthesis weighted-domain pitch search),
+  `innovation_search` (§9.2 sub-vector VQ), and `nb_encode` (the exact
+  Table 9.1 writer, `parse(write(body)) == body`). An
+  `encoder_nb_roundtrip` integration test drives encode → wire → parse →
+  `NarrowbandDecoder` and confirms finite PCM + input-energy tracking.
+  **Functional, not bit-exact**: the reference gain normalisation (the
+  mapping between residual magnitude and the `exp(qe/3.5)` OL-gain domain)
+  is part of the documented gain-Q-format gap, so this encoder chooses
+  gains by direct magnitude matching. Modes 2/3/4/5/6/8 are supported;
+  modes 1/7 (undocumented innovation) are rejected. Still missing for a
+  *reference-equivalent* encoder: the exact perceptual-domain joint
+  pitch+innovation search ordering, the wideband high-band encode, and
+  the exact gain normalisation.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror

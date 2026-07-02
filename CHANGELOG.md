@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r382: **Narrowband CELP encoder — end-to-end excitation encode.**
+  A subsystem sweep drove the encoder from the r372 envelope chain to a
+  full narrowband encode. New modules, each round-trip-tested:
+  - `weighting` — the perceptual noise-weighting filter
+    `W(z) = A(z/γ1)/A(z/γ2)` (manual §8.5 Eq. 8.1, γ1 = 0.9 / γ2 = 0.6),
+    with bandwidth expansion `aw[j] = a[j]·γ^(j+1)` and a persistent
+    pole-zero FIR/IIR filter.
+  - `ol_pitch` — open-loop pitch estimation (§9.2): the integer lag
+    `T ∈ [17,144]` maximising the energy-normalised squared
+    cross-correlation, packed into the 7-bit OL-pitch field.
+  - `abs_search` — analysis-by-synthesis primitives:
+    `weighted_synthesis_zero_state` (filter through `1/A(z)` then `W(z)`)
+    and `closed_loop_pitch_search` (per-period 3-tap basis filtering +
+    gain-VQ scoring in the weighted-error domain).
+  - `innovation_search` — the fixed-codebook sub-vector search (§9.2 /
+    companion §2.3): per-sub-vector nearest-neighbour selection at the
+    open-loop gain, packed MSB-first into `innovation_vq` exactly as the
+    decoder parses it.
+  - `nb_encode` — the Table 9.1 frame writer (`encode_narrowband_frame` /
+    `write_narrowband_body`), the exact inverse of the body parser
+    (`parse(write(body)) == body` for all nine modes).
+  - `encoder_nb` — the top-level `NarrowbandEncoder`: LPC analysis → LSP
+    VQ → per-sub-frame residual `A(z)·input` → pitch search → innovation
+    search → gain quantisation → frame packing, with live excitation
+    history feeding the pitch predictor. `encode_frame` /
+    `encode_frame_body`; modes 2/3/4/5/6/8 (1/7 rejected as the
+    undocumented-innovation gap). A `tests/encoder_nb_roundtrip.rs`
+    integration test drives encode → wire → parse → `NarrowbandDecoder`
+    and asserts finite PCM, input-energy tracking, and an exact
+    pack/parse body round-trip. Functional (not bit-exact): the reference
+    gain normalisation remains the documented gain-Q-format gap.
+
 - Round r372: **Encoder bootstrap — high-band LSP-VQ quantiser.** The
   wideband counterpart of the narrowband `lsp_quant`: `hb_lsp::quantise_q10`
   (exported `quantise_hb_lsp_q10`) inverts the r214 high-band LSP
