@@ -59,6 +59,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     the second high-band layer needs the out-of-band rate-class
     context), with `output_rate_hz` / `frame_samples` and flat
     `decode_packet_pcm_i16`.
+  - **Adaptive frame-gain refinement** (narrowband encoder) — the
+    frame-level OL excitation gain is now chosen **closed-loop**: the
+    magnitude estimate's quantised neighbourhood (`{est−1, est, est+1}`
+    on the staged 32-level `ol_gain` grid) is evaluated by running the
+    full sub-frame encode at each candidate's reconstructed gain and
+    keeping the one whose decoded excitation matches the residual best
+    (encoder-side search freedom; the decode law is untouched). Never
+    worse than the single-pass estimate — pinned by test. NB/WB
+    `encode_packet_quality` entry points complete the quality-API
+    symmetry with the UWB encoder.
   - **VAD/DTX** (`vad` module) — §2.1's pinned DTX frame format ("only
     5 bits … 250 bps" = the Table 9.1 mode-0 frame; 9/13 bits for the
     WB/UWB all-mode-0 frames) behind `encode_packet_dtx` on all three

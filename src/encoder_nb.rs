@@ -220,10 +220,11 @@ impl NarrowbandEncoder {
 
         // Frame-level OL excitation gain: a magnitude estimate from the
         // whole-frame residual (computed with a scratch analysis filter so
-        // the real per-sub-frame residual pass below stays continuous).
+        // the real per-sub-frame residual pass below stays continuous),
+        // then refined closed-loop over the estimate's neighbourhood
+        // (round r389 — see `refine_frame_gain`).
         let frame_gain_target = self.frame_gain_estimate(&input, &lpc_sets, submode);
-        let frame_gain_idx = quantise_frame_ol_exc_gain(frame_gain_target as f32);
-        let g_frame = f64::from(reconstruct_frame_ol_exc_gain(frame_gain_idx));
+        let frame_gain_est = quantise_frame_ol_exc_gain(frame_gain_target as f32);
 
         // --- Excitation: per sub-frame pitch + innovation. ---
         let mapping = InnovationMapping::for_mode(submode);
@@ -235,9 +236,51 @@ impl NarrowbandEncoder {
             }
         };
 
+        let (frame_gain_idx, subframes, _err) =
+            self.refine_frame_gain(&input, &lpc_sets, frame_gain_est, codebook, count, submode);
+
+        // Frame-level OL pitch field (modes 1 / 2 / 8): reuse the first
+        // sub-frame's period estimate as the frame value.
+        let ol_pitch_index = if submode.ol_pitch_bits > 0 {
+            let (period, _, _) = self.search_pitch(&[0.0; SUBFRAME_SAMPLES], submode.pitch_gain);
+            (period.saturating_sub(PITCH_PERIOD_MIN)) as u8
+        } else {
+            0
+        };
+
+        // Advance analysis-window look-back and commit envelope state.
+        self.prev_input_tail
+            .copy_from_slice(&input[NB_FRAME_SAMPLES - ANALYSIS_LOOKBACK..]);
+        self.commit_lsp(active_lsp);
+
+        Ok(NarrowbandFrameBody {
+            lsp_index,
+            ol_pitch_index,
+            ol_pitch_gain_index: 0,
+            ol_exc_gain_index: frame_gain_field(frame_gain_idx),
+            subframes,
+        })
+    }
+
+    /// Encode the four sub-frames at a fixed reconstructed frame gain
+    /// `g_frame`, advancing the analysis-filter + excitation state, and
+    /// return the quantised indices plus the total **decoded-excitation
+    /// error** `Σ_sf Σ_n (r[n] − ê[n])²` (the residual each sub-frame's
+    /// reconstructed excitation `ê = p + g·c` fails to match).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_subframes(
+        &mut self,
+        input: &[f64],
+        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+        g_frame: f64,
+        codebook: Option<InnovationCodebook>,
+        count: u8,
+        submode: &NarrowbandSubmode,
+    ) -> ([NarrowbandSubFrameIndices; SUBFRAMES], f64) {
         let pitch_quant = submode.pitch_gain;
         let has_fine_pitch = submode.fine_pitch_bits > 0;
         let mut subframes = [NarrowbandSubFrameIndices::default(); SUBFRAMES];
+        let mut err = 0.0_f64;
 
         for (sf, slot) in subframes.iter_mut().enumerate() {
             let block = &input[sf * SUBFRAME_SAMPLES..(sf + 1) * SUBFRAME_SAMPLES];
@@ -261,6 +304,12 @@ impl NarrowbandEncoder {
                 None => (0u8, 0u128, pitch),
             };
 
+            // Decoded-excitation error for this sub-frame.
+            for n in 0..SUBFRAME_SAMPLES {
+                let d = residual[n] - exc[n];
+                err += d * d;
+            }
+
             // Push the reconstructed excitation into history.
             self.push_excitation(&exc);
 
@@ -274,27 +323,74 @@ impl NarrowbandEncoder {
             slot.innovation_vq_index = innovation_vq;
         }
 
-        // Frame-level OL pitch field (modes 1 / 2 / 8): reuse the first
-        // sub-frame's period estimate as the frame value.
-        let ol_pitch_index = if submode.ol_pitch_bits > 0 {
-            let (period, _, _) = self.search_pitch(&[0.0; SUBFRAME_SAMPLES], pitch_quant);
-            (period.saturating_sub(PITCH_PERIOD_MIN)) as u8
-        } else {
-            0
-        };
+        (subframes, err)
+    }
 
-        // Advance analysis-window look-back and commit envelope state.
-        self.prev_input_tail
-            .copy_from_slice(&input[NB_FRAME_SAMPLES - ANALYSIS_LOOKBACK..]);
-        self.commit_lsp(active_lsp);
+    /// **Adaptive (closed-loop) frame-gain refinement** (round r389):
+    /// evaluate the magnitude estimate's quantised neighbourhood
+    /// (`{est−1, est, est+1}` on the staged 32-level `ol_gain` grid) by
+    /// running the full sub-frame encode at each candidate's
+    /// *reconstructed* gain and keeping the one whose decoded
+    /// excitation matches the residual best.
+    ///
+    /// The open-loop estimate maps residual RMS onto the `exp(qe/3.5)`
+    /// grid by magnitude alone (the reference's exact normalisation is
+    /// the documented gain-Q-format gap); because the per-sub-frame
+    /// innovation-gain *correction* is only 1 or 3 bits wide, a
+    /// one-level frame-gain misestimate is often unrecoverable
+    /// downstream. Trying the neighbourhood closed-loop is pure
+    /// encoder-side search freedom — the decode law is untouched — and
+    /// is never worse than the single-pass estimate (the estimate is
+    /// one of the candidates; pinned by the module tests). Each trial
+    /// runs on a scratch clone; the winner's advanced state is
+    /// committed to `self`.
+    #[allow(clippy::too_many_arguments)]
+    fn refine_frame_gain(
+        &mut self,
+        input: &[f64],
+        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+        estimate: crate::fixed_codebook_gain::FrameInnovationGainIndex,
+        codebook: Option<InnovationCodebook>,
+        count: u8,
+        submode: &NarrowbandSubmode,
+    ) -> (
+        crate::fixed_codebook_gain::FrameInnovationGainIndex,
+        [NarrowbandSubFrameIndices; SUBFRAMES],
+        f64,
+    ) {
+        use crate::fixed_codebook_gain::FrameInnovationGainIndex as Idx;
 
-        Ok(NarrowbandFrameBody {
-            lsp_index,
-            ol_pitch_index,
-            ol_pitch_gain_index: 0,
-            ol_exc_gain_index: frame_gain_field(frame_gain_idx),
-            subframes,
-        })
+        // Candidate set: the estimate plus its immediate quantiser
+        // neighbours (clamped to the 5-bit grid). Silence (mode 0 /
+        // zero residual) has no meaningful neighbourhood.
+        let mut candidates: Vec<Idx> = Vec::with_capacity(3);
+        match estimate {
+            Idx::Silence => candidates.push(Idx::Silence),
+            Idx::Indexed(i) => {
+                if i > 0 {
+                    candidates.push(Idx::Indexed(i - 1));
+                }
+                candidates.push(Idx::Indexed(i));
+                if i < 31 {
+                    candidates.push(Idx::Indexed(i + 1));
+                }
+            }
+        }
+
+        let mut best: Option<(f64, Idx, [NarrowbandSubFrameIndices; SUBFRAMES], Self)> = None;
+        for cand in candidates {
+            let g = f64::from(reconstruct_frame_ol_exc_gain(cand));
+            let mut trial = self.clone();
+            let (subframes, err) =
+                trial.encode_subframes(input, lpc_sets, g, codebook, count, submode);
+            if best.as_ref().map_or(true, |(e, _, _, _)| err < *e) {
+                best = Some((err, cand, subframes, trial));
+            }
+        }
+        let (err, idx, subframes, winner) =
+            best.expect("candidate set is non-empty by construction");
+        *self = winner;
+        (idx, subframes, err)
     }
 
     /// Envelope encode: returns `(lsp_index, active_delta_q10)`.
@@ -668,6 +764,52 @@ mod tests {
             enc.encode_frame(&frame, 9),
             Err(EncodeError::UnknownMode(9))
         );
+    }
+
+    #[test]
+    fn frame_gain_refinement_never_worse_than_single_pass() {
+        // The closed-loop neighbourhood selection must never decode
+        // worse than the single-pass magnitude estimate (the estimate
+        // is one of the candidates).
+        let submode = NarrowbandSubmode::for_id(5).unwrap();
+        let (codebook, count) = match InnovationMapping::for_mode(&submode) {
+            InnovationMapping::Documented { codebook, count } => (Some(codebook), count),
+            _ => unreachable!("mode 5 innovation is documented"),
+        };
+        for (amp, period) in [(900.0, 45usize), (4000.0, 60), (11000.0, 80)] {
+            let mut enc = NarrowbandEncoder::new();
+            // Warm one frame so the probe state is non-trivial.
+            let _ = enc
+                .encode_frame_body(&voiced_frame(period, amp), 5)
+                .unwrap();
+            let frame = voiced_frame(period, amp * 1.3);
+            let input: Vec<f64> = frame.iter().map(|&s| f64::from(s)).collect();
+
+            // Reproduce the pre-sub-frame pipeline on a probe clone.
+            let mut probe = enc.clone();
+            let (_, active) = probe.encode_envelope(&input, &submode);
+            let prev = probe.prev_lsp_q10.unwrap_or(active);
+            let sub_lsp = NbSubFrameLsp::new(&prev, &active);
+            let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
+            let est = quantise_frame_ol_exc_gain(
+                probe.frame_gain_estimate(&input, &lpc_sets, &submode) as f32,
+            );
+
+            // Single-pass baseline at the estimate's reconstructed gain.
+            let g_est = f64::from(reconstruct_frame_ol_exc_gain(est));
+            let mut base = probe.clone();
+            let (_, err_base) =
+                base.encode_subframes(&input, &lpc_sets, g_est, codebook, count, &submode);
+
+            // Closed-loop refinement.
+            let mut refined = probe.clone();
+            let (_, _, err_ref) =
+                refined.refine_frame_gain(&input, &lpc_sets, est, codebook, count, &submode);
+            assert!(
+                err_ref <= err_base + 1e-9,
+                "amp {amp}: refined {err_ref} worse than single-pass {err_base}"
+            );
+        }
     }
 
     #[test]
