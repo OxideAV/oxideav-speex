@@ -76,7 +76,7 @@ impl core::fmt::Display for LpcToLspError {
         match self {
             LpcToLspError::RootsNotFound { found } => write!(
                 f,
-                "lpc->lsp: found {found} of {LPC_ORDER} LSP roots (unstable filter?)"
+                "lpc->lsp: only found {found} LSP roots (unstable filter?)"
             ),
         }
     }
@@ -96,8 +96,8 @@ impl std::error::Error for LpcToLspError {}
 /// the `z = −1` root from `P` and the `z = +1` root from `Q`, each
 /// reduces to a degree-`N` palindromic polynomial whose `x = cos(ω)`
 /// substitution gives a degree-`N/2` polynomial in `x`.
-fn auxiliary_chebyshev(a: &[f64; LPC_ORDER]) -> (Vec<f64>, Vec<f64>) {
-    let n = LPC_ORDER;
+fn auxiliary_chebyshev(a: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = a.len();
     // A(z) coefficients, length n+1: [1, -a0, -a1, ..., -a(n-1)].
     let mut poly_a = vec![0.0f64; n + 1];
     poly_a[0] = 1.0;
@@ -190,6 +190,36 @@ fn eval_on_circle(coeffs: &[f64], omega: f64) -> f64 {
 /// with [`LpcToLspError::RootsNotFound`] if fewer than `LPC_ORDER` roots
 /// are recovered (an unstable / non-minimum-phase filter).
 pub fn lpc_to_lsp(a: &[f64; LPC_ORDER]) -> Result<[f64; LPC_ORDER], LpcToLspError> {
+    let mut out = [0.0f64; LPC_ORDER];
+    lpc_to_lsp_general(a, &mut out)?;
+    Ok(out)
+}
+
+/// Find the LSP angular frequencies of the **order-8 high-band**
+/// predictor — the encode-direction inverse of the decoder's
+/// [`crate::lsp_to_lpc::hb_lsp_to_lpc`] (round r385 scope).
+///
+/// Per *The Speex Codec Manual* §10.1 the high-band linear prediction is
+/// *"very similar to narrowband"* — the same auxiliary-polynomial
+/// root-find applies verbatim at the high-band LPC order 8
+/// ([`crate::codebooks::HB_LPC_ORDER`]). Returns the eight LSP angles
+/// `ωₖ ∈ (0, π)` in ascending order, exactly the input convention
+/// `hb_lsp_to_lpc` consumes.
+pub fn hb_lpc_to_lsp(
+    a: &[f64; crate::codebooks::HB_LPC_ORDER],
+) -> Result<[f64; crate::codebooks::HB_LPC_ORDER], LpcToLspError> {
+    let mut out = [0.0f64; crate::codebooks::HB_LPC_ORDER];
+    lpc_to_lsp_general(a, &mut out)?;
+    Ok(out)
+}
+
+/// Order-generic LPC→LSP core shared by the narrowband (order-10) and
+/// high-band (order-8) entry points. `a.len()` must be even and equal
+/// `out.len()`.
+fn lpc_to_lsp_general(a: &[f64], out: &mut [f64]) -> Result<(), LpcToLspError> {
+    let order = a.len();
+    debug_assert_eq!(order, out.len());
+    debug_assert_eq!(order % 2, 0, "LSP decomposition needs an even order");
     let (p_red, q_red) = auxiliary_chebyshev(a);
 
     // Find the roots of P and Q **separately**. `lsp_to_lpc` builds P
@@ -202,7 +232,7 @@ pub fn lpc_to_lsp(a: &[f64; LPC_ORDER]) -> Result<[f64; LPC_ORDER], LpcToLspErro
     // parity slot, producing a different filter on the inverse).
     let p_roots = scan_roots(&p_red);
     let q_roots = scan_roots(&q_red);
-    let half = LPC_ORDER / 2;
+    let half = order / 2;
     if p_roots.len() < half || q_roots.len() < half {
         return Err(LpcToLspError::RootsNotFound {
             found: p_roots.len() + q_roots.len(),
@@ -215,14 +245,13 @@ pub fn lpc_to_lsp(a: &[f64; LPC_ORDER]) -> Result<[f64; LPC_ORDER], LpcToLspErro
     // global sort recovers the canonical LSP vector that `lsp_to_lpc`
     // inverts. (`lsp_to_lpc` splits the sorted vector even→P / odd→Q; the
     // sort restores exactly that interlacing for a stable filter.)
-    let mut all: Vec<f64> = Vec::with_capacity(LPC_ORDER);
+    let mut all: Vec<f64> = Vec::with_capacity(order);
     all.extend_from_slice(&p_roots[..half]);
     all.extend_from_slice(&q_roots[..half]);
     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut out = [0.0f64; LPC_ORDER];
-    out.copy_from_slice(&all[..LPC_ORDER]);
-    Ok(out)
+    out.copy_from_slice(&all[..order]);
+    Ok(())
 }
 
 /// Scan `ω ∈ (0, π)` for the roots of a reduced palindromic polynomial,
@@ -369,5 +398,72 @@ mod tests {
         assert_eq!(q.len(), 2);
         assert!((q[0] - 1.0).abs() < 1e-12);
         assert!((q[1] - 2.0).abs() < 1e-12);
+    }
+
+    // ---- Order-8 high-band entry point ----
+
+    use crate::codebooks::HB_LPC_ORDER;
+    use crate::lsp_to_lpc::hb_lsp_to_lpc;
+
+    fn known_hb_lsp() -> [f64; HB_LPC_ORDER] {
+        let mut lsp = [0.0f64; HB_LPC_ORDER];
+        for (k, slot) in lsp.iter_mut().enumerate() {
+            *slot = std::f64::consts::PI * (k as f64 + 1.0) / (HB_LPC_ORDER as f64 + 1.0);
+        }
+        lsp
+    }
+
+    #[test]
+    fn hb_round_trip_known_lsp_through_lpc_and_back() {
+        let lsp_in = known_hb_lsp();
+        let a = hb_lsp_to_lpc(&lsp_in);
+        let lsp_out = hb_lpc_to_lsp(&a).expect("stable order-8 filter must yield LSPs");
+        for (i, (&got, &want)) in lsp_out.iter().zip(lsp_in.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "HB LSP {i}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn hb_lpc_to_lsp_then_back_recovers_coefficients() {
+        // A non-uniform (but interlaced, in-band) LSP set exercises the
+        // order-8 root-finder away from the symmetric flat-filter case.
+        let mut lsp_in = known_hb_lsp();
+        for (k, w) in lsp_in.iter_mut().enumerate() {
+            *w += 0.03 * if k % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        let a_in = hb_lsp_to_lpc(&lsp_in);
+        let lsp = hb_lpc_to_lsp(&a_in).expect("LSPs");
+        let a_out = hb_lsp_to_lpc(&lsp);
+        for (i, (&got, &want)) in a_out.iter().zip(a_in.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "HB LPC {i}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn hb_flat_filter_yields_evenly_spaced_lsps() {
+        // A(z) = 1 → the order-8 LSPs are kπ/9, evenly spaced.
+        let a = [0.0f64; HB_LPC_ORDER];
+        let lsp = hb_lpc_to_lsp(&a).expect("flat filter LSPs");
+        for (k, &w) in lsp.iter().enumerate() {
+            let want = std::f64::consts::PI * (k as f64 + 1.0) / (HB_LPC_ORDER as f64 + 1.0);
+            assert!((w - want).abs() < 1e-6, "HB LSP {k}: got {w}, want {want}");
+        }
+    }
+
+    #[test]
+    fn hb_lsps_are_ascending_and_in_open_band() {
+        let lsp = hb_lpc_to_lsp(&hb_lsp_to_lpc(&known_hb_lsp())).unwrap();
+        for w in &lsp {
+            assert!(*w > 0.0 && *w < std::f64::consts::PI, "ω={w} out of band");
+        }
+        for pair in lsp.windows(2) {
+            assert!(pair[0] < pair[1], "HB LSPs must be strictly ascending");
+        }
     }
 }

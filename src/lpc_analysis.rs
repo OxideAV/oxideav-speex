@@ -117,14 +117,20 @@ pub fn apply_analysis_window(
 /// autocorrelation sequence.
 pub fn autocorrelate(signal: &[f64; LPC_ANALYSIS_WINDOW_LEN]) -> [f64; AUTOCORR_LAGS] {
     let mut r = [0.0f64; AUTOCORR_LAGS];
-    for (m, slot) in r.iter_mut().enumerate() {
+    autocorrelate_general(signal, &mut r);
+    r
+}
+
+/// Order-generic autocorrelation core: fills `out[m] = R(m)` for
+/// `m = 0..out.len()` over the whole `signal` slice.
+fn autocorrelate_general(signal: &[f64], out: &mut [f64]) {
+    for (m, slot) in out.iter_mut().enumerate() {
         let mut acc = 0.0f64;
-        for i in m..LPC_ANALYSIS_WINDOW_LEN {
+        for i in m..signal.len() {
             acc += signal[i] * signal[i - m];
         }
         *slot = acc;
     }
-    r
 }
 
 /// Stabilise an autocorrelation sequence in place: apply the white-noise
@@ -132,9 +138,17 @@ pub fn autocorrelate(signal: &[f64; LPC_ANALYSIS_WINDOW_LEN]) -> [f64; AUTOCORR_
 /// staged lag window (manual §8.2 — the two finite-precision stability
 /// safeguards).
 pub fn stabilise_autocorrelation(r: &mut [f64; AUTOCORR_LAGS]) {
+    debug_assert_eq!(lpc_lag_window_float().len(), LPC_LAG_WINDOW_LEN);
+    stabilise_general(r);
+}
+
+/// Order-generic stabilisation core: the `R(0)` white-noise floor plus
+/// the staged per-lag window applied to the leading `r.len()` lags (the
+/// lag window is a per-lag multiplier, so a shorter — lower-order —
+/// autocorrelation consumes its leading taps).
+fn stabilise_general(r: &mut [f64]) {
     r[0] *= LPC_NOISE_FLOOR;
     let lag = lpc_lag_window_float();
-    debug_assert_eq!(lag.len(), LPC_LAG_WINDOW_LEN);
     for (slot, &w) in r.iter_mut().zip(lag.iter()) {
         *slot *= w;
     }
@@ -162,14 +176,25 @@ pub struct LpcCoefficients {
 /// zero error — the natural "no spectral envelope" result.
 pub fn levinson_durbin(r: &[f64; AUTOCORR_LAGS]) -> LpcCoefficients {
     let mut a = [0.0f64; LPC_ORDER];
+    let error = levinson_durbin_general(r, &mut a);
+    LpcCoefficients { a, error }
+}
+
+/// Order-generic Levinson-Durbin core: solves for `a.len()` predictor
+/// coefficients from the `a.len() + 1`-lag autocorrelation `r`,
+/// returning the residual error. Shared by the narrowband (order-10)
+/// and high-band (order-8) analysis paths.
+fn levinson_durbin_general(r: &[f64], a: &mut [f64]) -> f64 {
+    let order = a.len();
+    debug_assert!(r.len() > order);
     let mut error = r[0];
 
     if error <= 0.0 {
         // Silent / degenerate frame: no predictor.
-        return LpcCoefficients { a, error: 0.0 };
+        return 0.0;
     }
 
-    for i in 0..LPC_ORDER {
+    for i in 0..order {
         // Reflection coefficient k = -(r[i+1] + Σ a[j]·r[i-j]) / error.
         let mut acc = r[i + 1];
         for j in 0..i {
@@ -194,12 +219,11 @@ pub fn levinson_durbin(r: &[f64; AUTOCORR_LAGS]) -> LpcCoefficients {
         error *= 1.0 - k * k;
         if error <= 0.0 {
             // Numerically exhausted — clamp to zero and stop refining.
-            error = 0.0;
-            break;
+            return 0.0;
         }
     }
 
-    LpcCoefficients { a, error }
+    error
 }
 
 /// Run the complete LPC analysis front-end on a 200-sample analysis
@@ -212,6 +236,44 @@ pub fn analyse(input: &[f64]) -> Result<LpcCoefficients, LpcAnalysisError> {
     let mut r = autocorrelate(&windowed);
     stabilise_autocorrelation(&mut r);
     Ok(levinson_durbin(&r))
+}
+
+/// Number of autocorrelation lags for the order-8 **high-band** analysis:
+/// `R(0)` through `R(8)`.
+pub const HB_AUTOCORR_LAGS: usize = crate::codebooks::HB_LPC_ORDER + 1;
+
+/// The result of the order-8 high-band Levinson-Durbin recursion — the
+/// high-band counterpart of [`LpcCoefficients`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HbLpcCoefficients {
+    /// The eight predictor coefficients `a[0..8]` of the high-band
+    /// analysis filter `A_hb(z) = 1 − Σ a[i]·z⁻⁽ⁱ⁺¹⁾`.
+    pub a: [f64; crate::codebooks::HB_LPC_ORDER],
+    /// The final residual prediction-error energy.
+    pub error: f64,
+}
+
+/// Run the complete **high-band** (order-8) LPC analysis front-end on a
+/// 200-sample analysis buffer of the 8 kHz high-band half-band signal:
+/// window → autocorrelate (to order 8) → stabilise → Levinson-Durbin
+/// (round r385 scope).
+///
+/// Per *The Speex Codec Manual* §10.1 the high-band linear prediction is
+/// *"very similar to narrowband"* at the high-band LPC order 8
+/// ([`crate::codebooks::HB_LPC_ORDER`]); the same staged 200-sample
+/// analysis window and per-lag stabilisation window apply (the lag
+/// window is a per-lag multiplier, so the order-8 path consumes its
+/// leading nine taps). Returns the order-8 [`HbLpcCoefficients`] in the
+/// same `A(z) = 1 − Σ aᵢ z⁻ⁱ⁻¹` convention as the narrowband path — the
+/// input convention [`crate::lpc_to_lsp::hb_lpc_to_lsp`] consumes.
+pub fn analyse_hb(input: &[f64]) -> Result<HbLpcCoefficients, LpcAnalysisError> {
+    let windowed = apply_analysis_window(input)?;
+    let mut r = [0.0f64; HB_AUTOCORR_LAGS];
+    autocorrelate_general(&windowed, &mut r);
+    stabilise_general(&mut r);
+    let mut a = [0.0f64; crate::codebooks::HB_LPC_ORDER];
+    let error = levinson_durbin_general(&r, &mut a);
+    Ok(HbLpcCoefficients { a, error })
 }
 
 #[cfg(test)]
@@ -367,5 +429,90 @@ mod tests {
     fn autocorr_lags_matches_lag_window_length() {
         assert_eq!(AUTOCORR_LAGS, LPC_LAG_WINDOW_LEN);
         assert_eq!(AUTOCORR_LAGS, LPC_ORDER + 1);
+    }
+
+    // ---- Order-8 high-band analysis ----
+
+    #[test]
+    fn hb_autocorr_lags_is_order_8_plus_one() {
+        assert_eq!(HB_AUTOCORR_LAGS, crate::codebooks::HB_LPC_ORDER + 1);
+        assert_eq!(HB_AUTOCORR_LAGS, 9);
+    }
+
+    #[test]
+    fn analyse_hb_full_pipeline_runs_on_real_length_buffer() {
+        let sig = ramp(LPC_ANALYSIS_WINDOW_LEN + 5);
+        let c = analyse_hb(&sig).unwrap();
+        assert_eq!(c.a.len(), crate::codebooks::HB_LPC_ORDER);
+        assert!(c.error.is_finite() && c.error >= 0.0);
+        assert!(c.a.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn analyse_hb_silent_input_yields_zero_predictor() {
+        let sig = vec![0.0f64; LPC_ANALYSIS_WINDOW_LEN];
+        let c = analyse_hb(&sig).unwrap();
+        assert!(c.a.iter().all(|&x| x == 0.0));
+        assert_eq!(c.error, 0.0);
+    }
+
+    #[test]
+    fn analyse_hb_propagates_short_input_error() {
+        let sig = ramp(LPC_ANALYSIS_WINDOW_LEN - 1);
+        assert!(analyse_hb(&sig).is_err());
+    }
+
+    #[test]
+    fn analyse_hb_recovers_known_ar_process_filter() {
+        // Same AR(2) recovery pin as the order-10 test, at order 8: the
+        // recovered leading coefficients approximate the generating
+        // filter under the shared sign convention.
+        let a1 = 0.6f64;
+        let a2 = -0.3f64;
+        let n = LPC_ANALYSIS_WINDOW_LEN + 50;
+        let mut x = vec![0.0f64; n];
+        let mut seed = 12345u64;
+        for i in 2..n {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let innov = ((seed >> 40) as f64 / (1u64 << 24) as f64) - 0.5;
+            x[i] = a1 * x[i - 1] + a2 * x[i - 2] + innov;
+        }
+        let c = analyse_hb(&x[50..]).unwrap();
+        assert!(
+            (c.a[0] + a1).abs() < 0.2,
+            "a[0]={} should be near {}",
+            c.a[0],
+            -a1
+        );
+        assert!(
+            (c.a[1] + a2).abs() < 0.2,
+            "a[1]={} should be near {}",
+            c.a[1],
+            -a2
+        );
+    }
+
+    #[test]
+    fn analyse_hb_matches_analyse_on_leading_reflection_structure() {
+        // Both orders analyse the same buffer through the same window /
+        // stabilisation; the order-8 predictor is the order-10 recursion
+        // stopped two steps earlier, so its prediction error must be
+        // >= the order-10 error (each Levinson step never increases it).
+        let n = LPC_ANALYSIS_WINDOW_LEN + 20;
+        let mut x = vec![0.0f64; n];
+        let mut seed = 777u64;
+        for i in 2..n {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let innov = ((seed >> 40) as f64 / (1u64 << 24) as f64) - 0.5;
+            x[i] = 0.5 * x[i - 1] - 0.2 * x[i - 2] + innov;
+        }
+        let c10 = analyse(&x).unwrap();
+        let c8 = analyse_hb(&x).unwrap();
+        assert!(
+            c8.error >= c10.error - 1e-9,
+            "order-8 error {} must be >= order-10 error {}",
+            c8.error,
+            c10.error
+        );
     }
 }

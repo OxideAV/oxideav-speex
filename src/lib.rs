@@ -539,10 +539,11 @@ pub use innovation::{
 };
 pub use innovation_search::{search_innovation, InnovationChoice};
 pub use lpc_analysis::{
-    analyse as lpc_analyse, apply_analysis_window, autocorrelate, levinson_durbin,
-    stabilise_autocorrelation, LpcAnalysisError, LpcCoefficients, AUTOCORR_LAGS, LPC_NOISE_FLOOR,
+    analyse as lpc_analyse, analyse_hb as hb_lpc_analyse, apply_analysis_window, autocorrelate,
+    levinson_durbin, stabilise_autocorrelation, HbLpcCoefficients, LpcAnalysisError,
+    LpcCoefficients, AUTOCORR_LAGS, HB_AUTOCORR_LAGS, LPC_NOISE_FLOOR,
 };
-pub use lpc_to_lsp::{lpc_to_lsp, LpcToLspError, LSP_BISECT_ITERS, LSP_SCAN_STEPS};
+pub use lpc_to_lsp::{hb_lpc_to_lsp, lpc_to_lsp, LpcToLspError, LSP_BISECT_ITERS, LSP_SCAN_STEPS};
 pub use lsp::{
     reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
