@@ -456,6 +456,7 @@ mod quality;
 mod signalling;
 mod submode;
 mod synthesis;
+mod uwb_decoder;
 mod wb_synthesis;
 mod weighting;
 mod wideband;
@@ -600,6 +601,10 @@ pub use signalling::{
 };
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
 pub use synthesis::SynthesisFilter;
+pub use uwb_decoder::{
+    UltraWidebandDecoder, UltraWidebandFrame, UwbDecodeError, UwbDecodedFrame, UWB_FRAME_SAMPLES,
+    UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES,
+};
 pub use wb_synthesis::{
     synthesise_high_band_frame, synthesise_high_band_frame_interp, SubBandLayer, UwbFrameLayout,
     HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,

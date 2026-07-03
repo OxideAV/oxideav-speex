@@ -205,21 +205,47 @@ impl WidebandDecoder {
     /// frame that follows (Table 10.1), advancing both bands' state.
     pub fn decode_packet(&mut self, packet: &[u8]) -> Result<WidebandFrame, WidebandDecodeError> {
         let mut reader = BitReader::new(packet);
+        self.decode_frame_reader(&mut reader)
+    }
 
+    /// Decode one wideband frame **from a live bit cursor**, leaving the
+    /// cursor at the first bit after the high-band body.
+    ///
+    /// This is the composition entry the ultra-wideband decoder walks:
+    /// a UWB frame is an embedded wideband frame followed by a second
+    /// high-band layer (§2.2's recursion), so the outer decoder consumes
+    /// the wideband layers through this method and then claims the
+    /// remaining layer itself. [`Self::decode_packet`] is the
+    /// single-frame convenience over a fresh cursor.
+    pub fn decode_frame_reader(
+        &mut self,
+        reader: &mut BitReader<'_>,
+    ) -> Result<WidebandFrame, WidebandDecodeError> {
         // --- Low band: embedded narrowband frame ---
         let nb_header =
-            NarrowbandFrameHeader::parse(&mut reader).map_err(|_| WidebandDecodeError::Framing)?;
+            NarrowbandFrameHeader::parse(reader).map_err(|_| WidebandDecodeError::Framing)?;
+        self.decode_frame_after_header(&nb_header, reader)
+    }
+
+    /// Decode one wideband frame whose 5-bit narrowband prefix has
+    /// already been consumed (the ultra-wideband packet walk parses the
+    /// prefix first to detect the §5.5 terminator / control frames).
+    pub fn decode_frame_after_header(
+        &mut self,
+        nb_header: &NarrowbandFrameHeader,
+        reader: &mut BitReader<'_>,
+    ) -> Result<WidebandFrame, WidebandDecodeError> {
         let nb_submode = match nb_header.submode {
             Submode::Celp(s) => s,
             _ => return Err(WidebandDecodeError::NotNarrowbandLowBand),
         };
-        let nb_body = NarrowbandFrameBody::parse(&mut reader, &nb_submode)
+        let nb_body = NarrowbandFrameBody::parse(reader, &nb_submode)
             .map_err(|_| WidebandDecodeError::Framing)?;
         let low_band = self.low_band.decode_frame(&nb_body, &nb_submode)?;
 
         // --- High band: 4-bit prefix + Table 10.1 body ---
         let hb_header =
-            WidebandHighBandFrameHeader::parse(&mut reader).map_err(WidebandDecodeError::from)?;
+            WidebandHighBandFrameHeader::parse(reader).map_err(WidebandDecodeError::from)?;
         if !hb_header.wideband {
             return Err(WidebandDecodeError::NoHighBandLayer);
         }
@@ -229,8 +255,8 @@ impl WidebandDecoder {
                 return Err(WidebandDecodeError::HighBandReserved { mode_id: id })
             }
         };
-        let hb_body = WidebandHighBandBody::parse(&mut reader, &hb_submode)
-            .map_err(WidebandDecodeError::from)?;
+        let hb_body =
+            WidebandHighBandBody::parse(reader, &hb_submode).map_err(WidebandDecodeError::from)?;
         let high_band = synthesise_high_band_frame_interp(
             &hb_body,
             &hb_submode,
