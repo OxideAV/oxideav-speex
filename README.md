@@ -248,6 +248,34 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   inverts the r214 high-band 2-stage MSVQ reconstruction (stage 1 full
   8-coeff VQ, stage 2 residual) via the same sequential greedy search,
   packing into the on-wire 12-bit `lsp_index`.
+* **Ultra-wideband (32 kHz) subsystem** (round r389). The §2.2 embedded
+  recursion walked one level above wideband, both directions:
+  - `UltraWidebandDecoder` — the three-layer UWB frame (embedded
+    narrowband + first high band via the wideband decoder's new
+    cursor-level entries, then a second Table 10.1 high-band layer)
+    with the full §5.5 packet walk, recombined to 640-sample 32 kHz
+    PCM by an **outer** QMF synthesis bank (the QMF filterbanks are
+    now slice-generic — the same mirror structure serves both the
+    320→2×160 inner and 640→2×320 outer geometries, pinned
+    perfect-reconstructing at both).
+  - `UltraWidebandEncoder` — outer QMF analysis split, embedded
+    `WidebandEncoder` low half, and the second layer's 12-bit LSP MSVQ
+    envelope + four 5-bit folded-gain fields; `encode_packet` /
+    `encode_packet_quality`; full encode→decode round trips with
+    per-quality packet sizes pinned to the staged rate tables.
+  - **Quality→sub-mode ladders** (`quality`): NB from Table 9.2; WB
+    derived arithmetically from Table 10.2 bit totals; UWB from
+    RFC 5574 Table 2, whose constant +1,800 bit/s (= +36 bits/frame)
+    over the WB column pins the conformant second sub-band layer to
+    the gain-only **mode-1** frame at every quality.
+  - `SpeexStreamDecoder` — header-mode-driven dispatch across the
+    three rate classes (the UWB layer walk needs the §7.3 out-of-band
+    rate-class context), flat `i16` PCM at 8/16/32 kHz.
+  - **VAD/DTX** (`vad`): §2.1's pinned 5-bit mode-0 DTX frame (250 bps;
+    9/13 bits for the WB/UWB all-mode-0 frames) behind
+    `encode_packet_dtx` on all three encoders, driven by the
+    `EnergyVad` RMS-threshold + hangover detector (the VAD decision
+    algorithm is unpinned by the manual — documented encoder freedom).
 
 ## Not yet supported
 
@@ -356,10 +384,16 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   offset) — these are bit-exactness details, not sample-correctness ones;
   the sample-correct textbook reconstruction is what ships. Recorded docs
   gap, isolated to the delay convention.
-* **Ultra-wideband high-band bit allocation** — the UWB framing
-  *recursion* is surfaced (`UwbFrameLayout`), but the per-mode UWB
-  high-band bit budget (a "Table 11.x" analogue of Table 10.1 for the
-  8–16 kHz band) is not in the staged manual. Recorded docs gap.
+* **Ultra-wideband second-layer excitation** — the UWB framing
+  recursion, the conformant second-layer *shape* (Table 10.1 mode 1 at
+  every quality, pinned by RFC 5574 Table 2's constant +36 bits/frame),
+  its LSP envelope and its gain track all decode (round r389). What
+  remains gapped: the mode-1 **folded-excitation source** (the same
+  #170 gap as the wideband gain-only mode — the 8–16 kHz band
+  reconstructs as zero until the fold law is staged), and the
+  sub-frame geometry of the excitation-VQ modes 2..=4 at the 16 kHz
+  half-band rate (Table 10.1's VQ budgets are stated for the 8 kHz
+  half-band; no "Table 11.x" analogue is staged).
 * Per-mode innovation handling for narrowband modes 1 and 7 and
   high-band mode 4, whose decomposition the staged inventory does not
   yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither

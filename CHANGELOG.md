@@ -8,6 +8,65 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r389: **Ultra-wideband (32 kHz) subsystem — decode + encode +
+  quality ladders + VAD/DTX.** Six landings driving the §2.2 embedded
+  recursion one level above wideband:
+  - **Slice-generic QMF filterbanks** (`QmfAnalysis::split_slices` /
+    `QmfSynthesis::reconstruct_slices`) — the two-band mirror bank's
+    carried state is only the filter-length band tails, so the same
+    structure now serves the wideband inner filterbank (320 → 2×160)
+    and the ultra-wideband **outer** filterbank (640 → 2×320). Pinned
+    bit-identical to the fixed-length paths and perfect-reconstructing
+    at the outer geometry.
+  - **Quality → sub-mode ladders** (`quality` module) for all three
+    rate classes. Narrowband from Table 9.2's quality column; wideband
+    derived arithmetically from Table 10.2 (every per-quality bit-rate
+    at 50 frames/s decomposes as one Table 9.1 + one Table 10.1 total;
+    the two ambiguous decompositions resolve by layer monotonicity);
+    ultra-wideband from RFC 5574 Table 2, whose UWB column sits a
+    constant +1,800 bit/s = +36 bits/frame above the wideband column at
+    every quality — exactly (and uniquely) the Table 10.1 **mode-1**
+    total, pinning the conformant second (8–16 kHz) sub-band layer to
+    the gain-only mode-1 frame (`UWB_HIGH_BAND_MODE`). Tests re-derive
+    every staged rate exactly from the sub-mode bit totals.
+  - **`UltraWidebandDecoder`** — full §5.5 packet walk (multi-frame,
+    control pseudo-frames, terminator, padding) of the three-layer UWB
+    frame: the embedded wideband layers through the new
+    `WidebandDecoder::decode_frame_reader` / `decode_frame_after_header`
+    cursor-level entries, then the second Table 10.1 high-band layer
+    (12-bit LSP MSVQ envelope + staged 32-level folded-gain track,
+    surfaced on the typed `UltraWidebandFrame`), recombined by the
+    outer QMF into 640-sample 32 kHz PCM. The mode-1 folded-excitation
+    *source* stays the recorded docs gap (#170), so the 8–16 kHz band
+    reconstructs as zero and UWB output degrades gracefully to the
+    embedded wideband content — pinned byte-identical to a standalone
+    `WidebandDecoder` on the same packet (the scalable-bit-stream
+    contract). Layer-2 VQ modes 2..=4 (geometry unpinned at the 16 kHz
+    half-band) and reserved 5..=7 surface typed errors.
+  - **`UltraWidebandEncoder`** — the encode mirror: outer QMF split,
+    embedded `WidebandEncoder` low half, and the RFC-pinned 36-bit
+    mode-1 second layer (order-8 LPC envelope over the staged
+    200-sample window frame-end aligned — documented encoder freedom —
+    through the 12-bit 2-stage MSVQ, plus four per-80-sample-sub-frame
+    residual-RMS gains through the staged 5-bit folded-gain grid).
+    `encode_frame` / `encode_packet` / `encode_packet_quality`
+    (qualities 1..=8 given the NB mode-1/7 + HB mode-4 encode gaps);
+    per-quality packet sizes pinned to the staged bits-per-frame
+    totals; full encode → decode round trips.
+  - **`SpeexStreamDecoder`** — header-driven dispatch: binds a parsed
+    `SpeexHeader.mode` to the decode path it selects (NB/WB through the
+    mixed-stream `SpeexDecoder`, UWB through `UltraWidebandDecoder` —
+    the second high-band layer needs the out-of-band rate-class
+    context), with `output_rate_hz` / `frame_samples` and flat
+    `decode_packet_pcm_i16`.
+  - **VAD/DTX** (`vad` module) — §2.1's pinned DTX frame format ("only
+    5 bits … 250 bps" = the Table 9.1 mode-0 frame; 9/13 bits for the
+    WB/UWB all-mode-0 frames) behind `encode_packet_dtx` on all three
+    encoders, driven by `EnergyVad`, an RMS-threshold + hangover
+    detector (the decision algorithm is unpinned by the manual —
+    documented encoder freedom). Silent-packet sizes pinned (4 NB DTX
+    frames + terminator = 4 bytes); frame count / 20 ms timing
+    preserved through decode.
 - Round r385: **Wideband (sub-band CELP) encoder — end-to-end.** A
   subsystem sweep drove the encode direction through the whole §10
   wideband path, mirroring the wideband decoder stage for stage. Seven
