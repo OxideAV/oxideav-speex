@@ -429,6 +429,7 @@ mod gain_scaled_pitch;
 mod hb_encode;
 mod hb_excitation_gain;
 mod hb_innovation;
+mod hb_innovation_search;
 mod hb_lsp;
 mod hb_lsp_interp;
 mod hb_synthesis;
@@ -524,6 +525,7 @@ pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
     HbInnovationMapping, HB_SUBFRAME_SAMPLES,
 };
+pub use hb_innovation_search::{search_hb_innovation, HbInnovationChoice};
 pub use hb_lsp::{
     pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10,
     reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
