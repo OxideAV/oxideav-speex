@@ -455,6 +455,7 @@ mod pitch_gain;
 mod qmf;
 mod quality;
 mod signalling;
+mod stream_decoder;
 mod submode;
 mod synthesis;
 mod uwb_decoder;
@@ -603,6 +604,7 @@ pub use signalling::{
     InbandMessage, InbandRequest, RateModeConfig, SignallingError, CUSTOM_INBAND_MAX_BYTES,
     CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS, INBAND_TABLE_5_1,
 };
+pub use stream_decoder::{SpeexStreamDecoder, StreamDecodeError};
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
 pub use synthesis::SynthesisFilter;
 pub use uwb_decoder::{
