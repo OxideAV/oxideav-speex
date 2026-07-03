@@ -1,7 +1,7 @@
 # oxideav-speex
 
-A pure-Rust Speex (CELP speech codec) decoder — plus a functional
-narrowband encoder — for the
+A pure-Rust Speex (CELP speech codec) decoder — plus functional
+narrowband and wideband encoders — for the
 [oxideav](https://github.com/OxideAV/oxideav) framework. Implemented
 from *The Speex Codec Manual*, RFC 5574, and the clean-room codebook
 material staged at
@@ -324,8 +324,28 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   gains by direct magnitude matching. Modes 2/3/4/5/6/8 are supported;
   modes 1/7 (undocumented innovation) are rejected. Still missing for a
   *reference-equivalent* encoder: the exact perceptual-domain joint
-  pitch+innovation search ordering, the wideband high-band encode, and
-  the exact gain normalisation.
+  pitch+innovation search ordering and the exact gain normalisation.
+* **Wideband (sub-band CELP) encoder — end-to-end (functional).** Round
+  r385 mirrored the §10 wideband decode path in the encode direction
+  (`WidebandEncoder`): the QMF **analysis** filterbank (`QmfAnalysis`,
+  streaming two-band split of the 320-sample 16 kHz frame, pinned
+  against the r365 synthesis bank's perfect-reconstruction property) →
+  embedded narrowband encode of the low band (shared NB state) →
+  high-band envelope (order-8 LPC analysis `analyse_hb` + `hb_lpc_to_lsp`
+  → Q10 − pinned HB base → 2-stage MSVQ → 12-bit `lsp_index`, with the
+  quantised LSPs driving per-sub-frame LPC through the §9.1
+  interpolation exactly as the decoder does) → per-sub-frame high-band
+  excitation with **closed-loop gain selection** (the 4/5-bit gain grid
+  is searched exhaustively; each level's greedy innovation search —
+  both codebook shapes, including the `HbSv8_128` polarity sign — is
+  scored by its *decoded* error) → the §10.4 embedded packing
+  (`hb_encode`, `parse(write(body)) == body` for every documented HB
+  mode). Packet-level entry points (`encode_packet` on both encoders,
+  closing with the §5.5 mode-15 terminator) round-trip through the
+  top-level `SpeexDecoder`, with packetisation pinned
+  decode-transparent. HB modes 0/1/2/3 supported; mode 4 stays the
+  recorded innovation-binding docs gap. Functional, not bit-exact —
+  same gain-normalisation posture as the narrowband encoder.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror
@@ -347,6 +367,14 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a split
   matching both the 80-bit budget *and* the 40-sample count, so the
   binding stays a recorded docs gap.)
+* **High-band mode-1 reconstruction law** — the staged table inventory
+  names the mode-1 gain a 5-bit *folded* gain (`hb-fold-quant-bound`),
+  hinting the reference reconstructs the mode-1 high band from a folded
+  copy of another excitation scaled by this gain, but no folding
+  algorithm is staged and manual §10.3 says only *"coded in the same way
+  as for narrowband"*. Recorded docs gap: the encoder transmits the
+  quantised residual-RMS gain; the decoder reconstructs mode-1 high
+  bands as silence (innovation-only composition with no VQ field).
 
 ## Usage
 

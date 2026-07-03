@@ -8,6 +8,81 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r385: **Wideband (sub-band CELP) encoder — end-to-end.** A
+  subsystem sweep drove the encode direction through the whole §10
+  wideband path, mirroring the wideband decoder stage for stage. Seven
+  landings, each round-trip-tested:
+  - `QmfAnalysis` (in `qmf`) — the encode-direction two-band QMF
+    **analysis** split: one 320-sample 16 kHz frame → the two 8 kHz
+    half-bands (`lb = downsample2(h0·x)`, `hb = downsample2((−1)ⁿh0·x)`,
+    the classical mirror-filter relations over the staged 64-tap
+    prototype), with streaming FIR input history. The r365
+    perfect-reconstruction test now runs through the public filterbank;
+    the streaming split is pinned sample-identical to the direct
+    whole-signal reference, and pure low/high tones pin the band-split
+    direction.
+  - Order-8 **high-band LPC analysis + LPC→LSP** (`analyse_hb` /
+    `HbLpcCoefficients` in `lpc_analysis`; `hb_lpc_to_lsp` in
+    `lpc_to_lsp`) — the §10.1 "very similar to narrowband" envelope
+    front-end at the high-band order 8, via order-generic
+    autocorrelation / stabilisation / Levinson-Durbin /
+    auxiliary-polynomial root-find cores (the order-10 entry points
+    delegate unchanged). Round-trip pinned against the decoder's
+    `hb_lsp_to_lpc`.
+  - `hb_encode` — the Table 10.1 **high-band frame writer**
+    (`write_high_band_body` / `write_high_band_frame`,
+    `parse(write(body)) == body` for HB modes 0..=4 including the 80-bit
+    mode-4 excitation-VQ fields) and the §10.4 **wideband frame
+    assembly** `encode_wideband_frame` (NB prefix with the wideband flag
+    set + Table 9.1 body + HB frame — the exact reader chain the
+    wideband decoder walks).
+  - `hb_innovation_search` — the high-band fixed-codebook search
+    (§10.3): per-sub-vector nearest-neighbour at a fixed gain over both
+    staged codebook shapes, scoring `HbSv8_128` rows in **both
+    polarities** and packing each slot as `index << 1 | sign` MSB-first,
+    exactly the decoder's split.
+  - `encoder_wb` — the top-level **`WidebandEncoder`**: QMF split →
+    embedded r382 narrowband encode of the low band (shared NB state) →
+    high-band envelope (order-8 LPC → LSP → Q10 − pinned HB base →
+    2-stage MSVQ → 12-bit `lsp_index`, with the *quantised* LSPs driving
+    per-sub-frame LPC through the §9.1 interpolation exactly as the
+    decoder does) → per-sub-frame excitation → §10.4 packing. HB modes
+    0/1/2/3 supported; mode 4 rejected as the recorded
+    innovation-binding docs gap. `encode_frame` / `encode_frame_bodies`
+    / `WbEncodeError`. A 7-test `encoder_wb_roundtrip` integration suite
+    drives `WidebandEncoder → WidebandDecoder` over multi-frame streams:
+    finite decode for all HB modes, loud-vs-quiet energy tracking, a
+    6.5 kHz input landing its energy in the decoded high-band channel,
+    near-silence round-trip, determinism.
+  - **Packet-level encode** — `NarrowbandEncoder::encode_packet` /
+    `WidebandEncoder::encode_packet` pack consecutive frames
+    back-to-back and close with the new shared `write_packet_terminator`
+    (the §5.5 5-bit mode-15 terminator + byte padding), so the padding
+    tail can never misparse. A 5-test `encoder_packet_roundtrip` suite
+    drives the packets through the **top-level `SpeexDecoder`**:
+    3-frame NB packets → exactly 3 frames at 8 kHz, 2-frame WB packets
+    → 2 frames at 16 kHz (the walker skips high-band parts per §10.4),
+    terminator-only packets → zero frames, and packetisation is pinned
+    decode-transparent (N frames in one packet ≡ N single-frame
+    packets, bit-identical PCM).
+  - **Closed-loop high-band gain selection** — the HB gain field is only
+    4/5 bits, so `hb_quantise_gain_and_search` tries **every** level of
+    the staged gain grid, runs the greedy shape search at each level's
+    reconstructed gain, measures each `(gain, shape)` pair's **decoded**
+    error through the exact decoder path, and keeps the argmin — never
+    worse than any single open-loop pass (pinned), and immune to the
+    overshooting-guess → zero-row failure mode.
+
+  Functional, not bit-exact — same posture as the r382 narrowband
+  encoder (the reference gain normalisation remains the documented
+  gain-Q-format gap). The mode-1 high-band *reconstruction* law (the
+  staged table inventory names a "folded" 5-bit gain, but no folding
+  algorithm is staged; manual §10.3 says only "coded in the same way as
+  for narrowband") stays a recorded docs gap — the encoder transmits
+  the quantised residual-RMS gain and the decoder reconstructs mode-1
+  high bands as silence. 640 lib tests (up from 631) + 12 new
+  integration tests.
+
 - Round r382: **Narrowband CELP encoder — end-to-end excitation encode.**
   A subsystem sweep drove the encoder from the r372 envelope chain to a
   full narrowband encode. New modules, each round-trip-tested:
