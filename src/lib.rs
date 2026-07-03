@@ -452,6 +452,7 @@ mod ol_pitch;
 mod packet;
 mod pitch_gain;
 mod qmf;
+mod quality;
 mod signalling;
 mod submode;
 mod synthesis;
@@ -587,6 +588,11 @@ pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, Ope
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfAnalysis, QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
+pub use quality::{
+    nb_mode_for_quality, uwb_bitrate_bps, uwb_modes_for_quality, wb_bitrate_bps,
+    wb_modes_for_quality, UwbQualityModes, WbQualityModes, FRAMES_PER_SECOND, MAX_QUALITY,
+    UWB_HIGH_BAND_MODE,
+};
 pub use signalling::{
     inband_code_spec, AcknowledgePolicy, CustomInbandMessage, InbandCodeSpec, InbandKind,
     InbandMessage, InbandRequest, RateModeConfig, SignallingError, CUSTOM_INBAND_MAX_BYTES,
