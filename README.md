@@ -1,5 +1,7 @@
 # oxideav-speex
 
+[![CI](https://github.com/OxideAV/oxideav-speex/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-speex/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-speex.svg)](https://crates.io/crates/oxideav-speex) [![docs.rs](https://docs.rs/oxideav-speex/badge.svg)](https://docs.rs/oxideav-speex) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A pure-Rust Speex (CELP speech codec) decoder — plus functional
 narrowband and wideband encoders — for the
 [oxideav](https://github.com/OxideAV/oxideav) framework. Implemented
