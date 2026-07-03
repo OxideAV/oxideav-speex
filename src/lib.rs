@@ -426,6 +426,7 @@ mod gain_scaled_excitation;
 mod gain_scaled_hb_innovation;
 mod gain_scaled_innovation;
 mod gain_scaled_pitch;
+mod hb_encode;
 mod hb_excitation_gain;
 mod hb_innovation;
 mod hb_lsp;
@@ -514,6 +515,7 @@ pub use gain_scaled_pitch::{
     gain_scaled_pitch_sample, gain_scaled_pitch_subframe, GAIN_SCALED_PITCH_SAMPLES,
     PITCH_GAIN_SCALING,
 };
+pub use hb_encode::{encode_wideband_frame, write_high_band_body, write_high_band_frame};
 pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
     HB_EXC_GAIN_BITS_MODE_1,

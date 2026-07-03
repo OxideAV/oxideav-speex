@@ -58,8 +58,10 @@ impl FieldWidths {
 }
 
 /// Write a `u128` value as `n` MSB-first bits — the exact inverse of the
-/// parser's `read_wide` chunked read.
-fn write_wide(writer: &mut BitWriter, value: u128, n: u32) -> Result<(), BitError> {
+/// parser's `read_wide` chunked read. Shared with the high-band frame
+/// writer ([`crate::hb_encode`]), whose excitation-VQ fields are up to
+/// 80 bits wide.
+pub(crate) fn write_wide(writer: &mut BitWriter, value: u128, n: u32) -> Result<(), BitError> {
     debug_assert!(n <= 128, "innovation VQ exceeds u128 capacity");
     let mut remaining = n;
     while remaining > 0 {
