@@ -226,6 +226,109 @@ impl QmfSynthesis {
     }
 }
 
+/// Two-band QMF **analysis** filterbank with cross-frame history — the
+/// encode-direction inverse of [`QmfSynthesis`] (round r385 scope).
+///
+/// Splits one 320-sample 16 kHz wideband frame into the two 8 kHz
+/// half-band signals the sub-band CELP encoder consumes: the low band
+/// (0–4 kHz) and the high band (4–8 kHz folded to 0–4 kHz, §10.2's
+/// frequency-axis reversal — intrinsic to the `(-1)ⁿ` mirror
+/// modulation, exactly as in the synthesis direction).
+///
+/// ## Clean-room basis
+///
+/// Same category as [`QmfSynthesis`]: *The Speex Codec Manual* §10 pins
+/// the structure (*"the Speex approach uses a quadrature mirror filter
+/// (QMF) to split the band in two"*) and the 64-tap prototype `h0` is
+/// staged as pure data; the analysis relations are the classical
+/// two-band Croisier–Esteban–Galand construction (textbook multirate
+/// DSP):
+///
+/// ```text
+///   lb[i] = Σ_k h0[k] · x[2i − k]           (lowpass, decimate by 2)
+///   hb[i] = Σ_k (−1)^k h0[k] · x[2i − k]    (mirror highpass, decimate by 2)
+/// ```
+///
+/// The r365 perfect-reconstruction test pins this analysis against the
+/// synthesis bank: analysis → synthesis recovers the input up to the
+/// filterbank group delay.
+///
+/// ## State
+///
+/// The analysis filters are FIR; the carried state is the tail of the
+/// full-rate input history (the `QMF_FILTER_LEN` most recent 16 kHz
+/// samples) so a continuous stream splits without frame-boundary
+/// discontinuities.
+#[derive(Debug, Clone)]
+pub struct QmfAnalysis {
+    /// Previous full-rate input samples (most-recent-last).
+    input_hist: [f64; QMF_FILTER_LEN],
+}
+
+impl Default for QmfAnalysis {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QmfAnalysis {
+    /// A fresh analysis filterbank with zeroed history (stream start).
+    pub fn new() -> Self {
+        Self {
+            input_hist: [0.0; QMF_FILTER_LEN],
+        }
+    }
+
+    /// Split one 320-sample 16 kHz wideband frame into its two
+    /// 160-sample 8 kHz half-band frames `(low_band, high_band)`.
+    ///
+    /// The input history advances so the next call continues seamlessly.
+    pub fn split_frame(
+        &mut self,
+        input: &[f64; QMF_WIDEBAND_FRAME],
+    ) -> ([f64; QMF_HALF_BAND_FRAME], [f64; QMF_HALF_BAND_FRAME]) {
+        let h0 = qmf_h0_float();
+        let mut lb = [0.0f64; QMF_HALF_BAND_FRAME];
+        let mut hb = [0.0f64; QMF_HALF_BAND_FRAME];
+        for i in 0..QMF_HALF_BAND_FRAME {
+            let m = 2 * i; // full-rate output position kept by the decimator
+            let mut acc_l = 0.0f64;
+            let mut acc_h = 0.0f64;
+            for (k, &h) in h0.iter().enumerate() {
+                let x = self.input_sample(input, m, k);
+                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                acc_l += h * x;
+                acc_h += sign * h * x;
+            }
+            lb[i] = acc_l;
+            hb[i] = acc_h;
+        }
+
+        // Advance the history: the frame is longer than the window, so
+        // the new history is the frame's last QMF_FILTER_LEN samples.
+        let start = QMF_WIDEBAND_FRAME - QMF_FILTER_LEN;
+        self.input_hist.copy_from_slice(&input[start..]);
+        (lb, hb)
+    }
+
+    /// Fetch full-rate input sample `x[m − k]`, drawing on the persisted
+    /// history for negative absolute positions (`hist[L−1]` is position
+    /// −1, `hist[L−2]` is −2, …).
+    #[inline]
+    fn input_sample(&self, frame: &[f64; QMF_WIDEBAND_FRAME], m: usize, k: usize) -> f64 {
+        if k <= m {
+            frame[m - k]
+        } else {
+            let back = k - m; // ≥ 1
+            if back <= QMF_FILTER_LEN {
+                self.input_hist[QMF_FILTER_LEN - back]
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,8 +428,20 @@ mod tests {
             let t = i as f64;
             *s = (t * 0.05).sin() + 0.5 * (t * 0.9).sin() + 0.3 * (t * 1.7).cos();
         }
-        // Analysis → two half-bands (length total/2 each).
-        let (lb, hb) = analysis(&x);
+        // Analysis → two half-bands (length total/2 each), through the
+        // public streaming filterbank (pinned identical to the direct
+        // whole-signal reference in
+        // `streaming_analysis_matches_direct_reference`).
+        let mut qa = QmfAnalysis::new();
+        let mut lb = Vec::with_capacity(total / 2);
+        let mut hb = Vec::with_capacity(total / 2);
+        for f in 0..(total / QMF_WIDEBAND_FRAME) {
+            let mut frame = [0.0f64; QMF_WIDEBAND_FRAME];
+            frame.copy_from_slice(&x[f * QMF_WIDEBAND_FRAME..(f + 1) * QMF_WIDEBAND_FRAME]);
+            let (lbf, hbf) = qa.split_frame(&frame);
+            lb.extend_from_slice(&lbf);
+            hb.extend_from_slice(&hbf);
+        }
 
         // Synthesis frame-by-frame through the stateful bank.
         let mut q = QmfSynthesis::new();
@@ -369,6 +484,109 @@ mod tests {
         assert!(
             rel < 1e-3,
             "QMF perfect reconstruction failed: rel err {rel} at delay {best_delay}"
+        );
+    }
+
+    /// The public streaming [`QmfAnalysis`] equals the direct
+    /// whole-signal analysis reference sample-for-sample across multiple
+    /// frames, pinning the streaming history handling exact.
+    #[test]
+    fn streaming_analysis_matches_direct_reference() {
+        let total = 3 * QMF_WIDEBAND_FRAME;
+        let mut x = vec![0.0f64; total];
+        for (i, s) in x.iter_mut().enumerate() {
+            *s = ((i * 11 % 29) as f64 - 14.0) * 0.07 + (i as f64 * 0.31).sin();
+        }
+        let (want_lb, want_hb) = analysis(&x);
+
+        let mut qa = QmfAnalysis::new();
+        let mut got_lb = Vec::new();
+        let mut got_hb = Vec::new();
+        for f in 0..(total / QMF_WIDEBAND_FRAME) {
+            let mut frame = [0.0f64; QMF_WIDEBAND_FRAME];
+            frame.copy_from_slice(&x[f * QMF_WIDEBAND_FRAME..(f + 1) * QMF_WIDEBAND_FRAME]);
+            let (lbf, hbf) = qa.split_frame(&frame);
+            got_lb.extend_from_slice(&lbf);
+            got_hb.extend_from_slice(&hbf);
+        }
+
+        assert_eq!(got_lb.len(), want_lb.len());
+        for (i, (g, w)) in got_lb.iter().zip(want_lb.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-12, "lb sample {i}: {g} vs {w}");
+        }
+        for (i, (g, w)) in got_hb.iter().zip(want_hb.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-12, "hb sample {i}: {g} vs {w}");
+        }
+    }
+
+    /// A silent input splits to two silent half-bands and leaves the
+    /// history zero.
+    #[test]
+    fn analysis_of_silence_is_silent() {
+        let mut qa = QmfAnalysis::new();
+        let (lb, hb) = qa.split_frame(&[0.0; QMF_WIDEBAND_FRAME]);
+        assert!(lb.iter().all(|&v| v == 0.0));
+        assert!(hb.iter().all(|&v| v == 0.0));
+    }
+
+    /// A pure low-frequency 16 kHz input lands (essentially) all its
+    /// energy in the low band; a near-Nyquist input lands it in the high
+    /// band — the band-split direction pin.
+    #[test]
+    fn analysis_separates_low_and_high_frequencies() {
+        let mut frame_lo = [0.0f64; QMF_WIDEBAND_FRAME];
+        let mut frame_hi = [0.0f64; QMF_WIDEBAND_FRAME];
+        for i in 0..QMF_WIDEBAND_FRAME {
+            // ~250 Hz at 16 kHz — deep inside the low band.
+            frame_lo[i] = (2.0 * std::f64::consts::PI * i as f64 * 250.0 / 16_000.0).sin();
+            // ~7 kHz at 16 kHz — deep inside the high band.
+            frame_hi[i] = (2.0 * std::f64::consts::PI * i as f64 * 7_000.0 / 16_000.0).sin();
+        }
+        let energy = |band: &[f64]| band.iter().map(|&v| v * v).sum::<f64>();
+
+        // Run two frames so the second is past the FIR transient.
+        let mut qa = QmfAnalysis::new();
+        let _ = qa.split_frame(&frame_lo);
+        let (lb, hb) = qa.split_frame(&frame_lo);
+        assert!(
+            energy(&lb) > 50.0 * energy(&hb),
+            "low tone: lb energy {} should dominate hb {}",
+            energy(&lb),
+            energy(&hb)
+        );
+
+        let mut qa = QmfAnalysis::new();
+        let _ = qa.split_frame(&frame_hi);
+        let (lb, hb) = qa.split_frame(&frame_hi);
+        assert!(
+            energy(&hb) > 50.0 * energy(&lb),
+            "high tone: hb energy {} should dominate lb {}",
+            energy(&hb),
+            energy(&lb)
+        );
+    }
+
+    /// Analysis history carries across frames: the continued split of a
+    /// second frame differs from a fresh-bank split of the same frame.
+    #[test]
+    fn analysis_history_carries_across_frames() {
+        let mut frame = [0.0f64; QMF_WIDEBAND_FRAME];
+        for (i, s) in frame.iter_mut().enumerate() {
+            *s = (i as f64 * 0.13).cos();
+        }
+        let mut cont = QmfAnalysis::new();
+        let _ = cont.split_frame(&frame);
+        let (lb_cont, _) = cont.split_frame(&frame);
+
+        let mut fresh = QmfAnalysis::new();
+        let (lb_fresh, _) = fresh.split_frame(&frame);
+
+        assert!(
+            lb_cont
+                .iter()
+                .zip(lb_fresh.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-9),
+            "history should influence the continued frame's split"
         );
     }
 

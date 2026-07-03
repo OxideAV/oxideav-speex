@@ -579,7 +579,7 @@ pub use nb_encode::{encode_narrowband_frame, write_narrowband_body};
 pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, OpenLoopPitch};
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
-pub use qmf::{QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
+pub use qmf::{QmfAnalysis, QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
 pub use signalling::{
     inband_code_spec, AcknowledgePolicy, CustomInbandMessage, InbandCodeSpec, InbandKind,
     InbandMessage, InbandRequest, RateModeConfig, SignallingError, CUSTOM_INBAND_MAX_BYTES,
