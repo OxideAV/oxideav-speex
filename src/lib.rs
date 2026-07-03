@@ -417,6 +417,7 @@ mod bitreader;
 mod codebooks;
 mod decoder;
 mod encoder_nb;
+mod encoder_uwb;
 mod encoder_wb;
 mod excitation;
 mod fixed_codebook_gain;
@@ -485,6 +486,9 @@ pub use codebooks::{
 };
 pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
 pub use encoder_nb::{EncodeError, NarrowbandEncoder, NB_FRAME_SAMPLES};
+pub use encoder_uwb::{
+    UltraWidebandEncoder, UwbEncodeError, UwbFrameBodies, UWB_HB_SUBFRAME_SAMPLES,
+};
 pub use encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
 pub use fixed_codebook_gain::{
