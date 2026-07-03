@@ -582,7 +582,7 @@ pub use narrowband_body::{
 pub use narrowband_decoder::{
     saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
-pub use nb_encode::{encode_narrowband_frame, write_narrowband_body};
+pub use nb_encode::{encode_narrowband_frame, write_narrowband_body, write_packet_terminator};
 pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, OpenLoopPitch};
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};

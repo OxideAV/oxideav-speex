@@ -202,6 +202,37 @@ impl WidebandEncoder {
         Ok(writer.into_bytes())
     }
 
+    /// Encode a whole **packet** of consecutive 320-sample 16 kHz frames:
+    /// each frame packs as the §10.4 embedded layout (narrowband layer
+    /// with the wideband flag set, then the high band), the frames are
+    /// concatenated back-to-back (§5.5), closed with the mode-15
+    /// terminator, and zero-padded to the byte boundary. The result is
+    /// directly consumable by [`crate::SpeexDecoder::decode_packet`].
+    pub fn encode_packet(
+        &mut self,
+        frames: &[[i16; QMF_WIDEBAND_FRAME]],
+        nb_mode: u8,
+        hb_mode: u8,
+    ) -> Result<Vec<u8>, WbEncodeError> {
+        let mut writer = crate::bitreader::BitWriter::new();
+        for pcm in frames {
+            let bodies = self.encode_frame_bodies(pcm, nb_mode, hb_mode)?;
+            let nb_submode = NarrowbandSubmode::for_id(bodies.nb_mode)
+                .expect("mode validated by encode_frame_bodies");
+            let hb_submode = WidebandHighBandSubmode::for_id(bodies.hb_mode)
+                .expect("mode validated by encode_frame_bodies");
+            let header = crate::frame::NarrowbandFrameHeader::new(true, nb_submode.mode_id)
+                .map_err(WbEncodeError::Pack)?;
+            header.write(&mut writer).map_err(WbEncodeError::Pack)?;
+            crate::nb_encode::write_narrowband_body(&mut writer, &bodies.nb_body, &nb_submode)
+                .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))?;
+            crate::hb_encode::write_high_band_frame(&mut writer, &bodies.hb_body, &hb_submode)
+                .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))?;
+        }
+        crate::nb_encode::write_packet_terminator(&mut writer).map_err(WbEncodeError::Pack)?;
+        Ok(writer.into_bytes())
+    }
+
     /// Encode one frame, returning the two intermediate frame bodies
     /// (the quantised indices) instead of packed bytes. Useful for tests
     /// and for callers assembling multi-frame packets themselves.

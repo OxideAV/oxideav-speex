@@ -148,6 +148,31 @@ impl NarrowbandEncoder {
         Ok(writer.into_bytes())
     }
 
+    /// Encode a whole **packet** of consecutive 160-sample frames in the
+    /// given mode: the frames are packed back-to-back (§5.5 — *"it is
+    /// desirable to pack more than one frame per packet"*), closed with
+    /// the mode-15 terminator, and zero-padded to the byte boundary.
+    /// The result is directly consumable by
+    /// [`crate::SpeexDecoder::decode_packet`].
+    pub fn encode_packet(
+        &mut self,
+        frames: &[[i16; NB_FRAME_SAMPLES]],
+        mode: u8,
+    ) -> Result<Vec<u8>, EncodeError> {
+        let submode = NarrowbandSubmode::for_id(mode).ok_or(EncodeError::UnknownMode(mode))?;
+        let mut writer = crate::bitreader::BitWriter::new();
+        for pcm in frames {
+            let body = self.build_body(pcm, &submode)?;
+            let header = crate::frame::NarrowbandFrameHeader::new(false, submode.mode_id)
+                .map_err(EncodeError::Pack)?;
+            header.write(&mut writer).map_err(EncodeError::Pack)?;
+            crate::nb_encode::write_narrowband_body(&mut writer, &body, &submode)
+                .map_err(|e| EncodeError::Pack(FrameError::from(e)))?;
+        }
+        crate::nb_encode::write_packet_terminator(&mut writer).map_err(EncodeError::Pack)?;
+        Ok(writer.into_bytes())
+    }
+
     /// Encode one frame, returning the intermediate [`NarrowbandFrameBody`]
     /// (the quantised indices) instead of packed bytes. Useful for tests
     /// and for callers that assemble multi-frame packets themselves.

@@ -122,6 +122,21 @@ pub fn encode_narrowband_frame(
     Ok(writer)
 }
 
+/// Close a multi-frame Speex packet: append the 5-bit mode-15
+/// **terminator** pseudo-frame (§5.5: *"it is possible to include a
+/// terminator code. That terminator consists of the code 15 (decimal)
+/// encoded with 5 bits"*) and zero-pad to the byte boundary.
+///
+/// The packet walker ([`crate::PacketFrames`]) stops cleanly at the
+/// terminator, so the padding bits are never misparsed as another
+/// frame regardless of how many bits the frames left in the last byte.
+pub fn write_packet_terminator(writer: &mut BitWriter) -> Result<(), FrameError> {
+    let terminator = NarrowbandFrameHeader::new(false, 15)?;
+    terminator.write(writer)?;
+    writer.pad_to_byte()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
