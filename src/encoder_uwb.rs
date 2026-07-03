@@ -340,7 +340,10 @@ fn encode_uwb_envelope(high: &[f64; UWB_HALF_BAND_FRAME]) -> (u16, [i32; HB_LPC_
 /// Write one complete ultra-wideband frame: the embedded wideband frame
 /// (narrowband prefix with the wideband flag + Table 9.1 body + first
 /// high-band frame), then the second high-band frame.
-fn write_uwb_frame(writer: &mut BitWriter, bodies: &UwbFrameBodies) -> Result<(), UwbEncodeError> {
+pub(crate) fn write_uwb_frame(
+    writer: &mut BitWriter,
+    bodies: &UwbFrameBodies,
+) -> Result<(), UwbEncodeError> {
     let nb_submode = NarrowbandSubmode::for_id(bodies.wideband.nb_mode).ok_or(
         UwbEncodeError::Wideband(WbEncodeError::Narrowband(
             crate::encoder_nb::EncodeError::UnknownMode(bodies.wideband.nb_mode),

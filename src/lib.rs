@@ -459,6 +459,7 @@ mod stream_decoder;
 mod submode;
 mod synthesis;
 mod uwb_decoder;
+mod vad;
 mod wb_synthesis;
 mod weighting;
 mod wideband;
@@ -611,6 +612,7 @@ pub use uwb_decoder::{
     UltraWidebandDecoder, UltraWidebandFrame, UwbDecodeError, UwbDecodedFrame, UWB_FRAME_SAMPLES,
     UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES,
 };
+pub use vad::{EnergyVad, DTX_MODE};
 pub use wb_synthesis::{
     synthesise_high_band_frame, synthesise_high_band_frame_interp, SubBandLayer, UwbFrameLayout,
     HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,
