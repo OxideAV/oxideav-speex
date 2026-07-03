@@ -173,6 +173,24 @@ impl NarrowbandEncoder {
         Ok(writer.into_bytes())
     }
 
+    /// Encode a packet at a §2.1 quality setting (0..=10), selecting the
+    /// narrowband sub-mode through the Table 9.2 quality ladder
+    /// ([`crate::nb_mode_for_quality`]).
+    ///
+    /// The encode-side innovation gaps constrain the usable range:
+    /// qualities 0, 9 and 10 select modes 1 / 6 / 7 — mode 1 and 7 carry
+    /// the undocumented-innovation binding and are rejected; qualities
+    /// 1..=8 encode (modes 8 / 2 / 3 / 3 / 4 / 4 / 5 / 5).
+    pub fn encode_packet_quality(
+        &mut self,
+        frames: &[[i16; NB_FRAME_SAMPLES]],
+        quality: u8,
+    ) -> Result<Vec<u8>, EncodeError> {
+        let mode = crate::quality::nb_mode_for_quality(quality)
+            .ok_or(EncodeError::UnknownMode(quality))?;
+        self.encode_packet(frames, mode)
+    }
+
     /// Encode one frame, returning the intermediate [`NarrowbandFrameBody`]
     /// (the quantised indices) instead of packed bytes. Useful for tests
     /// and for callers that assemble multi-frame packets themselves.
@@ -649,6 +667,41 @@ mod tests {
         assert_eq!(
             enc.encode_frame(&frame, 9),
             Err(EncodeError::UnknownMode(9))
+        );
+    }
+
+    #[test]
+    fn quality_packets_match_ladder_budgets() {
+        // encode_packet_quality wires the Table 9.2 ladder: for each
+        // encodable quality, one frame + terminator packs to exactly
+        // ceil((mode_bits + 5) / 8) bytes and decodes.
+        for q in 1..=8u8 {
+            let mode = crate::quality::nb_mode_for_quality(q).unwrap();
+            let submode = NarrowbandSubmode::for_id(mode).unwrap();
+            let mut enc = NarrowbandEncoder::new();
+            let frames = [voiced_frame(60, 6000.0)];
+            let pkt = enc
+                .encode_packet_quality(&frames, q)
+                .unwrap_or_else(|e| panic!("quality {q}: {e}"));
+            let bits = u32::from(submode.total_bits) + 5;
+            assert_eq!(pkt.len(), bits.div_ceil(8) as usize, "quality {q}");
+            let mut dec = crate::SpeexDecoder::new();
+            assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");
+        }
+        // Qualities selecting undocumented-innovation modes are rejected.
+        let mut enc = NarrowbandEncoder::new();
+        let frames = [voiced_frame(60, 6000.0)];
+        assert!(
+            enc.encode_packet_quality(&frames, 0).is_err(),
+            "q0 -> mode 1"
+        );
+        assert!(
+            enc.encode_packet_quality(&frames, 10).is_err(),
+            "q10 -> mode 7"
+        );
+        assert!(
+            enc.encode_packet_quality(&frames, 11).is_err(),
+            "q11 out of range"
         );
     }
 

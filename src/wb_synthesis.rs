@@ -91,12 +91,16 @@
 //!
 //! [`UwbFrameLayout`] captures this recursion as a typed descriptor:
 //! the number of embedded sub-band layers and the per-layer sample
-//! rate. The **per-mode UWB high-band bit allocation** (the analogue of
-//! Table 10.1 for the 8–16 kHz UWB band) is **not** in the staged
-//! manual — there is no "Table 11.x" — so the UWB high-band body parser
-//! is a recorded docs gap. This module surfaces the framing recursion
-//! (the layer structure + sample-rate ladder) without inventing the
-//! missing bit budgets.
+//! rate. As of round r389 the recursion is **walked**, not just
+//! described: [`crate::UltraWidebandDecoder`] /
+//! [`crate::UltraWidebandEncoder`] decode/encode the second high-band
+//! layer, whose conformant shape (Table 10.1 **mode 1** at every
+//! quality) is pinned by RFC 5574 Table 2's constant +36 bits/frame
+//! ultra-wideband column (see [`crate::quality`]). The staged manual
+//! still has no "Table 11.x": the mode-1 folded-excitation *source*
+//! and the excitation-VQ modes' sub-frame geometry at the 16 kHz
+//! half-band remain the recorded docs gaps (see the
+//! [`crate::uwb_decoder`] module docs).
 
 use crate::codebooks::HB_LPC_ORDER;
 use crate::hb_innovation::{HbInnovationError, HB_SUBFRAME_SAMPLES};
@@ -269,9 +273,10 @@ impl SubBandLayer {
 /// Each higher rate class prepends a 1-bit **wideband flag** = `1`
 /// followed by the lower class's whole frame, then its own high-band
 /// layer; a narrowband decoder stops at the first `wideband flag == 0`
-/// embedded frame. This descriptor names the layer ladder; it does not
-/// itself parse a body (the UWB high-band per-mode bit allocation is a
-/// docs gap — see module docs).
+/// embedded frame. This descriptor names the layer ladder; the walk
+/// itself lives in [`crate::UltraWidebandDecoder`] /
+/// [`crate::UltraWidebandEncoder`] (round r389 — see module docs for
+/// what remains gapped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UwbFrameLayout {
     /// The outermost (highest-rate) layer.

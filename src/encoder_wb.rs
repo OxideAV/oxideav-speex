@@ -235,6 +235,24 @@ impl WidebandEncoder {
         Ok(writer.into_bytes())
     }
 
+    /// Encode a packet at a §2.1 quality setting (0..=10), selecting the
+    /// per-layer sub-modes through the Table 10.2-derived wideband
+    /// quality ladder ([`crate::wb_modes_for_quality`]).
+    ///
+    /// The encode-side gaps constrain the usable range: quality 0
+    /// selects narrowband mode 1, qualities 9..=10 narrowband mode 7
+    /// (both undocumented-innovation) and quality 10 high-band mode 4
+    /// (docs-gapped codebook binding); qualities 1..=8 encode.
+    pub fn encode_packet_quality(
+        &mut self,
+        frames: &[[i16; QMF_WIDEBAND_FRAME]],
+        quality: u8,
+    ) -> Result<Vec<u8>, WbEncodeError> {
+        let modes = crate::quality::wb_modes_for_quality(quality)
+            .ok_or(WbEncodeError::UnknownHbMode(quality))?;
+        self.encode_packet(frames, modes.nb_mode, modes.hb_mode)
+    }
+
     /// Encode one frame, returning the two intermediate frame bodies
     /// (the quantised indices) instead of packed bytes. Useful for tests
     /// and for callers assembling multi-frame packets themselves.
@@ -482,6 +500,32 @@ mod tests {
             *s = v.round().clamp(-32768.0, 32767.0) as i16;
         }
         f
+    }
+
+    #[test]
+    fn quality_packets_match_ladder_budgets() {
+        // encode_packet_quality wires the Table 10.2-derived ladder:
+        // one frame + terminator packs to the staged bits-per-frame
+        // total and decodes through the top-level SpeexDecoder.
+        use crate::quality::{wb_bitrate_bps, FRAMES_PER_SECOND};
+        for q in 1..=8u8 {
+            let mut enc = WidebandEncoder::new();
+            let frames = [wideband_frame(5000.0)];
+            let pkt = enc
+                .encode_packet_quality(&frames, q)
+                .unwrap_or_else(|e| panic!("quality {q}: {e}"));
+            let bits = wb_bitrate_bps(q).unwrap() / FRAMES_PER_SECOND + 5;
+            assert_eq!(pkt.len(), bits.div_ceil(8) as usize, "quality {q}");
+            let mut dec = crate::SpeexDecoder::new();
+            assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");
+        }
+        // Gapped qualities are rejected (q0 NB mode 1; q9/q10 NB mode 7
+        // / HB mode 4).
+        let mut enc = WidebandEncoder::new();
+        let frames = [wideband_frame(5000.0)];
+        for q in [0u8, 9, 10, 11] {
+            assert!(enc.encode_packet_quality(&frames, q).is_err(), "q{q}");
+        }
     }
 
     #[test]
