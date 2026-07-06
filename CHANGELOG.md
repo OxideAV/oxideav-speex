@@ -46,6 +46,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   reference's own 16 kHz fold-source geometry stays a recorded gap
   (the staged fixture is wideband-only) — the source choice is
   documented as the crate's convention.
+- Round r393: **fold-consistent wideband encoder mode-1 gains** — the
+  wideband encoder's gain-only high-band sub-mode now transmits
+  `g = rms(residual)/(K·rms(e_lb))` against the embedded narrowband
+  encoder's locally reconstructed excitation
+  (`NarrowbandEncoder::last_frame_excitation`, the analysis-by-synthesis
+  mirror of the decoder's fold source) instead of the raw residual RMS,
+  so encode → decode round-trips reconstruct the 4–8 kHz energy
+  envelope through the pinned law (new tracking test).
 - Round r393: **opt-in decoder output high-pass** (`OutputHighpass`) —
   the manual's codec-control table documents a default-on high-pass
   whose transfer is not staged; the fixture's behavioural trace (phase

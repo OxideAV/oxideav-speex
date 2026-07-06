@@ -644,6 +644,21 @@ impl NarrowbandEncoder {
         (correction_field(correction), choice.packed, exc)
     }
 
+    /// The most recent frame's locally reconstructed excitation
+    /// `e = p + g·c` (160 samples, most-recent last) — the encoder-side
+    /// analysis-by-synthesis mirror of
+    /// [`crate::NarrowbandDecoder::last_frame_excitation`]. The wideband
+    /// encoder reads this as the fold source when choosing the
+    /// high-band gain-only sub-mode's 5-bit gains (r393). Zero-padded at
+    /// stream start.
+    pub fn last_frame_excitation(&self) -> [f64; NB_FRAME_SAMPLES] {
+        let mut out = [0.0f64; NB_FRAME_SAMPLES];
+        let n = self.exc_hist.len().min(NB_FRAME_SAMPLES);
+        let src = &self.exc_hist[self.exc_hist.len() - n..];
+        out[NB_FRAME_SAMPLES - n..].copy_from_slice(src);
+        out
+    }
+
     /// Push a 40-sample excitation block into the history ring.
     fn push_excitation(&mut self, exc: &[f64; SUBFRAME_SAMPLES]) {
         self.exc_hist.extend_from_slice(exc);

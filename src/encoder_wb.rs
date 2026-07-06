@@ -353,9 +353,25 @@ impl WidebandEncoder {
                     slot.excitation_vq_index = packed;
                 }
                 None => {
-                    // Mode 1: gain-only — the field conveys the high-band
-                    // energy envelope (no VQ field on the wire).
-                    let gain_idx = quantise_hb_exc_gain(r_rms as f32, gain_bits);
+                    // Mode 1: gain-only — the decoder reconstructs by
+                    // folding the low-band excitation
+                    // (e = K·g·(−1)ⁿ·e_lb, r393 fixture-pinned law), so
+                    // the transmitted gain is the fold-consistent target
+                    // g = rms(residual)/(K·rms(e_lb)) against the
+                    // embedded narrowband encoder's locally
+                    // reconstructed excitation (the analysis-by-
+                    // synthesis mirror of the decoder's fold source).
+                    let src = self.low_band.last_frame_excitation();
+                    let sf_src = &src[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
+                    let src_rms = (sf_src.iter().map(|&v| v * v).sum::<f64>()
+                        / HB_SUBFRAME_SAMPLES as f64)
+                        .sqrt();
+                    let target = if src_rms > 1e-9 {
+                        r_rms / (crate::hb_fold::HB_FOLD_RECONSTRUCTION_MULT * src_rms)
+                    } else {
+                        0.0
+                    };
+                    let gain_idx = quantise_hb_exc_gain(target as f32, gain_bits);
                     slot.excitation_gain_index = gain_idx.and_then(|i| i.raw_index()).unwrap_or(0);
                     slot.excitation_vq_index = 0;
                 }
@@ -603,6 +619,47 @@ mod tests {
         assert_eq!(hb_header.mode_id, hb_mode);
         let hb_parsed = WidebandHighBandBody::parse(&mut r, &hb_submode).unwrap();
         assert_eq!(hb_parsed, bodies.hb_body);
+    }
+
+    #[test]
+    fn folded_mode1_high_band_tracks_energy_through_decode() {
+        // HB mode 1 (gain-only): with the r393 fold-consistent gain law
+        // the decoded 4–8 kHz half-band's RMS should track the
+        // encoder-side high half's RMS within a modest factor — the
+        // fold reconstructs the transmitted energy envelope rather than
+        // silence.
+        use crate::qmf::QmfAnalysis;
+        use crate::wideband_decoder::WidebandDecoder;
+
+        let frame = wideband_frame(6000.0);
+        let mut enc = WidebandEncoder::new();
+        let mut dec = WidebandDecoder::new();
+        let mut probe = QmfAnalysis::new();
+
+        let mut input = [0.0f64; QMF_WIDEBAND_FRAME];
+        for (slot, &v) in input.iter_mut().zip(frame.iter()) {
+            *slot = f64::from(v);
+        }
+        let mut low = [0.0f64; 160];
+        let mut high = [0.0f64; 160];
+        let mut hb_energy = 0.0f64;
+        let mut dec_energy = 0.0f64;
+        for i in 0..6 {
+            probe.split_slices(&input, &mut low, &mut high);
+            let bytes = enc.encode_frame(&frame, 3, 1).expect("encodes");
+            let f = dec.decode_packet(&bytes).expect("decodes");
+            if i >= 2 {
+                hb_energy += high.iter().map(|&v| v * v).sum::<f64>();
+                dec_energy += f.high_band.iter().map(|&v| v * v).sum::<f64>();
+            }
+        }
+        let hb_rms = (hb_energy / (4.0 * 160.0)).sqrt();
+        let dec_rms = (dec_energy / (4.0 * 160.0)).sqrt();
+        assert!(hb_rms > 100.0, "probe should see the 6 kHz tone");
+        assert!(
+            dec_rms > hb_rms / 4.0 && dec_rms < hb_rms * 4.0,
+            "decoded 4-8 kHz RMS {dec_rms:.1} should track encoder-side {hb_rms:.1}"
+        );
     }
 
     #[test]

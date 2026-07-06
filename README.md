@@ -403,7 +403,10 @@ mode-1 fixture.
   excitation with **closed-loop gain selection** (the 4/5-bit gain grid
   is searched exhaustively; each level's greedy innovation search —
   both codebook shapes, including the `HbSv8_128` polarity sign — is
-  scored by its *decoded* error) → the §10.4 embedded packing
+  scored by its *decoded* error; the gain-only mode 1 transmits the
+  r393 **fold-consistent** target `g = rms(residual)/(K·rms(e_lb))`
+  against the embedded encoder's local excitation) → the §10.4 embedded
+  packing
   (`hb_encode`, `parse(write(body)) == body` for every documented HB
   mode). Packet-level entry points (`encode_packet` on both encoders,
   closing with the §5.5 mode-15 terminator) round-trip through the
