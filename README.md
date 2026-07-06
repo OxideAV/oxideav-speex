@@ -213,6 +213,14 @@ return `Error::NotImplemented`. What is implemented and tested:
   behavioural trace fits a 2nd-order Butterworth at 30 Hz (flat
   optimum — documented as fitted, not reference-pinned). Raises the
   fixture match from 16.7 dB to 18.3 dB when applied.
+* **On-wire layer-prefix grammar** (round r393, fixture-arbitrated) —
+  every layer is introduced by the 1-bit wideband flag: `0` narrowband
+  layer (a wideband frame's leading prefix starts `0`), `1` each
+  high-band layer; the packet walker detects a high-band extension by
+  the bit following the narrowband body (terminator / next prefix /
+  padding all start `0`). The top-level `SpeexDecoder` now delegates
+  its wideband assembly to `WidebandDecoder` (bit-identical paths,
+  pinned via `SpeexStreamDecoder` on the fixture).
 * **Fixture conformance gate** (`tests/wb_mode1_folded_fixture.rs`) —
   the 101-frame fixture decode is scored absolutely (no fitted gain)
   at the fixed 80-sample reference lead: measured r393 full-signal

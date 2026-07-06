@@ -85,7 +85,7 @@ pub fn encode_wideband_frame(
     hb_submode: &WidebandHighBandSubmode,
 ) -> Result<BitWriter, FrameError> {
     let mut writer = BitWriter::new();
-    let header = NarrowbandFrameHeader::new(true, nb_submode.mode_id)?;
+    let header = NarrowbandFrameHeader::new(false, nb_submode.mode_id)?;
     header.write(&mut writer)?;
     write_narrowband_body(&mut writer, nb_body, nb_submode)?;
     write_high_band_frame(&mut writer, hb_body, hb_submode)?;
@@ -234,7 +234,8 @@ mod tests {
         // Walk the exact reader chain the wideband decoder uses.
         let mut r = BitReader::new(&bytes);
         let nb_header = NarrowbandFrameHeader::parse(&mut r).unwrap();
-        assert!(nb_header.wideband, "NB prefix must carry wideband flag 1");
+        // r393 fixture-pinned grammar: flag 0 on the narrowband layer.
+        assert!(!nb_header.wideband, "NB layer prefix carries flag 0");
         assert_eq!(nb_header.mode_id, 3);
         let nb_parsed = NarrowbandFrameBody::parse(&mut r, &nb_submode).unwrap();
         assert_eq!(nb_parsed, nb_body, "embedded NB body round-trip");

@@ -401,7 +401,20 @@ impl<'a> PacketFrames<'a> {
             }
             Submode::Celp(submode) => {
                 let body = NarrowbandFrameBody::parse(&mut self.reader, &submode)?;
-                if header.wideband {
+                // Embedded-wideband detection (r393, arbitrated against
+                // the staged `wb-mode1-folded` reference stream): in the
+                // reference on-wire grammar every **layer** is prefixed
+                // by the 1-bit wideband flag — `0` introduces a
+                // narrowband layer (so a wideband frame's leading 5-bit
+                // prefix starts with `0`!), `1` introduces a Table 10.1
+                // high-band layer. A high-band extension is therefore
+                // announced by the bit *after* the narrowband body: `1`
+                // = high-band layer follows; `0` = next frame prefix /
+                // terminator / §5.5 zero padding. The pre-r393
+                // convention (leading flag `1` = wideband frame) is
+                // still accepted for packets this crate's own earlier
+                // encoders produced.
+                if header.wideband || self.high_band_follows() {
                     self.claim_high_band(header, body, &submode)
                 } else {
                     Ok(Some(PacketFrame::Narrowband { header, body }))
@@ -410,9 +423,22 @@ impl<'a> PacketFrames<'a> {
         }
     }
 
-    /// Read the high-band frame that follows a wideband-flagged
-    /// narrowband body. The narrowband prefix's wideband bit being set
-    /// is the spec's signal that a Table 10.1 frame is coming next.
+    /// Peek (without consuming): does a high-band layer follow the
+    /// cursor? High-band layer prefixes are the only frame content that
+    /// begins with a `1` bit — a following narrowband frame's prefix,
+    /// the mode-15 terminator and the §5.5 padding tail all begin with
+    /// `0` (fixture-pinned grammar, r393; see `next_frame`).
+    fn high_band_follows(&self) -> bool {
+        if self.reader.remaining_bits() < crate::wideband::HIGH_BAND_FRAME_PREFIX_BITS {
+            return false;
+        }
+        let mut probe = self.reader.clone();
+        matches!(probe.read_bit(), Ok(1))
+    }
+
+    /// Read the high-band frame that follows a narrowband body (either
+    /// announced by the following `1` bit — the reference grammar — or
+    /// by the legacy leading wideband flag).
     fn claim_high_band(
         &mut self,
         header: NarrowbandFrameHeader,

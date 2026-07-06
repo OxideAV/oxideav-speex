@@ -46,6 +46,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   reference's own 16 kHz fold-source geometry stays a recorded gap
   (the staged fixture is wideband-only) — the source choice is
   documented as the crate's convention.
+- Round r393: **on-wire layer-prefix grammar arbitrated** — the fixture
+  pins the embedded-frame grammar: **every layer** is introduced by the
+  1-bit wideband flag, `0` for the narrowband layer (so a real wideband
+  frame's leading 5-bit prefix starts with `0`) and `1` for each
+  Table 10.1 high-band layer; a high-band extension is announced by the
+  bit *after* the narrowband body. `PacketFrames` previously required a
+  leading `1` to detect a wideband frame and mis-walked real `speexenc`
+  wideband packets (the fixture surfaces this immediately); it now
+  peeks the post-body bit (next frame prefix / terminator / §5.5
+  padding all start `0`), still accepting the legacy leading-`1`
+  layout this crate's earlier encoders produced. All encoders
+  (wideband, ultra-wideband, DTX) now write the reference convention.
+- Round r393: **`SpeexDecoder` wideband path delegated to
+  `WidebandDecoder`** (new body-level `decode_frame_bodies` entry +
+  `low_band_decoder_mut` shared-state accessor) — the top-level decoder
+  previously duplicated the wideband assembly and had not picked up the
+  folded high band; the two public paths are now bit-identical, pinned
+  by a fixture gate through the header-driven `SpeexStreamDecoder`.
 - Round r393: **fold-consistent wideband encoder mode-1 gains** — the
   wideband encoder's gain-only high-band sub-mode now transmits
   `g = rms(residual)/(K·rms(e_lb))` against the embedded narrowband

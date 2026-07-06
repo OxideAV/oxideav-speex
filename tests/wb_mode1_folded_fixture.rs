@@ -215,6 +215,41 @@ fn output_highpass_improves_reference_match() {
     assert!(hp_corr >= 0.985, "high-passed correlation {hp_corr:.4}");
 }
 
+/// The header-driven top-level path ([`SpeexStreamDecoder`]) decodes
+/// the same fixture identically to the direct [`WidebandDecoder`]
+/// walk: parse the Ogg header packet, dispatch by its mode field, and
+/// compare the flat `i16` stream against the per-packet decode. Pins
+/// the r393 fold through the highest-level public entry point.
+#[test]
+fn stream_decoder_path_matches_direct_wideband_decode() {
+    use oxideav_speex::{SpeexHeader, SpeexStreamDecoder};
+
+    let packets = lift_ogg_packets(INPUT);
+    let header = SpeexHeader::parse(&packets[0]).expect("header packet parses");
+    assert!(header.is_wideband(), "fixture is a wideband stream");
+
+    let mut stream = SpeexStreamDecoder::for_header(&header).expect("wideband dispatch");
+    assert_eq!(stream.output_rate_hz(), 16_000);
+    assert_eq!(stream.frame_samples(), 320);
+
+    let mut via_stream: Vec<i16> = Vec::new();
+    for pkt in &packets[2..] {
+        via_stream.extend(stream.decode_packet_pcm_i16(pkt).expect("stream decode"));
+    }
+
+    let mut direct = WidebandDecoder::new();
+    let mut via_direct: Vec<i16> = Vec::new();
+    for pkt in &packets[2..] {
+        via_direct.extend(direct.decode_packet_i16(pkt).expect("direct decode"));
+    }
+
+    assert_eq!(via_stream.len(), 101 * 320);
+    assert_eq!(
+        via_stream, via_direct,
+        "header-driven and direct wideband decodes must be bit-identical"
+    );
+}
+
 /// The arbitration is meaningful only if the fixture really is the
 /// all-mode-1 stream the docs describe: re-verify the framing facts the
 /// fixture notes pin (101 frames, NB mode 8, HB sub-mode 1).

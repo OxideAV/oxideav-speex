@@ -443,7 +443,7 @@ pub(crate) fn write_uwb_frame(
         .ok_or(UwbEncodeError::UnknownUwbMode(bodies.uwb_mode))?;
 
     let header =
-        NarrowbandFrameHeader::new(true, nb_submode.mode_id).map_err(UwbEncodeError::Pack)?;
+        NarrowbandFrameHeader::new(false, nb_submode.mode_id).map_err(UwbEncodeError::Pack)?;
     header.write(writer).map_err(UwbEncodeError::Pack)?;
     crate::nb_encode::write_narrowband_body(writer, &bodies.wideband.nb_body, &nb_submode)
         .map_err(|e| UwbEncodeError::Pack(FrameError::from(e)))?;

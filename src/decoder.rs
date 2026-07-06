@@ -35,16 +35,16 @@
 //! across a mixed stream. The high-band [`crate::HbSynthesisFilter`]
 //! state is separate and advances only when a high band is present.
 
-use crate::hb_synthesis::HbSynthesisFilter;
 use crate::narrowband_decoder::{
     NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
 use crate::packet::{PacketError, PacketFrame, PacketFrames};
-use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
+use crate::qmf::QMF_WIDEBAND_FRAME;
 use crate::signalling::{InbandMessage, InbandRequest};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame_interp, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::HB_FRAME_SAMPLES;
 use crate::wideband::WidebandSubmode;
+use crate::wideband_decoder::WidebandDecoder;
 use core::fmt;
 
 /// One decoded unit produced from a packet frame.
@@ -216,15 +216,12 @@ impl From<NarrowbandDecodeError> for DecodeError {
 /// call [`SpeexDecoder::decode_packet`] once per Speex packet.
 #[derive(Debug, Clone)]
 pub struct SpeexDecoder {
-    narrowband: NarrowbandDecoder,
-    high_band_filter: HbSynthesisFilter,
-    /// Previous wideband frame's reconstructed high-band LSP
-    /// codebook-delta vector (Q10, pre-base) for the continuous
-    /// per-frame high-band LSP interpolation (§9.1 / §10.1).
-    prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
-    /// QMF synthesis filterbank state for the wideband half-band → 16 kHz
-    /// recombination, carried across wideband frames.
-    qmf: QmfSynthesis,
+    /// The full wideband decode stack (r393: delegated rather than
+    /// duplicated, so the folded high-band law and every future
+    /// wideband fix flow through this path automatically). Standalone
+    /// narrowband frames advance its embedded narrowband decoder — the
+    /// shared low-band state (RFC 5574 §3.1).
+    wideband: WidebandDecoder,
 }
 
 impl Default for SpeexDecoder {
@@ -237,10 +234,7 @@ impl SpeexDecoder {
     /// A fresh decoder at stream start (zero history everywhere).
     pub fn new() -> Self {
         Self {
-            narrowband: NarrowbandDecoder::new(),
-            high_band_filter: HbSynthesisFilter::new(),
-            prev_hb_lsp_delta_q10: None,
-            qmf: QmfSynthesis::new(),
+            wideband: WidebandDecoder::new(),
         }
     }
 
@@ -294,7 +288,10 @@ impl SpeexDecoder {
                     // PacketFrames only yields Narrowband for CELP modes.
                     _ => unreachable!("Narrowband frame carries a CELP sub-mode"),
                 };
-                let pcm = self.narrowband.decode_frame(&body, &submode)?;
+                let pcm = self
+                    .wideband
+                    .low_band_decoder_mut()
+                    .decode_frame(&body, &submode)?;
                 Ok(DecodedFrame::Narrowband(Box::new(pcm)))
             }
             PacketFrame::Wideband {
@@ -307,28 +304,32 @@ impl SpeexDecoder {
                     Submode::Celp(s) => s,
                     _ => unreachable!("Wideband low band carries a CELP sub-mode"),
                 };
-                let low_band = self.narrowband.decode_frame(&narrowband, &nb_submode)?;
-
                 let hb_submode = match high_band_header.submode {
                     WidebandSubmode::Documented(s) => s,
                     WidebandSubmode::ReservedHighRate(id) => {
                         return Err(DecodeError::HighBandReserved { mode_id: id })
                     }
                 };
-                let high_band = synthesise_high_band_frame_interp(
-                    &high_band,
-                    &hb_submode,
-                    &mut self.high_band_filter,
-                    &mut self.prev_hb_lsp_delta_q10,
-                )
-                .map_err(|_| DecodeError::HighBandUndocumented)?;
-
-                let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);
+                // Delegate the whole wideband assembly (low band + r393
+                // folded high band + QMF recombination) to the wideband
+                // decoder so the two public paths are bit-identical.
+                let frame = self
+                    .wideband
+                    .decode_frame_bodies(&narrowband, &nb_submode, &high_band, &hb_submode)
+                    .map_err(|e| match e {
+                        crate::wideband_decoder::WidebandDecodeError::Narrowband(nb) => {
+                            DecodeError::Narrowband(nb)
+                        }
+                        crate::wideband_decoder::WidebandDecodeError::HighBandReserved {
+                            mode_id,
+                        } => DecodeError::HighBandReserved { mode_id },
+                        _ => DecodeError::HighBandUndocumented,
+                    })?;
 
                 Ok(DecodedFrame::Wideband {
-                    low_band: Box::new(low_band),
-                    high_band: Box::new(high_band),
-                    wideband_pcm: Box::new(wideband_pcm),
+                    low_band: Box::new(frame.low_band),
+                    high_band: Box::new(frame.high_band),
+                    wideband_pcm: Box::new(frame.wideband_pcm),
                 })
             }
             PacketFrame::InbandSignalling { message, .. } => {
@@ -348,7 +349,7 @@ impl SpeexDecoder {
 
     /// Read-only view of the shared narrowband decoder (diagnostics).
     pub fn narrowband(&self) -> &NarrowbandDecoder {
-        &self.narrowband
+        self.wideband.low_band_decoder()
     }
 }
 
@@ -360,12 +361,22 @@ mod tests {
     use crate::wideband::WIDEBAND_HIGH_BAND_SUBMODES;
 
     /// Build an all-ones narrowband frame for the given mode (wideband
-    /// flag 0).
+    /// flag 0). The §5.5 padding tail after the body is **zeroed** —
+    /// conformant packets pad with the terminator / zero bits, and the
+    /// r393 fixture-pinned layer grammar reads a `1` bit after a
+    /// narrowband body as a high-band layer prefix.
     fn nb_frame(mode: u8) -> Vec<u8> {
         let submode = NarrowbandSubmode::for_id(mode).expect("valid mode");
-        let total_bytes = u32::from(submode.total_bits).div_ceil(8);
+        let total_bits = u32::from(submode.total_bits);
+        let total_bytes = total_bits.div_ceil(8);
         let mut buf = vec![0xFFu8; total_bytes as usize];
         buf[0] = (mode & 0x0F) << 3 | 0b0000_0111;
+        // Zero the padding bits of the last byte.
+        let pad = total_bytes * 8 - total_bits;
+        if pad > 0 {
+            let last = buf.len() - 1;
+            buf[last] &= 0xFFu8 << pad;
+        }
         buf
     }
 

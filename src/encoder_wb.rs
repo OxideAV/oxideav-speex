@@ -223,7 +223,7 @@ impl WidebandEncoder {
                 .expect("mode validated by encode_frame_bodies");
             let hb_submode = WidebandHighBandSubmode::for_id(bodies.hb_mode)
                 .expect("mode validated by encode_frame_bodies");
-            let header = crate::frame::NarrowbandFrameHeader::new(true, nb_submode.mode_id)
+            let header = crate::frame::NarrowbandFrameHeader::new(false, nb_submode.mode_id)
                 .map_err(WbEncodeError::Pack)?;
             header.write(&mut writer).map_err(WbEncodeError::Pack)?;
             crate::nb_encode::write_narrowband_body(&mut writer, &bodies.nb_body, &nb_submode)
@@ -609,7 +609,10 @@ mod tests {
         let hb_submode = WidebandHighBandSubmode::for_id(hb_mode).unwrap();
         let mut r = BitReader::new(&bytes);
         let nb_header = NarrowbandFrameHeader::parse(&mut r).unwrap();
-        assert!(nb_header.wideband, "NB prefix carries the wideband flag");
+        // r393 fixture-pinned grammar: the narrowband layer's prefix
+        // carries wideband flag 0; the `1` flag prefixes the high-band
+        // layer that follows the body.
+        assert!(!nb_header.wideband, "NB layer prefix carries flag 0");
         assert_eq!(nb_header.mode_id, nb_mode);
         let nb_parsed = NarrowbandFrameBody::parse(&mut r, &nb_submode).unwrap();
         assert_eq!(nb_parsed, bodies.nb_body);

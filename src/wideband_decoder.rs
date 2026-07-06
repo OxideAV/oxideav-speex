@@ -257,7 +257,6 @@ impl WidebandDecoder {
         };
         let nb_body = NarrowbandFrameBody::parse(reader, &nb_submode)
             .map_err(|_| WidebandDecodeError::Framing)?;
-        let low_band = self.low_band.decode_frame(&nb_body, &nb_submode)?;
 
         // --- High band: 4-bit prefix + Table 10.1 body ---
         let hb_header =
@@ -273,6 +272,22 @@ impl WidebandDecoder {
         };
         let hb_body =
             WidebandHighBandBody::parse(reader, &hb_submode).map_err(WidebandDecodeError::from)?;
+        self.decode_frame_bodies(&nb_body, &nb_submode, &hb_body, &hb_submode)
+    }
+
+    /// Decode one wideband frame from its **already-parsed** layer
+    /// bodies (the entry the top-level [`crate::SpeexDecoder`] uses —
+    /// its packet walker has parsed the layers already). Advances the
+    /// full decoder state exactly as the bit-cursor entries do.
+    pub fn decode_frame_bodies(
+        &mut self,
+        nb_body: &NarrowbandFrameBody,
+        nb_submode: &crate::submode::NarrowbandSubmode,
+        hb_body: &WidebandHighBandBody,
+        hb_submode: &crate::wideband::WidebandHighBandSubmode,
+    ) -> Result<WidebandFrame, WidebandDecodeError> {
+        let low_band = self.low_band.decode_frame(nb_body, nb_submode)?;
+
         // The gain-only sub-mode (Table 10.1 mode 1) folds the embedded
         // narrowband frame's excitation into the high band (r393,
         // fixture-arbitrated law — see `crate::hb_fold`); the fold
@@ -280,8 +295,8 @@ impl WidebandDecoder {
         let lb_excitation = *self.low_band.last_frame_excitation();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
         let high_band = synthesise_high_band_frame_folded_exc(
-            &hb_body,
-            &hb_submode,
+            hb_body,
+            hb_submode,
             &mut self.high_band_filter,
             &mut self.prev_hb_lsp_delta_q10,
             &lb_excitation,
@@ -298,6 +313,15 @@ impl WidebandDecoder {
             high_band,
             wideband_pcm,
         })
+    }
+
+    /// Mutable access to the embedded narrowband decoder — the shared
+    /// low-band state a mixed narrowband/wideband stream advances with
+    /// its standalone narrowband frames (RFC 5574 §3.1: the wideband
+    /// low band *is* an embedded narrowband frame, so one continuous
+    /// narrowband state serves both). Used by [`crate::SpeexDecoder`].
+    pub fn low_band_decoder_mut(&mut self) -> &mut NarrowbandDecoder {
+        &mut self.low_band
     }
 
     /// Decode one wideband packet straight to rounded, saturated `i16`

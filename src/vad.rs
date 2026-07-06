@@ -147,7 +147,7 @@ impl WidebandEncoder {
                 .ok_or(WbEncodeError::Narrowband(EncodeError::UnknownMode(fnb)))?;
             let hb_submode =
                 WidebandHighBandSubmode::for_id(fhb).ok_or(WbEncodeError::UnknownHbMode(fhb))?;
-            let header = NarrowbandFrameHeader::new(true, nb_submode.mode_id)
+            let header = NarrowbandFrameHeader::new(false, nb_submode.mode_id)
                 .map_err(WbEncodeError::Pack)?;
             header.write(&mut writer).map_err(WbEncodeError::Pack)?;
             crate::nb_encode::write_narrowband_body(&mut writer, &bodies.nb_body, &nb_submode)
