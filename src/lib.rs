@@ -451,6 +451,7 @@ mod narrowband_body;
 mod narrowband_decoder;
 mod nb_encode;
 mod ol_pitch;
+mod output_highpass;
 mod packet;
 mod pitch_gain;
 mod qmf;
@@ -532,7 +533,9 @@ pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
     HB_EXC_GAIN_BITS_MODE_1,
 };
-pub use hb_fold::{folded_hb_excitation_subframe, HB_FOLD_RECONSTRUCTION_MULT};
+pub use hb_fold::{
+    folded_hb_excitation_slice, folded_hb_excitation_subframe, HB_FOLD_RECONSTRUCTION_MULT,
+};
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
     HbInnovationMapping, HB_SUBFRAME_SAMPLES,
@@ -594,6 +597,7 @@ pub use narrowband_decoder::{
 };
 pub use nb_encode::{encode_narrowband_frame, write_narrowband_body, write_packet_terminator};
 pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, OpenLoopPitch};
+pub use output_highpass::{OutputHighpass, OUTPUT_HIGHPASS_CUTOFF_HZ};
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
 pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
 pub use qmf::{QmfAnalysis, QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
@@ -616,8 +620,9 @@ pub use uwb_decoder::{
 };
 pub use vad::{EnergyVad, DTX_MODE};
 pub use wb_synthesis::{
-    synthesise_high_band_frame, synthesise_high_band_frame_interp, SubBandLayer, UwbFrameLayout,
-    HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,
+    synthesise_high_band_frame, synthesise_high_band_frame_folded,
+    synthesise_high_band_frame_folded_exc, synthesise_high_band_frame_interp, SubBandLayer,
+    UwbFrameLayout, HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,
 };
 pub use weighting::{weighted_coeffs, PerceptualWeighting, WEIGHT_GAMMA1, WEIGHT_GAMMA2};
 pub use wideband::{

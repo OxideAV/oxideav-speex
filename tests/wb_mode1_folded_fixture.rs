@@ -188,6 +188,33 @@ fn folded_high_band_decode_matches_reference() {
     );
 }
 
+/// The reference decode was produced with the codec's **default output
+/// high-pass** active (`--no-enh` disables only the perceptual
+/// enhancer; the manual's codec-control table documents the high-pass
+/// as default-on). Applying the crate's fitted [`OutputHighpass`]
+/// (r393, opt-in) to the raw decode must therefore move it *closer* to
+/// the reference — this pins both the filter fit and the pipeline
+/// reading (measured: 16.7 dB raw → 18.3 dB high-passed).
+#[test]
+fn output_highpass_improves_reference_match() {
+    use oxideav_speex::OutputHighpass;
+
+    let reference = reference_pcm();
+    let mut ours = decode_fixture();
+    let (raw_snr, _) = score(&ours, &reference, REF_LEAD_FULL);
+
+    let mut hp = OutputHighpass::for_sample_rate(16_000);
+    hp.process_slice(&mut ours);
+    let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
+
+    assert!(
+        hp_snr > raw_snr + 0.5,
+        "high-pass should improve the match: raw {raw_snr:.2} dB vs {hp_snr:.2} dB"
+    );
+    assert!(hp_snr >= 16.0, "high-passed SNR {hp_snr:.2} dB < 16 dB");
+    assert!(hp_corr >= 0.985, "high-passed correlation {hp_corr:.4}");
+}
+
 /// The arbitration is meaningful only if the fixture really is the
 /// all-mode-1 stream the docs describe: re-verify the framing facts the
 /// fixture notes pin (101 frames, NB mode 8, HB sub-mode 1).

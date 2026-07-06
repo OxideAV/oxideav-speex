@@ -207,6 +207,12 @@ return `Error::NotImplemented`. What is implemented and tested:
   absolute level (fixture full-signal energy ratio 0.97, previously
   32× hot). Mirrored into the encoder gain selection so transmitted
   indices live in the reference quantiser range.
+* **Opt-in output high-pass** (round r393, `OutputHighpass`) — the
+  manual documents the codec's default-on output high-pass
+  (`SPEEX_SET_HIGHPASS`) without its transfer; the fixture's
+  behavioural trace fits a 2nd-order Butterworth at 30 Hz (flat
+  optimum — documented as fitted, not reference-pinned). Raises the
+  fixture match from 16.7 dB to 18.3 dB when applied.
 * **Fixture conformance gate** (`tests/wb_mode1_folded_fixture.rs`) —
   the 101-frame fixture decode is scored absolutely (no fitted gain)
   at the fixed 80-sample reference lead: measured r393 full-signal

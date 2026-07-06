@@ -46,6 +46,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   reference's own 16 kHz fold-source geometry stays a recorded gap
   (the staged fixture is wideband-only) — the source choice is
   documented as the crate's convention.
+- Round r393: **opt-in decoder output high-pass** (`OutputHighpass`) —
+  the manual's codec-control table documents a default-on high-pass
+  whose transfer is not staged; the fixture's behavioural trace (phase
+  lead ∝ 1/f, attenuation only below ≈ 50 Hz) fits a 2nd-order
+  Butterworth at 30 Hz (flat optimum 28–45 Hz — documented as fitted,
+  not reference-pinned). Applying it moves the fixture decode from
+  16.7 dB to 18.3 dB; pinned by a dedicated gate. Opt-in: no decoder
+  output changes unless the caller applies it.
 - Round r393: **conformance gate** `tests/wb_mode1_folded_fixture.rs` —
   absolute (no scale freedom) scoring of the full fixture decode against
   the reference PCM at the fixed 80-sample reference lead: full-signal
