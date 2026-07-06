@@ -31,6 +31,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   in the encoder gain selection, so decoded PCM now lands at the
   reference's absolute level (fixture energy ratio 0.97) instead of
   32× hot.
+- Round r393: **ultra-wideband second-layer fold wired** — the 8–16 kHz
+  half-band, previously reconstructed as zero under the fold gap, now
+  decodes through the fixture-pinned law with the crate's
+  recursion-consistent fold source (the embedded wideband layer's two
+  excitation tracks — `WidebandDecoder::last_hb_excitation` +
+  the narrowband excitation — recombined to 16 kHz via a dedicated QMF
+  synthesis bank), per-sub-frame interpolated order-8 LPC and a
+  persistent second-layer synthesis filter. `UltraWidebandEncoder` now
+  picks its 5-bit gains against the decoder's exact fold source
+  (`g = rms(residual)/(K·rms(source))`) through a local
+  analysis-by-synthesis wideband decode, so UWB round-trips reconstruct
+  the 8–16 kHz energy envelope (pinned by a new tracking test). The
+  reference's own 16 kHz fold-source geometry stays a recorded gap
+  (the staged fixture is wideband-only) — the source choice is
+  documented as the crate's convention.
 - Round r393: **conformance gate** `tests/wb_mode1_folded_fixture.rs` —
   absolute (no scale freedom) scoring of the full fixture decode against
   the reference PCM at the fixed 80-sample reference lead: full-signal

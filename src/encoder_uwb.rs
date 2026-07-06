@@ -54,17 +54,20 @@ use crate::encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
 use crate::frame::{FrameError, NarrowbandFrameHeader};
 use crate::gain_reconstruction::quantise_hb_exc_gain;
 use crate::hb_encode::write_high_band_frame;
+use crate::hb_fold::HB_FOLD_RECONSTRUCTION_MULT;
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
 use crate::lpc_analysis::analyse_hb;
 use crate::lpc_to_lsp::hb_lpc_to_lsp;
 use crate::lsp_base::hb_lsp_base_q10;
 use crate::lsp_to_lpc::{lpc_from_hb_lsp_delta_q10, radians_to_lsp_q10};
 use crate::narrowband_decoder::saturate_i16;
-use crate::qmf::{QmfAnalysis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QmfAnalysis, QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::quality::uwb_modes_for_quality;
 use crate::submode::NarrowbandSubmode;
 use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES};
+use crate::wb_synthesis::HB_FRAME_SAMPLES;
 use crate::wideband::{HighBandSubFrameIndices, WidebandHighBandBody, WidebandHighBandSubmode};
+use crate::wideband_decoder::WidebandDecoder;
 
 /// Samples per second-layer sub-frame: 320 half-band samples over the
 /// four gain slots the mode-1 budget pins.
@@ -145,6 +148,15 @@ pub struct UltraWidebandEncoder {
     wideband: WidebandEncoder,
     /// Second-layer analysis (prediction-error) filter input history.
     uwb_analysis_hist: [f64; HB_LPC_ORDER],
+    /// Local (analysis-by-synthesis) decode of the just-encoded
+    /// wideband layers — tracks exactly the excitation state the real
+    /// [`crate::UltraWidebandDecoder`] will reconstruct, so the
+    /// second-layer folded gains are chosen against the decoder's true
+    /// fold source (r393; see [`crate::uwb_decoder`] module docs).
+    local_decoder: WidebandDecoder,
+    /// Fold-source recombination bank mirroring the decoder's
+    /// (excitation tracks → 16 kHz), advanced every frame.
+    exc_qmf: QmfSynthesis,
 }
 
 impl Default for UltraWidebandEncoder {
@@ -160,6 +172,8 @@ impl UltraWidebandEncoder {
             outer_qmf: QmfAnalysis::new(),
             wideband: WidebandEncoder::new(),
             uwb_analysis_hist: [0.0; HB_LPC_ORDER],
+            local_decoder: WidebandDecoder::new(),
+            exc_qmf: QmfSynthesis::new(),
         }
     }
 
@@ -256,8 +270,14 @@ impl UltraWidebandEncoder {
             .wideband
             .encode_frame_bodies(&low_i16, nb_mode, hb_mode)?;
 
+        // --- Local decode of the wideband layers (analysis-by-
+        // synthesis): reproduces the decoder's fold source exactly, and
+        // advances every frame so the state stays in lock-step with the
+        // real decoder even across second-layer mode switches. ---
+        let exc16 = self.local_fold_source(&wideband)?;
+
         // --- High half: the second high-band layer. ---
-        let uwb_body = self.encode_uwb_layer(&high, uwb_mode);
+        let uwb_body = self.encode_uwb_layer(&high, uwb_mode, &exc16);
 
         Ok(UwbFrameBodies {
             wideband,
@@ -266,11 +286,65 @@ impl UltraWidebandEncoder {
         })
     }
 
+    /// Decode the just-encoded wideband layers locally and recombine
+    /// their excitation tracks into the 16 kHz second-layer fold source
+    /// (the exact signal the real decoder will fold — see
+    /// [`crate::uwb_decoder`]).
+    fn local_fold_source(
+        &mut self,
+        wideband: &WidebandFrameBodies,
+    ) -> Result<[f64; QMF_WIDEBAND_FRAME], UwbEncodeError> {
+        let nb_submode = NarrowbandSubmode::for_id(wideband.nb_mode).ok_or(
+            UwbEncodeError::Wideband(WbEncodeError::Narrowband(
+                crate::encoder_nb::EncodeError::UnknownMode(wideband.nb_mode),
+            )),
+        )?;
+        let hb_submode = WidebandHighBandSubmode::for_id(wideband.hb_mode).ok_or(
+            UwbEncodeError::Wideband(WbEncodeError::UnknownHbMode(wideband.hb_mode)),
+        )?;
+        let bytes = crate::hb_encode::encode_wideband_frame(
+            &wideband.nb_body,
+            &nb_submode,
+            &wideband.hb_body,
+            &hb_submode,
+        )
+        .map_err(UwbEncodeError::Pack)?
+        .into_bytes();
+        // Decoding what we just encoded cannot fail for documented
+        // modes; surface any inconsistency as a packing error.
+        self.local_decoder.decode_packet(&bytes).map_err(|_| {
+            UwbEncodeError::Pack(FrameError::Underflow(
+                crate::bitreader::BitError::Underflow {
+                    requested: 0,
+                    remaining: 0,
+                },
+            ))
+        })?;
+
+        let mut exc_lb64 = [0.0f64; HB_FRAME_SAMPLES];
+        for (o, &e) in exc_lb64.iter_mut().zip(
+            self.local_decoder
+                .low_band_decoder()
+                .last_frame_excitation(),
+        ) {
+            *o = f64::from(e);
+        }
+        let mut exc_hb64 = [0.0f64; HB_FRAME_SAMPLES];
+        for (o, &e) in exc_hb64
+            .iter_mut()
+            .zip(self.local_decoder.last_hb_excitation())
+        {
+            *o = f64::from(e);
+        }
+        Ok(self.exc_qmf.reconstruct_frame(&exc_lb64, &exc_hb64))
+    }
+
     /// Encode the second high-band layer from the 8–16 kHz half-band.
     fn encode_uwb_layer(
         &mut self,
         high: &[f64; UWB_HALF_BAND_FRAME],
         uwb_mode: u8,
+        exc16: &[f64; QMF_WIDEBAND_FRAME],
     ) -> WidebandHighBandBody {
         if uwb_mode == 0 {
             // Silence: zero-bit body.
@@ -286,11 +360,16 @@ impl UltraWidebandEncoder {
         let (lsp_index, active_delta) = encode_uwb_envelope(high);
         let lpc = lpc_from_hb_lsp_delta_q10(&active_delta);
 
-        // Gains: per 80-sample sub-frame, the order-8 prediction
-        // residual RMS through the 32-level 5-bit folded-gain grid.
+        // Gains: per 80-sample sub-frame, the fold-consistent target
+        // `g = rms(residual) / (K · rms(fold source))` through the
+        // 32-level 5-bit folded-gain grid — the decode-side fold
+        // (`e = K·g·(−1)ⁿ·src`) then reconstructs the residual's
+        // energy envelope (r393; previously the raw residual RMS was
+        // transmitted, which the pinned law would mis-scale).
         let mut subframes = [HighBandSubFrameIndices::default(); 4];
         for (sf, slot) in subframes.iter_mut().enumerate() {
-            let block = &high[sf * UWB_HB_SUBFRAME_SAMPLES..(sf + 1) * UWB_HB_SUBFRAME_SAMPLES];
+            let range = sf * UWB_HB_SUBFRAME_SAMPLES..(sf + 1) * UWB_HB_SUBFRAME_SAMPLES;
+            let block = &high[range.clone()];
             let mut energy = 0.0f64;
             for &x in block {
                 let mut r = x;
@@ -302,7 +381,15 @@ impl UltraWidebandEncoder {
                 energy += r * r;
             }
             let rms = (energy / UWB_HB_SUBFRAME_SAMPLES as f64).sqrt();
-            let idx = quantise_hb_exc_gain(rms as f32, 5);
+            let src = &exc16[range];
+            let src_rms =
+                (src.iter().map(|&v| v * v).sum::<f64>() / UWB_HB_SUBFRAME_SAMPLES as f64).sqrt();
+            let target = if src_rms > 1e-9 {
+                rms / (HB_FOLD_RECONSTRUCTION_MULT * src_rms)
+            } else {
+                0.0
+            };
+            let idx = quantise_hb_exc_gain(target as f32, 5);
             slot.excitation_gain_index = idx.and_then(|i| i.raw_index()).unwrap_or(0);
             slot.excitation_vq_index = 0;
         }
@@ -469,6 +556,60 @@ mod tests {
             let decoded = dec.decode_packet(&bytes).expect("decodes");
             assert_eq!(decoded.len(), 1, "quality {q}");
         }
+    }
+
+    #[test]
+    fn folded_second_layer_tracks_high_band_energy() {
+        // A steady 11 kHz tone (8–16 kHz band only after the outer QMF
+        // split) round-trips through the fold-consistent gain law: after
+        // warm-up the decoded 8–16 kHz half-band's RMS should sit within
+        // a modest factor of the encoder-side high half's RMS — the
+        // decode-side fold reconstructs the transmitted energy envelope
+        // rather than silence (r393).
+        let amp = 8000.0f64;
+        let mut frame = [0i16; UWB_FRAME_SAMPLES];
+        for (n, s) in frame.iter_mut().enumerate() {
+            let t = n as f64 / 32_000.0;
+            let v = amp * (2.0 * std::f64::consts::PI * t * 11_000.0).sin()
+                + 0.3 * amp * (2.0 * std::f64::consts::PI * t * 300.0).sin();
+            *s = v.round().clamp(-32768.0, 32767.0) as i16;
+        }
+
+        let mut enc = UltraWidebandEncoder::new();
+        let mut dec = UltraWidebandDecoder::new();
+
+        // Encoder-side reference: what the outer split hands the second
+        // layer (recomputed with an independent analysis bank).
+        let mut probe_qmf = QmfAnalysis::new();
+        let mut input = [0.0f64; UWB_FRAME_SAMPLES];
+        for (slot, &v) in input.iter_mut().zip(frame.iter()) {
+            *slot = f64::from(v);
+        }
+        let mut low = [0.0f64; UWB_HALF_BAND_FRAME];
+        let mut high = [0.0f64; UWB_HALF_BAND_FRAME];
+        let mut hb_rms = 0.0f64;
+        let mut decoded_rms = 0.0f64;
+        for i in 0..6 {
+            probe_qmf.split_slices(&input, &mut low, &mut high);
+            let bytes = enc.encode_frame(&frame, 3, 1, 1).expect("encodes");
+            let frames = dec.decode_packet(&bytes).expect("decodes");
+            let f = match &frames[0] {
+                UwbDecodedFrame::Audio(f) => f,
+                other => panic!("expected Audio, got {other:?}"),
+            };
+            if i >= 2 {
+                // Skip warm-up (analysis look-back + filter histories).
+                hb_rms += high.iter().map(|&v| v * v).sum::<f64>();
+                decoded_rms += f.uwb_high_band.iter().map(|&v| v * v).sum::<f64>();
+            }
+        }
+        let hb_rms = (hb_rms / (4.0 * UWB_HALF_BAND_FRAME as f64)).sqrt();
+        let decoded_rms = (decoded_rms / (4.0 * UWB_HALF_BAND_FRAME as f64)).sqrt();
+        assert!(hb_rms > 100.0, "probe split should see the 11 kHz tone");
+        assert!(
+            decoded_rms > hb_rms / 4.0 && decoded_rms < hb_rms * 4.0,
+            "decoded 8-16 kHz RMS {decoded_rms:.1} should track the encoder-side {hb_rms:.1}"
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ use crate::narrowband_decoder::{
 };
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame_folded, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{synthesise_high_band_frame_folded_exc, HB_FRAME_SAMPLES};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -178,6 +178,11 @@ pub struct WidebandDecoder {
     /// QMF synthesis filterbank state (FIR band histories) for the final
     /// half-band → 16 kHz recombination, carried across frames.
     qmf: QmfSynthesis,
+    /// The high-band excitation of the most recently decoded frame (the
+    /// folded excitation for the gain-only sub-mode, the gain-scaled
+    /// innovation for the VQ sub-modes) — retained for the
+    /// ultra-wideband second-layer fold (see [`crate::uwb_decoder`]).
+    last_hb_excitation: [f32; HB_FRAME_SAMPLES],
 }
 
 impl Default for WidebandDecoder {
@@ -195,7 +200,18 @@ impl WidebandDecoder {
             high_band_filter: HbSynthesisFilter::new(),
             prev_hb_lsp_delta_q10: None,
             qmf: QmfSynthesis::new(),
+            last_hb_excitation: [0.0; HB_FRAME_SAMPLES],
         }
+    }
+
+    /// The high-band excitation of the most recently decoded frame (160
+    /// samples in the 8 kHz half-band geometry): the folded excitation
+    /// for the gain-only sub-mode, the gain-scaled innovation for the VQ
+    /// sub-modes, zero after silence / at stream start. The
+    /// ultra-wideband second-layer fold reads this alongside the
+    /// low band's [`NarrowbandDecoder::last_frame_excitation`].
+    pub fn last_hb_excitation(&self) -> &[f32; HB_FRAME_SAMPLES] {
+        &self.last_hb_excitation
     }
 
     /// Decode one wideband packet into its two reconstructed half-band
@@ -262,14 +278,17 @@ impl WidebandDecoder {
         // fixture-arbitrated law — see `crate::hb_fold`); the fold
         // source is the low-band decoder's just-composed excitation.
         let lb_excitation = *self.low_band.last_frame_excitation();
-        let high_band = synthesise_high_band_frame_folded(
+        let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
+        let high_band = synthesise_high_band_frame_folded_exc(
             &hb_body,
             &hb_submode,
             &mut self.high_band_filter,
             &mut self.prev_hb_lsp_delta_q10,
             &lb_excitation,
+            &mut hb_excitation,
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
+        self.last_hb_excitation = hb_excitation;
 
         // --- QMF synthesis: recombine the two half-bands → 16 kHz PCM ---
         let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);

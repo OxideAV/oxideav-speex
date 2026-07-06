@@ -223,6 +223,35 @@ pub fn synthesise_high_band_frame_folded(
     prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
     lb_excitation: &[f32; HB_FRAME_SAMPLES],
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    let mut exc_out = [0.0f32; HB_FRAME_SAMPLES];
+    synthesise_high_band_frame_folded_exc(
+        body,
+        submode,
+        filter,
+        prev_hb_lsp_delta_q10,
+        lb_excitation,
+        &mut exc_out,
+    )
+}
+
+/// [`synthesise_high_band_frame_folded`] that additionally **surfaces
+/// the per-sample high-band excitation** actually driving the synthesis
+/// filter (`exc_out`, 160 samples: the folded excitation for the
+/// gain-only sub-mode, the gain-scaled innovation for the VQ
+/// sub-modes, zero for silence).
+///
+/// The ultra-wideband decoder consumes this track: the §2.2 recursion's
+/// second layer folds the **embedded wideband layer's excitation**, so
+/// the wideband decode must retain what its high band was excited with
+/// (see [`crate::uwb_decoder`]).
+pub fn synthesise_high_band_frame_folded_exc(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    filter: &mut HbSynthesisFilter,
+    prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
+    lb_excitation: &[f32; HB_FRAME_SAMPLES],
+    exc_out: &mut [f32; HB_FRAME_SAMPLES],
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
     // (Q10, pre-base). Silence mode 0 transmits no LSP field → None.
     let curr_lsp = body.reconstructed_lsp_q10(submode);
@@ -280,6 +309,12 @@ pub fn synthesise_high_band_frame_folded(
         };
         let x = filter.process_subframe(&lpc, &e64);
         out[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES].copy_from_slice(&x);
+        for (slot, &e) in exc_out[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES]
+            .iter_mut()
+            .zip(e64.iter())
+        {
+            *slot = e as f32;
+        }
     }
 
     // Update the prev-LSP state only when this frame transmitted an LSP

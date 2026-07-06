@@ -109,6 +109,27 @@ pub fn folded_hb_excitation_subframe(
     out
 }
 
+/// Slice variant of the folded law for the ultra-wideband second layer
+/// (80-sample sub-frames at the 16 kHz half-band): writes
+/// `out[n] = K·g·(−1)ⁿ·exc_src[n]` for slices of any (equal, even)
+/// length.
+///
+/// The **law** is the one the wideband fixture pins
+/// ([`folded_hb_excitation_subframe`]); the ultra-wideband fold
+/// *source* fed to this variant is the crate's recursion-consistent
+/// generalisation (see [`crate::uwb_decoder`] — the reference's exact
+/// source geometry at the 16 kHz half-band is a recorded gap, the
+/// staged fixture being wideband-only).
+#[inline]
+pub fn folded_hb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) {
+    debug_assert_eq!(exc_src.len(), out.len());
+    let k = HB_FOLD_RECONSTRUCTION_MULT * f64::from(gain);
+    for (n, (slot, &e)) in out.iter_mut().zip(exc_src.iter()).enumerate() {
+        let folded = k * e;
+        *slot = if n % 2 == 0 { folded } else { -folded };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +190,21 @@ mod tests {
         }
         // Sums to ~0: no DC survives the fold.
         assert!(out.iter().sum::<f64>().abs() < 1e-9);
+    }
+
+    /// The slice variant matches the fixed sub-frame entry elementwise
+    /// on the 40-sample geometry.
+    #[test]
+    fn slice_variant_matches_subframe_entry() {
+        let e = ramp();
+        let g = 1.75f32;
+        let fixed = folded_hb_excitation_subframe(&e, g);
+        let src: Vec<f64> = e.iter().map(|&v| f64::from(v)).collect();
+        let mut out = vec![0.0f64; HB_SUBFRAME_SAMPLES];
+        folded_hb_excitation_slice(&src, g, &mut out);
+        for n in 0..HB_SUBFRAME_SAMPLES {
+            assert!((out[n] - fixed[n]).abs() < 1e-9, "n={n}");
+        }
     }
 
     /// The adopted constant sits inside the fixture-measured window.

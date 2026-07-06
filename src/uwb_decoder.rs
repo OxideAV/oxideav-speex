@@ -42,28 +42,38 @@
 //! The staged material pins the second layer's **framing** (prefix +
 //! mode-1 field widths), its **envelope** (the same 12-bit two-stage
 //! LSP MSVQ, §10.1), and its **gain** track (the 32-level 5-bit
-//! folded-excitation gain quantiser, staged as
-//! `hb-fold-quant-bound`). It does **not** pin the mode-1 excitation
-//! *source*: like the wideband gain-only mode, the reconstruction law
-//! folds a low-band-derived excitation whose derivation is the recorded
-//! docs gap (#170, `docs/audio/speex/hb-folded-gain.md` scope). The
-//! decoded 8–16 kHz half-band is therefore **zero** (the same
-//! convention the wideband decoder applies to its gain-only mode), and
-//! the parsed envelope + reconstructed gains are surfaced on the typed
-//! frame so a caller sees everything the bit-stream carried. The
-//! excitation-VQ modes 2..=4 additionally lack a pinned sub-frame
-//! geometry at the 16 kHz half-band rate (Table 10.1's VQ budgets are
-//! stated for the 8 kHz half-band) and surface
-//! [`UwbDecodeError::UwbLayerUndocumented`].
+//! folded-excitation gain quantiser, staged as `hb-fold-quant-bound`).
+//! As of round r393 the mode-1 folded reconstruction **law** is pinned
+//! by the wideband fixture (`crate::hb_fold`:
+//! `e_hb[n] = K·g·(−1)ⁿ·e_src[n]`), and this decoder reconstructs a
+//! real 8–16 kHz half-band with it. The fold **source** at the 16 kHz
+//! half-band geometry is *not* covered by that (wideband-only)
+//! fixture; this decoder applies the **recursion-consistent
+//! generalisation** — each layer folds its embedded lower layer's
+//! excitation, so the second layer's source is the QMF-synthesis
+//! recombination (16 kHz) of the wideband layer's two 8 kHz excitation
+//! tracks (narrowband composed excitation + first-high-band
+//! excitation). That source choice is the crate's documented
+//! convention, recorded as the remaining sub-gap of #170 pending an
+//! ultra-wideband fixture. The excitation-VQ modes 2..=4 additionally
+//! lack a pinned sub-frame geometry at the 16 kHz half-band rate
+//! (Table 10.1's VQ budgets are stated for the 8 kHz half-band) and
+//! surface [`UwbDecodeError::UwbLayerUndocumented`].
 
 use crate::bitreader::BitReader;
+use crate::codebooks::HB_LPC_ORDER;
 use crate::decoder::ControlMessage;
 use crate::frame::{NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
+use crate::hb_fold::folded_hb_excitation_slice;
+use crate::hb_lsp_interp::HbSubFrameLsp;
+use crate::hb_synthesis::HbSynthesisFilter;
+use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::signalling::{CustomInbandMessage, InbandMessage};
 use crate::submode::Submode;
+use crate::wb_synthesis::HB_FRAME_SAMPLES;
 use crate::wideband::{
     WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
     HIGH_BAND_SUBFRAMES_PER_FRAME,
@@ -101,8 +111,9 @@ pub struct UltraWidebandFrame {
     /// the silence mode) — the energy envelope the bit-stream carries
     /// for the 8–16 kHz band.
     pub uwb_gains: [f32; UWB_HB_SUBFRAMES],
-    /// The reconstructed 8–16 kHz half-band signal at 16 kHz. Zero
-    /// under the recorded mode-1 folded-excitation gap (module docs).
+    /// The reconstructed 8–16 kHz half-band signal at 16 kHz — the
+    /// folded second-layer excitation through the order-8 half-band
+    /// synthesis filter (module docs; fold law `crate::hb_fold`).
     pub uwb_high_band: Box<[f64; UWB_HALF_BAND_FRAME]>,
     /// The outer-QMF-recombined 640-sample 32 kHz PCM.
     pub uwb_pcm: Box<[f64; UWB_FRAME_SAMPLES]>,
@@ -194,6 +205,20 @@ impl From<WidebandDecodeError> for UwbDecodeError {
 pub struct UltraWidebandDecoder {
     wideband: WidebandDecoder,
     outer_qmf: QmfSynthesis,
+    /// QMF synthesis bank recombining the embedded wideband layer's two
+    /// excitation tracks (narrowband + first high band, both 8 kHz)
+    /// into the 16 kHz **fold source** for the second layer (see
+    /// `decode_audio_frame`). Persistent FIR history, advanced every
+    /// audio frame regardless of the second layer's sub-mode so the
+    /// fold source stays continuous across mode switches.
+    exc_qmf: QmfSynthesis,
+    /// Second-layer order-8 synthesis filter (8–16 kHz half-band IIR
+    /// memory, carried across frames).
+    layer2_filter: HbSynthesisFilter,
+    /// Previous frame's second-layer LSP codebook-delta vector (Q10,
+    /// pre-base) for the §9.1 interpolation, mirroring the wideband
+    /// high-band convention.
+    prev_layer2_lsp_delta_q10: Option<[i32; HB_LPC_ORDER]>,
 }
 
 impl Default for UltraWidebandDecoder {
@@ -208,6 +233,9 @@ impl UltraWidebandDecoder {
         Self {
             wideband: WidebandDecoder::new(),
             outer_qmf: QmfSynthesis::new(),
+            exc_qmf: QmfSynthesis::new(),
+            layer2_filter: HbSynthesisFilter::new(),
+            prev_layer2_lsp_delta_q10: None,
         }
     }
 
@@ -298,8 +326,7 @@ impl UltraWidebandDecoder {
         }
 
         // Reconstruct the per-sub-frame gains the layer carries (the
-        // staged folded-gain law); the half-band signal itself is zero
-        // under the recorded fold gap.
+        // staged folded-gain law).
         let mut uwb_gains = [0.0f32; UWB_HB_SUBFRAMES];
         if submode.excitation_gain_bits > 0 {
             for (g, sf) in uwb_gains.iter_mut().zip(body.subframes.iter()) {
@@ -310,7 +337,58 @@ impl UltraWidebandDecoder {
                 }
             }
         }
-        let uwb_high_band = Box::new([0.0f64; UWB_HALF_BAND_FRAME]);
+
+        // --- Second-layer fold source (always advanced, every audio
+        // frame, so the recombination history stays continuous across
+        // sub-mode switches): the embedded wideband layer's two
+        // excitation tracks recombined to 16 kHz through the QMF
+        // synthesis bank. The fold *law* is the wideband-fixture-pinned
+        // one (`crate::hb_fold`); this recursion-consistent *source*
+        // generalisation is the crate's — the staged fixture is
+        // wideband-only, so the reference's exact 16 kHz fold-source
+        // geometry stays a recorded gap (module docs). ---
+        let mut exc_lb64 = [0.0f64; HB_FRAME_SAMPLES];
+        for (o, &e) in exc_lb64
+            .iter_mut()
+            .zip(self.wideband.low_band_decoder().last_frame_excitation())
+        {
+            *o = f64::from(e);
+        }
+        let mut exc_hb64 = [0.0f64; HB_FRAME_SAMPLES];
+        for (o, &e) in exc_hb64.iter_mut().zip(self.wideband.last_hb_excitation()) {
+            *o = f64::from(e);
+        }
+        let exc16 = self.exc_qmf.reconstruct_frame(&exc_lb64, &exc_hb64);
+
+        // --- Second-layer synthesis: per-sub-frame interpolated LPC +
+        // folded excitation through the order-8 half-band filter. ---
+        let curr_lsp = body.reconstructed_lsp_q10(&submode);
+        let lpc_sets = match curr_lsp {
+            Some(curr) => {
+                let sub_lsp = match self.prev_layer2_lsp_delta_q10 {
+                    Some(prev) => HbSubFrameLsp::new(&prev, &curr),
+                    None => HbSubFrameLsp::first_frame(&curr),
+                };
+                hb_subframe_lpc_set_with_base(&sub_lsp)
+            }
+            // Silence (mode 0, no LSP field): absent-envelope
+            // convention, A(z) = 1.
+            None => [[0.0; HB_LPC_ORDER]; UWB_HB_SUBFRAMES],
+        };
+        let subframe_len = UWB_HALF_BAND_FRAME / UWB_HB_SUBFRAMES;
+        let mut uwb_high_band = Box::new([0.0f64; UWB_HALF_BAND_FRAME]);
+        for sf in 0..UWB_HB_SUBFRAMES {
+            let range = sf * subframe_len..(sf + 1) * subframe_len;
+            let mut e = vec![0.0f64; subframe_len];
+            if submode.excitation_gain_bits > 0 {
+                folded_hb_excitation_slice(&exc16[range.clone()], uwb_gains[sf], &mut e);
+            }
+            self.layer2_filter
+                .process(&lpc_sets[sf], &e, &mut uwb_high_band[range]);
+        }
+        if let Some(curr) = curr_lsp {
+            self.prev_layer2_lsp_delta_q10 = Some(curr);
+        }
 
         // Outer QMF: 16 kHz wideband PCM (low half) + 8–16 kHz band
         // (high half) → 640-sample 32 kHz PCM.
@@ -405,8 +483,14 @@ mod tests {
                     f.uwb_pcm.iter().any(|&s| s != 0.0),
                     "wideband content reaches the 32 kHz output"
                 );
-                // The fold gap: the 8–16 kHz half-band is zero.
-                assert!(f.uwb_high_band.iter().all(|&s| s == 0.0));
+                // r393: the second layer folds the embedded layers'
+                // excitation — with non-zero gains and a non-silent
+                // embedded frame the 8–16 kHz half-band is non-silent.
+                assert!(f.uwb_high_band.iter().all(|s| s.is_finite()));
+                assert!(
+                    f.uwb_high_band.iter().any(|&s| s != 0.0),
+                    "folded second layer should be non-silent"
+                );
                 // The carried gains reconstruct through the staged law.
                 assert!(f.uwb_gains.iter().all(|&g| g > 0.0));
             }

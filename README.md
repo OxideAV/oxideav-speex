@@ -415,18 +415,22 @@ mode-1 fixture.
   offset) — these are bit-exactness details, not sample-correctness ones;
   the sample-correct textbook reconstruction is what ships. Recorded docs
   gap, isolated to the delay convention.
-* **Ultra-wideband second-layer excitation** — the UWB framing
-  recursion, the conformant second-layer *shape* (Table 10.1 mode 1 at
-  every quality, pinned by RFC 5574 Table 2's constant +36 bits/frame),
-  its LSP envelope and its gain track all decode (round r389). The
-  mode-1 folded reconstruction **law** is now pinned (r393, wideband
-  fixture), but the second layer's fold **source geometry** stays
-  gapped: the staged fixture is wideband-only, and the 8–16 kHz layer's
-  80-sample sub-frames at the 16 kHz half-band have no 40-sample
-  low-band excitation of matching geometry to fold (the provenance-02
-  "80-sample-subframe kludge" scalars confirm the reference handles
-  this rate specially). Also still gapped: the sub-frame geometry of
-  the excitation-VQ modes 2..=4 at the 16 kHz half-band rate.
+* **Ultra-wideband second-layer fold source — crate convention, not
+  reference-pinned.** The second (8–16 kHz) layer now reconstructs a
+  real half-band with the fixture-pinned fold law (r393): the fold
+  *source* is the crate's **recursion-consistent generalisation** —
+  the embedded wideband layer's two 8 kHz excitation tracks
+  (narrowband composed excitation + first-high-band excitation)
+  recombined to 16 kHz through the QMF synthesis bank — and the
+  encoder chooses its 5-bit gains against that exact source via a
+  local (analysis-by-synthesis) wideband decode, so UWB round-trips
+  reconstruct the 8–16 kHz energy envelope. The staged fixture is
+  wideband-only, so the reference's actual 16 kHz fold-source geometry
+  (80-sample sub-frames; the provenance-02 "80-sample-subframe kludge"
+  scalars confirm the reference treats this rate specially) remains
+  the recorded residue of #170 pending an ultra-wideband fixture. Also
+  still gapped: the sub-frame geometry of the excitation-VQ modes
+  2..=4 at the 16 kHz half-band rate.
 * Per-mode innovation handling for narrowband modes 1 and 7 and
   high-band mode 4, whose decomposition the staged inventory does not
   yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither
