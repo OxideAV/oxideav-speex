@@ -11,9 +11,14 @@ material staged at
 
 ## Status
 
-**Clean-room rebuild in progress — partial decoder.** The full decode
-path is not yet bit-exact, and the framework codec entry points still
-return `Error::NotImplemented`. What is implemented and tested:
+**Clean-room rebuild in progress — externally validated decoder.** The
+full decode path is not yet bit-exact, and the framework codec entry
+points still return `Error::NotImplemented`; as of round r393 the
+wideband decode is **externally validated against the reference
+decoder** on the staged `wb-mode1-folded` fixture (16.7 dB absolute
+SNR / 0.989 correlation full-signal, 38.9 dB / 0.99994 on the folded
+high band, absolute level calibrated to 0.97× — CI-gated). What is
+implemented and tested:
 
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
@@ -365,16 +370,23 @@ mode-1 fixture.
   the same angle re-expressed at `2^10` LSB/rad, confirmed rather than
   assumed.
 
-  What remains for *reference-equivalence* (the bit-exactness half) is the
-  exact **cosine-series fixed-point evaluation order** the reference
-  decoder uses for `cos(ω)` inside the LSP→LPC conversion — Speex
-  evaluates `cos` through a fixed-point `lsp_cos` lookup table +
-  interpolation whose table is not staged — recorded docs gap, isolated to
-  the cosine evaluation and independent of the now-pinned angular unit. The
-  framework
-  `Decoder` endpoints return `Error::NotImplemented` until that closes;
-  the free-function `SpeexDecoder` / `NarrowbandDecoder` /
-  `WidebandDecoder` decode paths are the public surface in the meantime.
+  What remains for *reference-equivalence* (the bit-exactness half) is
+  the exact **cosine-series fixed-point evaluation order** the
+  fixed-point reference build uses for `cos(ω)` inside the LSP→LPC
+  conversion (`lsp_cos` lookup table + interpolation, not staged) —
+  recorded docs gap. **r393 external-validation finding:** the staged
+  fixture's reference decoder is the default *float* build, whose
+  LSP→LPC path evaluates `cos` in floating point — this crate's float
+  path is therefore directly comparable, and the fixture measures the
+  whole decode at 16.7 dB absolute SNR (0.989 correlation; high band
+  38.9 dB) with the remaining low-band deltas attributed to the
+  unpinned output high-pass transfer and a frame-rate AM sideband
+  difference around strong tones, **not** to `lsp_cos` (which gates
+  only fixed-point-build interop). The framework `Decoder` endpoints
+  return `Error::NotImplemented` until reference-equivalence closes;
+  the free-function `SpeexDecoder` / `SpeexStreamDecoder` /
+  `NarrowbandDecoder` / `WidebandDecoder` decode paths are the public
+  surface in the meantime.
 * **Narrowband encoder — end-to-end (functional).** Round r382 drove the
   encoder from the r372 envelope chain to a full narrowband encode
   (`NarrowbandEncoder`): LPC analysis → multi-stage LSP-VQ → per-sub-frame
