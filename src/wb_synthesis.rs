@@ -192,6 +192,37 @@ pub fn synthesise_high_band_frame_interp(
     filter: &mut HbSynthesisFilter,
     prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    // No fold source: the gain-only mode's excitation reconstructs to
+    // zero through this legacy entry (a zero excitation folds to zero).
+    synthesise_high_band_frame_folded(
+        body,
+        submode,
+        filter,
+        prev_hb_lsp_delta_q10,
+        &[0.0; HB_FRAME_SAMPLES],
+    )
+}
+
+/// Synthesise one wideband **high-band** frame with the **folded
+/// excitation law wired** (round r393) — the full high-band branch
+/// including the gain-only sub-mode 1.
+///
+/// Identical to [`synthesise_high_band_frame_interp`] plus the fold
+/// source: `lb_excitation` is the embedded narrowband frame's composed
+/// excitation ([`crate::NarrowbandDecoder::last_frame_excitation`], 160
+/// samples in the same 8 kHz half-band geometry). For a sub-mode that
+/// transmits an excitation gain but **no innovation vector** (Table 10.1
+/// mode 1) each sub-frame's excitation is reconstructed by the
+/// fixture-arbitrated folded law
+/// `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]` ([`crate::hb_fold`]); every other
+/// documented sub-mode takes the innovation-VQ path exactly as before.
+pub fn synthesise_high_band_frame_folded(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    filter: &mut HbSynthesisFilter,
+    prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
+    lb_excitation: &[f32; HB_FRAME_SAMPLES],
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
     // (Q10, pre-base). Silence mode 0 transmits no LSP field → None.
     let curr_lsp = body.reconstructed_lsp_q10(submode);
@@ -216,17 +247,37 @@ pub fn synthesise_high_band_frame_interp(
         None => [[0.0; HB_LPC_ORDER]; HB_SUBFRAMES_PER_FRAME],
     };
 
+    // The folded (gain-only) sub-mode carries a gain but no innovation
+    // vector — Table 10.1 mode 1 is the only documented column with that
+    // shape.
+    let folded_mode = submode.excitation_vq_bits == 0 && submode.excitation_gain_bits > 0;
+
     let mut out = [0.0f64; HB_FRAME_SAMPLES];
     for sf in 0..HB_SUBFRAMES_PER_FRAME {
         let lpc = lpc_sets[sf];
-        let e_hb = crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body(
-            body, submode, sf,
-        )?;
-        // Promote the f32 excitation to f64 for the synthesis recurrence.
-        let mut e64 = [0.0f64; HB_SUBFRAME_SAMPLES];
-        for (d, &s) in e64.iter_mut().zip(e_hb.iter()) {
-            *d = f64::from(s);
-        }
+        let e64: [f64; HB_SUBFRAME_SAMPLES] = if folded_mode {
+            // Folded law: e_hb[n] = K·g·(−1)ⁿ·e_lb[n] (crate::hb_fold).
+            let gain =
+                crate::hb_excitation_gain::HbExcitationGainIndex::from_body(body, submode, sf)
+                    .map(crate::gain_reconstruction::reconstruct_hb_exc_gain)
+                    .unwrap_or(0.0);
+            let mut lb = [0.0f32; HB_SUBFRAME_SAMPLES];
+            lb.copy_from_slice(
+                &lb_excitation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
+            );
+            crate::hb_fold::folded_hb_excitation_subframe(&lb, gain)
+        } else {
+            let e_hb = crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body(
+                body, submode, sf,
+            )?;
+            // Promote the f32 excitation to f64 for the synthesis
+            // recurrence.
+            let mut tmp = [0.0f64; HB_SUBFRAME_SAMPLES];
+            for (d, &s) in tmp.iter_mut().zip(e_hb.iter()) {
+                *d = f64::from(s);
+            }
+            tmp
+        };
         let x = filter.process_subframe(&lpc, &e64);
         out[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES].copy_from_slice(&x);
     }

@@ -464,10 +464,14 @@ impl NarrowbandEncoder {
             }
         }
         let rms = (energy / NB_FRAME_SAMPLES as f64).sqrt();
+        // The decode law scales codebook rows by INNOVATION_CODEBOOK_SCALE
+        // (Q5 signed-char rows, see `gain_scaled_innovation`), so the
+        // transmitted-gain domain divides the row RMS by the same factor.
         let cb_rms = InnovationMapping::for_mode(submode)
             .documented_codebook()
             .map(codebook_rms)
-            .unwrap_or(1.0);
+            .unwrap_or(1.0)
+            * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
         if cb_rms > 0.0 {
             rms / cb_rms
         } else {
@@ -588,7 +592,12 @@ impl NarrowbandEncoder {
         count: u8,
         submode: &NarrowbandSubmode,
     ) -> (u8, u128, [f64; SUBFRAME_SAMPLES]) {
-        let cb_rms = codebook_rms(codebook).max(1e-9);
+        // Work in the decode-law domain: codebook rows carry the Q5
+        // normalisation (`gain_scaled_innovation`), so the effective row
+        // is `row · scale` and the transmitted gain is 32× the raw-row
+        // least-squares fit.
+        let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        let cb_rms = codebook_rms(codebook).max(1e-9) * scale;
         let r2_rms = (r2.iter().map(|&x| x * x).sum::<f64>() / SUBFRAME_SAMPLES as f64).sqrt();
         let g_guess = if r2_rms > 0.0 {
             r2_rms / cb_rms
@@ -596,16 +605,19 @@ impl NarrowbandEncoder {
             g_frame.max(1e-3)
         };
 
-        let choice = search_innovation(r2, g_guess, codebook, count);
+        // `search_innovation` scores raw rows, so it takes the effective
+        // per-row multiplier `g_guess · scale`.
+        let choice = search_innovation(r2, g_guess * scale, codebook, count);
 
-        // Reconstruct the concatenated codebook shape.
+        // Reconstruct the concatenated codebook shape in the decode-law
+        // domain (rows normalised by `scale`).
         let sv_len = codebook.sub_vector_len();
         let mut cb = [0.0_f64; SUBFRAME_SAMPLES];
         for (sv, &idx) in choice.indices.iter().enumerate() {
             if let Some(row) = sub_vector(codebook, idx) {
                 let base = sv * sv_len;
                 for (k, &v) in row.iter().enumerate() {
-                    cb[base + k] = f64::from(v);
+                    cb[base + k] = f64::from(v) * scale;
                 }
             }
         }

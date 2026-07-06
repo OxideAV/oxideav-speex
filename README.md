@@ -186,10 +186,39 @@ return `Error::NotImplemented`. What is implemented and tested:
   its mode class), plus `UwbFrameLayout::for_header_mode` linking the
   header's mode field to the embedded sub-band recursion descriptor.
 
+* **WB mode-1 folded high-band excitation — externally arbitrated**
+  (round r393, `hb_fold`). The gain-only high-band sub-mode's
+  reconstruction law is now pinned against the staged
+  `docs/audio/speex/fixtures/wb-mode1-folded/` reference decode:
+  `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]`, where `e_lb` is the embedded
+  narrowband frame's composed excitation
+  (`NarrowbandDecoder::last_frame_excitation`), `(−1)ⁿ` is the
+  sample-level spectral fold (manual §10.2's QMF axis reversal;
+  candidate conventions without it score ≤ 0.31 high-band correlation
+  against the reference vs **0.9999** for this law), `g` the staged
+  32-level `fold_quant_bound` level and `K =
+  HB_FOLD_RECONSTRUCTION_MULT` (adopted `1/(2·√2)`, inside the
+  measured `0.3516…0.3549` window). Wired through
+  `synthesise_high_band_frame_folded` into every wideband decode path.
+* **Absolute signal-domain calibration** (round r393,
+  `INNOVATION_CODEBOOK_SCALE`). The same fixture calibrates the
+  `signed char` innovation codebook rows as **Q5 fractions**
+  (`c[n] = g·c_raw[n]/32`), landing decoded PCM at the reference's
+  absolute level (fixture full-signal energy ratio 0.97, previously
+  32× hot). Mirrored into the encoder gain selection so transmitted
+  indices live in the reference quantiser range.
+* **Fixture conformance gate** (`tests/wb_mode1_folded_fixture.rs`) —
+  the 101-frame fixture decode is scored absolutely (no fitted gain)
+  at the fixed 80-sample reference lead: measured r393 full-signal
+  16.7 dB SNR / 0.989 correlation, folded high band **38.9 dB / 0.99994**;
+  CI floors 14 dB / 30 dB with pinned energy ratios.
+
 The narrowband decode loop and the **full wideband decode-to-16 kHz-PCM
 path** (NB low band + HB synthesis + QMF recombination) are wired
 end-to-end and produce finite, input-responsive, deterministic PCM from a
-real `speexenc` stream through the top-level `SpeexDecoder`.
+real `speexenc` stream through the top-level `SpeexDecoder` —
+externally validated against the reference decoder on the staged WB
+mode-1 fixture.
 
 * **In-band signalling — semantic interpretation** (round r372). The §5.5
   mode-14 in-band messages parse to a raw `(code, payload)` `InbandMessage`
@@ -389,13 +418,15 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
 * **Ultra-wideband second-layer excitation** — the UWB framing
   recursion, the conformant second-layer *shape* (Table 10.1 mode 1 at
   every quality, pinned by RFC 5574 Table 2's constant +36 bits/frame),
-  its LSP envelope and its gain track all decode (round r389). What
-  remains gapped: the mode-1 **folded-excitation source** (the same
-  #170 gap as the wideband gain-only mode — the 8–16 kHz band
-  reconstructs as zero until the fold law is staged), and the
-  sub-frame geometry of the excitation-VQ modes 2..=4 at the 16 kHz
-  half-band rate (Table 10.1's VQ budgets are stated for the 8 kHz
-  half-band; no "Table 11.x" analogue is staged).
+  its LSP envelope and its gain track all decode (round r389). The
+  mode-1 folded reconstruction **law** is now pinned (r393, wideband
+  fixture), but the second layer's fold **source geometry** stays
+  gapped: the staged fixture is wideband-only, and the 8–16 kHz layer's
+  80-sample sub-frames at the 16 kHz half-band have no 40-sample
+  low-band excitation of matching geometry to fold (the provenance-02
+  "80-sample-subframe kludge" scalars confirm the reference handles
+  this rate specially). Also still gapped: the sub-frame geometry of
+  the excitation-VQ modes 2..=4 at the 16 kHz half-band rate.
 * Per-mode innovation handling for narrowband modes 1 and 7 and
   high-band mode 4, whose decomposition the staged inventory does not
   yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither
@@ -403,14 +434,17 @@ real `speexenc` stream through the top-level `SpeexDecoder`.
   composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a split
   matching both the 80-bit budget *and* the 40-sample count, so the
   binding stays a recorded docs gap.)
-* **High-band mode-1 reconstruction law** — the staged table inventory
-  names the mode-1 gain a 5-bit *folded* gain (`hb-fold-quant-bound`),
-  hinting the reference reconstructs the mode-1 high band from a folded
-  copy of another excitation scaled by this gain, but no folding
-  algorithm is staged and manual §10.3 says only *"coded in the same way
-  as for narrowband"*. Recorded docs gap: the encoder transmits the
-  quantised residual-RMS gain; the decoder reconstructs mode-1 high
-  bands as silence (innovation-only composition with no VQ field).
+* **Sub-1 % constants pending a bit-exact low band** — the r393 fixture
+  arbitration (below) leaves two constants pinned only to ≈ ±1 %: the
+  exact fold constant `K` (adopted `1/(2·√2)` inside the measured
+  `0.3516…0.3549` window) and the exact-vs-adopted `1/32` innovation
+  row scale (measured `0.03154`). Both windows collapse once the
+  remaining low-band envelope deltas close. Two measured residuals
+  remain unattributed: the reference's default **output high-pass**
+  (manual §Codec-control `SPEEX_SET_HIGHPASS`, default on — transfer
+  not staged; measured ≈ 1st/2nd-order, cutoff ≈ 30 Hz, +1.6 dB if
+  fitted) and a frame-rate AM sideband difference around strong tones
+  (≈ 1.25 kHz on the fixture).
 
 ## Usage
 

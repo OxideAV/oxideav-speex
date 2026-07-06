@@ -143,6 +143,13 @@ pub struct NarrowbandDecoder {
     filter: SynthesisFilter,
     excitation: ExcitationBuffer,
     prev_lsp_q10: Option<[i32; LPC_ORDER]>,
+    /// The full-precision composed excitation `e[n] = p[n] + c[n]` of the
+    /// most recently decoded frame, retained for the wideband high-band
+    /// **folded-excitation** reconstruction (manual §10.2 / §10.3: the
+    /// gain-only high-band sub-mode reuses the low-band excitation — see
+    /// [`crate::hb_fold`]). Zero at stream start and after a silence
+    /// frame.
+    last_frame_excitation: [f32; NARROWBAND_FRAME_SAMPLES],
 }
 
 impl Default for NarrowbandDecoder {
@@ -158,7 +165,21 @@ impl NarrowbandDecoder {
             filter: SynthesisFilter::new(),
             excitation: ExcitationBuffer::new(),
             prev_lsp_q10: None,
+            last_frame_excitation: [0.0; NARROWBAND_FRAME_SAMPLES],
         }
+    }
+
+    /// The composed full-precision excitation `e[n] = p[n] + c[n]` of the
+    /// most recently decoded frame (160 samples, one per PCM sample).
+    ///
+    /// This is the signal the wideband **folded** high-band excitation
+    /// law reuses (manual §10.2 / §10.3, [`crate::hb_fold`]): the
+    /// gain-only high-band sub-mode transmits no innovation vector, so
+    /// its excitation is this low-band excitation scaled by the 5-bit
+    /// folded gain. All-zero at stream start and after a silence frame
+    /// (whose excitation is zero by construction).
+    pub fn last_frame_excitation(&self) -> &[f32; NARROWBAND_FRAME_SAMPLES] {
+        &self.last_frame_excitation
     }
 
     /// Resolve the de-biased pitch period for sub-frame `sf_idx` from
@@ -299,6 +320,11 @@ impl NarrowbandDecoder {
             // Full excitation e[n] = p[n] + c[n].
             let e = gain_scaled_excitation_subframe(&p, &c);
 
+            // Retain the full-precision excitation for the wideband
+            // folded high-band law (see `last_frame_excitation`).
+            self.last_frame_excitation[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES]
+                .copy_from_slice(&e);
+
             // Feedback: push the emitted excitation into the history so
             // the NEXT sub-frame's adaptive codebook reads it.
             for &sample in &e {
@@ -354,6 +380,7 @@ impl NarrowbandDecoder {
         pcm: &mut [f64; NARROWBAND_FRAME_SAMPLES],
     ) {
         let zero = [0.0f64; SUBFRAME_SAMPLES];
+        self.last_frame_excitation = [0.0; NARROWBAND_FRAME_SAMPLES];
         for sf_idx in 0..SUBFRAMES_PER_FRAME {
             for _ in 0..SUBFRAME_SAMPLES {
                 self.excitation.push(0);

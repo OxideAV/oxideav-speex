@@ -95,6 +95,7 @@
 //!   same error for mode 4.
 
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
+use crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
 use crate::hb_innovation::{decode_hb_subframe, HbInnovationError, HB_SUBFRAME_SAMPLES};
 use crate::wideband::{WidebandHighBandBody, WidebandHighBandSubmode};
@@ -107,13 +108,19 @@ pub const GAIN_SCALED_HB_INNOVATION_SAMPLES: usize = HB_SUBFRAME_SAMPLES;
 
 /// Scale a raw high-band innovation sub-vector `c_raw[n]` (`[i16; 40]`)
 /// by the reconstructed high-band excitation gain `g`, producing the
-/// gain-scaled high-band excitation `e_hb[n] = g · c_raw[n]` as
+/// gain-scaled high-band excitation
+/// `e_hb[n] = g · c_raw[n] · `[`INNOVATION_CODEBOOK_SCALE`]` ` as
 /// `[f32; 40]`.
 ///
 /// `gain` is the reconstructed scalar magnitude in the decoder's
 /// normalised float signal domain (the output of
 /// [`crate::reconstruct_hb_exc_gain`]). A `0.0` gain (silence) yields an
-/// all-zero excitation.
+/// all-zero excitation. The staged high-band codebooks are the same
+/// `signed char` Q5-fraction rows as the narrowband ones
+/// (`tables/hb-innovation-cdbk-*.meta`), so the shared
+/// [`INNOVATION_CODEBOOK_SCALE`] = 1/32 normalisation applies here too
+/// (see [`crate::gain_scaled_innovation`] module docs for the external
+/// calibration).
 ///
 /// Because *The Speex Codec Manual* §10.2 specifies no high-band pitch
 /// prediction, this product is the **entire** high-band excitation that
@@ -126,7 +133,7 @@ pub fn gain_scaled_hb_innovation_subframe(
 ) -> [f32; GAIN_SCALED_HB_INNOVATION_SAMPLES] {
     let mut out = [0.0f32; GAIN_SCALED_HB_INNOVATION_SAMPLES];
     for (slot, &c) in out.iter_mut().zip(c_raw.iter()) {
-        *slot = gain * f32::from(c);
+        *slot = gain * INNOVATION_CODEBOOK_SCALE * f32::from(c);
     }
     out
 }
@@ -136,7 +143,7 @@ pub fn gain_scaled_hb_innovation_subframe(
 /// `gain_scaled_hb_innovation_subframe(c, gain)[n]` elementwise.
 #[inline]
 pub fn gain_scaled_hb_innovation_sample(c_raw: i16, gain: f32) -> f32 {
-    gain * f32::from(c_raw)
+    gain * INNOVATION_CODEBOOK_SCALE * f32::from(c_raw)
 }
 
 /// Decode the raw high-band innovation sub-vector for sub-frame
@@ -189,16 +196,16 @@ mod tests {
         }
     }
 
-    /// A unit gain leaves the innovation unchanged (modulo i16→f32).
+    /// A unit gain applies exactly the shared Q5 row normalisation.
     #[test]
-    fn unit_gain_is_identity() {
+    fn unit_gain_applies_q5_row_normalisation() {
         let mut c = [0i16; GAIN_SCALED_HB_INNOVATION_SAMPLES];
         for (i, slot) in c.iter_mut().enumerate() {
             *slot = (i as i16) * 13 - 200;
         }
         let out = gain_scaled_hb_innovation_subframe(&c, 1.0);
         for (n, &v) in out.iter().enumerate() {
-            assert_eq!(v, f32::from(c[n]), "n={n}");
+            assert_eq!(v, f32::from(c[n]) / 32.0, "n={n}");
         }
     }
 
@@ -223,7 +230,11 @@ mod tests {
         let gain = 1.5f32;
         let out = gain_scaled_hb_innovation_subframe(&c, gain);
         for (n, &v) in out.iter().enumerate() {
-            assert_eq!(v, gain * f32::from(c[n]), "n={n}");
+            assert_eq!(
+                v,
+                gain * INNOVATION_CODEBOOK_SCALE * f32::from(c[n]),
+                "n={n}"
+            );
         }
     }
 

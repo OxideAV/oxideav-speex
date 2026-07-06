@@ -465,13 +465,17 @@ fn hb_quantise_gain_and_search(
         if g <= 0.0 || !g.is_finite() {
             continue;
         }
-        let choice = search_hb_innovation(residual, g, codebook, count);
+        // The decode law normalises the Q5 signed-char rows
+        // (`gain_scaled_hb_innovation`), so score at the effective
+        // per-row multiplier.
+        let ge = g * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        let choice = search_hb_innovation(residual, ge, codebook, count);
         let Ok(c) = decode_hb_subframe(submode, choice.packed) else {
             continue;
         };
         let mut err = 0.0f64;
         for (n, &r) in residual.iter().enumerate() {
-            let d = r - g * f64::from(c[n]);
+            let d = r - ge * f64::from(c[n]);
             err += d * d;
         }
         if best.map_or(true, |(e, _, _)| err < e) {
@@ -631,12 +635,14 @@ mod tests {
         let g_level = f64::from(reconstruct_hb_exc_gain(planted_idx));
         assert!(g_level > 0.0);
 
+        let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
         let rows = [3u32, 17, 8, 25];
         let mut residual = [0.0f64; HB_SUBFRAME_SAMPLES];
         for (sv, &idx) in rows.iter().enumerate() {
             let row = crate::hb_innovation::hb_innovation_sub_vector(cb, idx).unwrap();
             for (k, &v) in row.iter().enumerate() {
-                residual[sv * 10 + k] = g_level * f64::from(v);
+                // Plant the residual in the decode-law domain (Q5 rows).
+                residual[sv * 10 + k] = g_level * scale * f64::from(v);
             }
         }
 
@@ -645,7 +651,7 @@ mod tests {
         // Decode back through the exact decoder path.
         let idx = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, &submode)
             .expect("gain index resolves");
-        let g = f64::from(reconstruct_hb_exc_gain(idx));
+        let g = f64::from(reconstruct_hb_exc_gain(idx)) * scale;
         let c = decode_hb_subframe(&submode, packed).unwrap();
         let mut err = 0.0f64;
         let mut energy = 0.0f64;
@@ -675,11 +681,13 @@ mod tests {
                 *slot = (((s >> 40) as f64 / (1u64 << 24) as f64) - 0.5) * 400.0;
             }
             let g_guess = 1.7;
+            let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
 
-            // Single-pass baseline (replicates pass 1 exactly).
+            // Single-pass baseline (replicates pass 1 exactly: the
+            // search + scoring run at the effective Q5-normalised gain).
             let idx0 = quantise_hb_exc_gain(g_guess as f32, 4).unwrap();
-            let g0 = f64::from(reconstruct_hb_exc_gain(idx0));
-            let choice0 = search_hb_innovation(&residual, g0.max(1e-9), cb, 5);
+            let g0 = f64::from(reconstruct_hb_exc_gain(idx0)) * scale;
+            let choice0 = search_hb_innovation(&residual, g0.max(1e-12), cb, 5);
             let c0 = decode_hb_subframe(&submode, choice0.packed).unwrap();
             let mut err0 = 0.0f64;
             for (n, &r) in residual.iter().enumerate() {
@@ -691,7 +699,7 @@ mod tests {
             let (raw_gain, packed) = hb_quantise_gain_and_search(&residual, 4, &submode, cb, 5);
             let idx = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, &submode)
                 .unwrap();
-            let g = f64::from(reconstruct_hb_exc_gain(idx));
+            let g = f64::from(reconstruct_hb_exc_gain(idx)) * scale;
             let c = decode_hb_subframe(&submode, packed).unwrap();
             let mut err = 0.0f64;
             for (n, &r) in residual.iter().enumerate() {

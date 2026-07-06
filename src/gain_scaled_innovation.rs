@@ -58,6 +58,24 @@
 //! [`crate::SynthesisFilter`] already filters in floating point, so the
 //! `[f32; 40]` contribution feeds it directly.
 //!
+//! ## Codebook-row normalisation ([`INNOVATION_CODEBOOK_SCALE`], round r393)
+//!
+//! The staged innovation codebooks are **`signed char` arrays**
+//! (`docs/audio/speex/tables/innovation-cdbk-*.meta`, `c_type: signed
+//! char`) whose rows this crate carries as raw integers. The
+//! reference-signal domain treats those rows as **Q5 fractions**: the
+//! contribution law is `c[n] = g · c_raw[n] / 32`, not `g · c_raw[n]`.
+//! This 1/32 normalisation was **calibrated externally** against the
+//! staged `fixtures/wb-mode1-folded/` reference decode (round r393): a
+//! least-squares regression of the reference low-band PCM onto this
+//! crate's decode of the same bit-stream measured the residual scale at
+//! `0.03154` (energy-weighted, 101 frames) — `1/32 = 0.03125` within the
+//! ≤1 % envelope error of the not-yet-bit-exact LSP→LPC path, and the
+//! unique power-of-two reading consistent with the `signed char` storage
+//! width. Both the decoder application here and the encoder's gain
+//! selection ([`crate::NarrowbandEncoder`]) share this constant, so
+//! transmitted gain indices land in the reference quantiser range.
+//!
 //! ## Stream-start / silence behaviour
 //!
 //! When the frame is silent ([`crate::FrameInnovationGainIndex::Silence`],
@@ -100,18 +118,32 @@ use crate::innovation::SUBFRAME_SAMPLES;
 /// consumer reads it.
 pub const GAIN_SCALED_INNOVATION_SAMPLES: usize = SUBFRAME_SAMPLES;
 
+/// Normalisation applied to the raw `signed char` innovation codebook
+/// rows when they enter the signal domain: the rows are **Q5 fractions**
+/// (`c[n] = g · c_raw[n] / 32`).
+///
+/// Externally calibrated against the reference decode of the staged
+/// `wb-mode1-folded` fixture (see the module docs) and consistent with
+/// the `signed char` storage width of every staged innovation table.
+/// Shared by the narrowband path here, the high-band VQ path
+/// ([`crate::gain_scaled_hb_innovation`]), and the encoder-side gain
+/// selection, so the encode → decode gain domain is symmetric.
+pub const INNOVATION_CODEBOOK_SCALE: f32 = 1.0 / 32.0;
+
 /// Scale a raw innovation sub-vector `c_raw[n]` (`[i16; 40]`) by the
 /// reconstructed fixed-codebook gain `g`, producing the gain-scaled
-/// fixed-codebook contribution `c[n] = g · c_raw[n]` as `[f32; 40]`.
+/// fixed-codebook contribution
+/// `c[n] = g · c_raw[n] · `[`INNOVATION_CODEBOOK_SCALE`] as `[f32; 40]`.
 ///
 /// `gain` is the reconstructed scalar magnitude `g = g_frame · g_subf`
 /// in the decoder's normalised float signal domain (the output of
 /// [`crate::reconstruct_fixed_codebook_gain`]). A `0.0` gain (silent
-/// frame) yields an all-zero contribution.
+/// frame) yields an all-zero contribution. The raw codebook rows are Q5
+/// fractions, hence the 1/32 normalisation (module docs).
 ///
-/// The product `g · c_raw[n]` is the magnitude-correct `c[n]` the
-/// Speex Codec Manual §8.4 composition `e[n] = p[n] + c[n]` adds to the
-/// adaptive-codebook contribution.
+/// The product is the magnitude-correct `c[n]` the Speex Codec Manual
+/// §8.4 composition `e[n] = p[n] + c[n]` adds to the adaptive-codebook
+/// contribution.
 #[inline]
 pub fn gain_scaled_innovation_subframe(
     c_raw: &[i16; GAIN_SCALED_INNOVATION_SAMPLES],
@@ -119,7 +151,7 @@ pub fn gain_scaled_innovation_subframe(
 ) -> [f32; GAIN_SCALED_INNOVATION_SAMPLES] {
     let mut out = [0.0f32; GAIN_SCALED_INNOVATION_SAMPLES];
     for (slot, &c) in out.iter_mut().zip(c_raw.iter()) {
-        *slot = gain * f32::from(c);
+        *slot = gain * INNOVATION_CODEBOOK_SCALE * f32::from(c);
     }
     out
 }
@@ -141,14 +173,15 @@ pub fn gain_scaled_innovation_from_indices(
     gain_scaled_innovation_subframe(c_raw, gain)
 }
 
-/// Scale a single innovation sample `c_raw` by the reconstructed gain.
+/// Scale a single innovation sample `c_raw` by the reconstructed gain
+/// (including the [`INNOVATION_CODEBOOK_SCALE`] Q5 row normalisation).
 ///
 /// Matches `gain_scaled_innovation_subframe(c, gain)[n]` for the same
 /// `gain` and `c[n] = c_raw`. Provided for callers that walk samples one
 /// at a time.
 #[inline]
 pub fn gain_scaled_innovation_sample(c_raw: i16, gain: f32) -> f32 {
-    gain * f32::from(c_raw)
+    gain * INNOVATION_CODEBOOK_SCALE * f32::from(c_raw)
 }
 
 #[cfg(test)]
@@ -161,17 +194,17 @@ mod tests {
     use crate::innovation::decode_subframe;
     use crate::submode::NARROWBAND_SUBMODES;
 
-    /// A unit gain leaves the innovation unchanged (modulo the i16→f32
-    /// widening), so the scaled contribution equals the raw sub-vector.
+    /// A unit gain applies exactly the Q5 row normalisation: the scaled
+    /// contribution is the raw sub-vector divided by 32.
     #[test]
-    fn unit_gain_is_identity() {
+    fn unit_gain_applies_q5_row_normalisation() {
         let mut c = [0i16; GAIN_SCALED_INNOVATION_SAMPLES];
         for (i, slot) in c.iter_mut().enumerate() {
             *slot = (i as i16) * 11 - 200;
         }
         let out = gain_scaled_innovation_subframe(&c, 1.0);
         for (n, &v) in out.iter().enumerate() {
-            assert_eq!(v, f32::from(c[n]), "n={n}");
+            assert_eq!(v, f32::from(c[n]) / 32.0, "n={n}");
         }
     }
 
@@ -197,7 +230,11 @@ mod tests {
         let gain = 2.5f32;
         let out = gain_scaled_innovation_subframe(&c, gain);
         for (n, &v) in out.iter().enumerate() {
-            assert_eq!(v, gain * f32::from(c[n]), "n={n}");
+            assert_eq!(
+                v,
+                gain * INNOVATION_CODEBOOK_SCALE * f32::from(c[n]),
+                "n={n}"
+            );
         }
     }
 
@@ -283,8 +320,8 @@ mod tests {
                 subframe: subf,
             };
             let out = gain_scaled_innovation_from_indices(&c, indices);
-            // With g_subf = 1.0, sample 0 = g_frame · 1000 = ol[i]·1000.
-            let expected = ol[usize::from(i)] * 1000.0;
+            // With g_subf = 1.0, sample 0 = g_frame · 1000/32.
+            let expected = ol[usize::from(i)] * 1000.0 * INNOVATION_CODEBOOK_SCALE;
             assert!((out[0] - expected).abs() < 1e-1, "i={i}");
             assert!(out[0] > prev, "monotone i={i}");
             prev = out[0];
@@ -319,11 +356,12 @@ mod tests {
 
         let scaled = gain_scaled_innovation_from_indices(&c_raw, gain_indices);
         for n in 0..GAIN_SCALED_INNOVATION_SAMPLES {
+            let want = expected_gain * INNOVATION_CODEBOOK_SCALE * f32::from(c_raw[n]);
             assert!(
-                (scaled[n] - expected_gain * f32::from(c_raw[n])).abs() < 1e-2,
+                (scaled[n] - want).abs() < 1e-2,
                 "n={n}: {} vs {}",
                 scaled[n],
-                expected_gain * f32::from(c_raw[n])
+                want
             );
         }
     }
@@ -340,7 +378,8 @@ mod tests {
                 subframe: SubFrameInnovationGainCorrection::OneBit(q),
             };
             let out = gain_scaled_innovation_from_indices(&c, indices);
-            let expected = nb_ol_exc_gain_levels()[8] * l1[usize::from(q)] * 500.0;
+            let expected =
+                nb_ol_exc_gain_levels()[8] * l1[usize::from(q)] * 500.0 * INNOVATION_CODEBOOK_SCALE;
             assert!((out[0] - expected).abs() < 1e-1, "q={q}");
         }
     }

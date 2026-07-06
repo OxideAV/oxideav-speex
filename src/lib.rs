@@ -430,6 +430,7 @@ mod gain_scaled_innovation;
 mod gain_scaled_pitch;
 mod hb_encode;
 mod hb_excitation_gain;
+mod hb_fold;
 mod hb_innovation;
 mod hb_innovation_search;
 mod hb_lsp;
@@ -520,7 +521,7 @@ pub use gain_scaled_hb_innovation::{
 };
 pub use gain_scaled_innovation::{
     gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,
-    gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES,
+    gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES, INNOVATION_CODEBOOK_SCALE,
 };
 pub use gain_scaled_pitch::{
     gain_scaled_pitch_sample, gain_scaled_pitch_subframe, GAIN_SCALED_PITCH_SAMPLES,
@@ -531,6 +532,7 @@ pub use hb_excitation_gain::{
     hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
     HB_EXC_GAIN_BITS_MODE_1,
 };
+pub use hb_fold::{folded_hb_excitation_subframe, HB_FOLD_RECONSTRUCTION_MULT};
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
     HbInnovationMapping, HB_SUBFRAME_SAMPLES,

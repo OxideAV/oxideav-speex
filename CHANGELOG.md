@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r393: **WB mode-1 folded high-band excitation — externally
+  arbitrated and wired** (`hb_fold` module; closes the #170 fold-law
+  gap for the wideband layer). The staged
+  `docs/audio/speex/fixtures/wb-mode1-folded/` reference-decode fixture
+  pins the reconstruction law `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]`: the fold
+  source is the embedded narrowband frame's composed excitation
+  (`NarrowbandDecoder::last_frame_excitation`, new accessor), the
+  `(−1)ⁿ` modulation is the sample-level spectral fold (candidate
+  conventions without it score ≤ 0.31 high-band correlation vs 0.9999),
+  `g` is the staged 32-level `fold_quant_bound` level, and
+  `K = HB_FOLD_RECONSTRUCTION_MULT` (adopted `1/(2·√2)`, inside the
+  fixture-measured `0.3516…0.3549` window). Wired through
+  `synthesise_high_band_frame_folded` into `WidebandDecoder` (and the
+  top-level `SpeexDecoder` / `SpeexStreamDecoder` paths).
+- Round r393: **`INNOVATION_CODEBOOK_SCALE` (1/32) Q5 codebook-row
+  normalisation** — the same fixture calibrates the absolute signal
+  domain: the `signed char` innovation rows enter the excitation as Q5
+  fractions (`c[n] = g·c_raw[n]/32`; measured `0.03154` ≈ `1/32` by
+  least squares against the reference low band). Applied uniformly in
+  the narrowband + high-band gain-scaled innovation paths and mirrored
+  in the encoder gain selection, so decoded PCM now lands at the
+  reference's absolute level (fixture energy ratio 0.97) instead of
+  32× hot.
+- Round r393: **conformance gate** `tests/wb_mode1_folded_fixture.rs` —
+  absolute (no scale freedom) scoring of the full fixture decode against
+  the reference PCM at the fixed 80-sample reference lead: full-signal
+  SNR ≥ 14 dB (measured 16.7), high-band SNR ≥ 30 dB / correlation
+  ≥ 0.999 (measured 38.9 dB / 0.99994), energy ratios pinned; plus a
+  framing re-verification of the staged notes (101 frames, NB mode 8,
+  HB sub-mode 1).
+
 - Round r389: **Ultra-wideband (32 kHz) subsystem — decode + encode +
   quality ladders + VAD/DTX.** Six landings driving the §2.2 embedded
   recursion one level above wideband:
