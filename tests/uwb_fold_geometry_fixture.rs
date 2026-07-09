@@ -190,6 +190,33 @@ fn uwb_three_layer_decode_matches_reference() {
     );
 }
 
+/// The reference decode carries the codec's **default output high-pass**
+/// (`--no-enh` disables only the perceptual enhancer). Applying the
+/// crate's fitted [`OutputHighpass`] at the 32 kHz output rate must move
+/// the decode *closer* to the reference — pinning both the filter fit at
+/// the ultra-wideband rate and the pipeline reading (measured: 19.1 dB
+/// raw → 21.3 dB high-passed, mirroring the wideband fixture's
+/// +1.6 dB). See `docs/audio/speex/decoder-output-empirical.md`.
+#[test]
+fn output_highpass_improves_reference_match() {
+    use oxideav_speex::OutputHighpass;
+
+    let reference = reference_pcm();
+    let mut ours = decode_fixture();
+    let (raw_snr, _) = score(&ours, &reference, REF_LEAD_FULL);
+
+    let mut hp = OutputHighpass::for_sample_rate(32_000);
+    hp.process_slice(&mut ours);
+    let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
+
+    assert!(
+        hp_snr > raw_snr + 1.0,
+        "high-pass should improve the match: raw {raw_snr:.2} dB vs {hp_snr:.2} dB"
+    );
+    assert!(hp_snr >= 20.0, "high-passed SNR {hp_snr:.2} dB < 20 dB");
+    assert!(hp_corr >= 0.99, "high-passed correlation {hp_corr:.4}");
+}
+
 /// The header-driven top-level path ([`SpeexStreamDecoder`]) decodes the
 /// same fixture identically to the direct [`UltraWidebandDecoder`] walk.
 #[test]
