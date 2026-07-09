@@ -17,8 +17,12 @@ points still return `Error::NotImplemented`; as of round r393 the
 wideband decode is **externally validated against the reference
 decoder** on the staged `wb-mode1-folded` fixture (16.7 dB absolute
 SNR / 0.989 correlation full-signal, 38.9 dB / 0.99994 on the folded
-high band, absolute level calibrated to 0.97× — CI-gated). What is
-implemented and tested:
+high band, absolute level calibrated to 0.97× — CI-gated), and as of
+round r403 the **ultra-wideband 3-layer decode** is likewise externally
+validated on the staged `uwb-fold-geometry` fixture (19.1 dB / 0.994
+full-signal 32 kHz, embedded wideband layers 21.6 dB / 0.997, folded
+second layer correlation 0.93 — CI-gated). What is implemented and
+tested:
 
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
@@ -327,6 +331,30 @@ mode-1 fixture.
     `EnergyVad` RMS-threshold + hangover detector (the VAD decision
     algorithm is unpinned by the manual — documented encoder freedom).
 
+* **Ultra-wideband 3-layer decode — externally validated** (round
+  r403, `docs/audio/speex/fixtures/uwb-fold-geometry/`). The staged
+  32 kHz 3-layer fixture (101 frames, NB mode 8 + both high-band layers
+  sub-mode 1) pins the **second-layer (8–16 kHz) fold-source geometry**
+  that a wideband-only stream cannot show. Black-box arbitration
+  against the reference `--no-enh` decode (the r393 method) pins the
+  fold source as the embedded wideband layer's **first-high-band
+  excitation** (`WidebandDecoder::last_hb_excitation`),
+  **linear-interpolated** to the 16 kHz second-layer geometry
+  (`upsample_hb_excitation_linear`) and re-folded by the same `(−1)ⁿ`
+  law scaled by the outer `UWB_FOLD_RECONSTRUCTION_MULT = 1/16`
+  (`folded_uwb_excitation_slice`). This **replaces** the earlier
+  QMF-recombined-excitation generalisation, which over-scaled the band
+  25× and decorrelated it. Measured delta on the fixture: second-layer
+  correlation **0.04 → 0.93**, high-band energy ratio **25× → 0.95**,
+  full 32 kHz decode **≈0 dB / 0.65 → 19.1 dB / 0.994** absolute SNR;
+  the embedded wideband layers (outer-QMF low half) measure **21.6 dB /
+  0.997** — the first end-to-end external validation of the UWB path's
+  first two layers. The encoder mirrors the pinned source/scale in its
+  local analysis-by-synthesis gain selection. CI-gated by
+  `tests/uwb_fold_geometry_fixture.rs` (full-signal, per-band,
+  output-high-pass, header-path, determinism, framing) and fuzzed by
+  `tests/uwb_robustness.rs`.
+
 ## Not yet supported
 
 * Bit-exact full decode. The scalar excitation-gain quantiser levels are
@@ -444,22 +472,16 @@ mode-1 fixture.
   offset) — these are bit-exactness details, not sample-correctness ones;
   the sample-correct textbook reconstruction is what ships. Recorded docs
   gap, isolated to the delay convention.
-* **Ultra-wideband second-layer fold source — crate convention, not
-  reference-pinned.** The second (8–16 kHz) layer now reconstructs a
-  real half-band with the fixture-pinned fold law (r393): the fold
-  *source* is the crate's **recursion-consistent generalisation** —
-  the embedded wideband layer's two 8 kHz excitation tracks
-  (narrowband composed excitation + first-high-band excitation)
-  recombined to 16 kHz through the QMF synthesis bank — and the
-  encoder chooses its 5-bit gains against that exact source via a
-  local (analysis-by-synthesis) wideband decode, so UWB round-trips
-  reconstruct the 8–16 kHz energy envelope. The staged fixture is
-  wideband-only, so the reference's actual 16 kHz fold-source geometry
-  (80-sample sub-frames; the provenance-02 "80-sample-subframe kludge"
-  scalars confirm the reference treats this rate specially) remains
-  the recorded residue of #170 pending an ultra-wideband fixture. Also
-  still gapped: the sub-frame geometry of the excitation-VQ modes
-  2..=4 at the 16 kHz half-band rate.
+* **Ultra-wideband excitation-VQ modes (2..=4) — sub-frame geometry
+  gap.** The second-layer fold *source* is now **externally pinned**
+  (see the r403 capability entry below); what remains gapped for the
+  ultra-wideband band is the sub-frame geometry of the
+  excitation-VQ modes 2..=4 at the 16 kHz half-band rate (Table 10.1's
+  VQ budgets are stated for the 8 kHz half-band), which the decoder
+  surfaces as `UwbLayerUndocumented` rather than guessing. The exact
+  outer fold reconstruction multiplier (`UWB_FOLD_RECONSTRUCTION_MULT
+  = 1/16`) is fixture-calibrated to ≈±5 % pending a bit-exact low
+  band, the same posture as the inner wideband constant.
 * Per-mode innovation handling for narrowband modes 1 and 7 and
   high-band mode 4, whose decomposition the staged inventory does not
   yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither
