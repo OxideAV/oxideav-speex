@@ -130,6 +130,66 @@ pub fn folded_hb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) {
     }
 }
 
+/// The constant scalar of the **ultra-wideband second-layer** folded
+/// reconstruction — the outer (8–16 kHz) sub-band stage's analogue of
+/// [`HB_FOLD_RECONSTRUCTION_MULT`].
+///
+/// The outer fold's source is the reconstructed **first-high-band
+/// excitation** ([`crate::WidebandDecoder::last_hb_excitation`], the
+/// 4–8 kHz layer), linear-interpolated to the 16 kHz half-band geometry
+/// and re-folded into 8–16 kHz. Because that source has already been
+/// scaled by the inner [`HB_FOLD_RECONSTRUCTION_MULT`], the outer stage
+/// needs a **smaller** multiplier: the value `1/16` (=
+/// `HB_FOLD_RECONSTRUCTION_MULT²/2`) sits inside the window measured by
+/// the staged 3-layer fixture (`docs/audio/speex/fixtures/
+/// uwb-fold-geometry/`): per-sub-frame least squares gives `≈ 0.060`,
+/// the energy-ratio match `≈ 0.064`, and `1/16 = 0.0625` lands between
+/// them. Like the inner constant this is **fixture-calibrated** (adopted
+/// reading, not a staged table value) and carries the same ±1 % residue
+/// until the low band is bit-exact — see [`crate::uwb_decoder`].
+pub const UWB_FOLD_RECONSTRUCTION_MULT: f64 = 0.0625;
+
+/// Linear-interpolate a 160-sample 8 kHz high-band excitation up to the
+/// 320-sample 16 kHz second-layer geometry.
+///
+/// The ultra-wideband second high-band layer synthesises a 320-sample
+/// 16 kHz half-band; its fold source (the embedded wideband layer's
+/// 160-sample first-high-band excitation) is brought to that rate by
+/// 2× linear interpolation (`out[2i] = src[i]`,
+/// `out[2i+1] = ½(src[i]+src[i+1])`). The fixture arbitration measured
+/// linear interpolation at high-band correlation **0.93** vs **0.85**
+/// for nearest-sample repetition — the smoother upsample is the pinned
+/// choice.
+#[inline]
+pub fn upsample_hb_excitation_linear(src: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(out.len(), 2 * src.len());
+    let last = src.len().saturating_sub(1);
+    for i in 0..src.len() {
+        let a = src[i];
+        let b = src[(i + 1).min(last)];
+        out[2 * i] = a;
+        out[2 * i + 1] = 0.5 * (a + b);
+    }
+}
+
+/// Reconstruct one ultra-wideband second-layer sub-frame's excitation by
+/// re-folding the (already upsampled) first-high-band excitation.
+///
+/// Identical in form to [`folded_hb_excitation_slice`] — the same
+/// `(−1)ⁿ` spectral fold — but scaled by
+/// [`UWB_FOLD_RECONSTRUCTION_MULT`] rather than the inner
+/// [`HB_FOLD_RECONSTRUCTION_MULT`], because the outer stage's source has
+/// already been through the inner fold (module + constant docs).
+#[inline]
+pub fn folded_uwb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) {
+    debug_assert_eq!(exc_src.len(), out.len());
+    let k = UWB_FOLD_RECONSTRUCTION_MULT * f64::from(gain);
+    for (n, (slot, &e)) in out.iter_mut().zip(exc_src.iter()).enumerate() {
+        let folded = k * e;
+        *slot = if n % 2 == 0 { folded } else { -folded };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +274,42 @@ mod tests {
         assert!((k - 1.0 / (2.0 * 2.0f64.sqrt())).abs() < 1e-15);
         assert!(k > 0.3516 - 1e-4);
         assert!(k < 0.3549 + 1e-4);
+    }
+
+    /// Linear 2× upsample: even samples copy, odd samples average with
+    /// the next; the last sample holds (no phantom step past the end).
+    #[test]
+    fn linear_upsample_interpolates_and_holds_tail() {
+        let src = [2.0f64, 4.0, 10.0];
+        let mut out = [0.0f64; 6];
+        upsample_hb_excitation_linear(&src, &mut out);
+        assert_eq!(out, [2.0, 3.0, 4.0, 7.0, 10.0, 10.0]);
+    }
+
+    /// The outer UWB fold multiplier sits inside the 3-layer fixture's
+    /// measured window (LS ≈ 0.060, energy-match ≈ 0.064) and is the
+    /// clean reading `1/16`.
+    #[test]
+    fn uwb_reconstruction_mult_is_in_measured_window() {
+        let k = std::hint::black_box(UWB_FOLD_RECONSTRUCTION_MULT);
+        assert!((k - 1.0 / 16.0).abs() < 1e-15);
+        assert!((0.058..=0.066).contains(&k));
+        // Smaller than the inner constant: the source is already folded.
+        assert!(k < HB_FOLD_RECONSTRUCTION_MULT);
+    }
+
+    /// The UWB fold has the same `(−1)ⁿ` shape as the inner fold, scaled
+    /// by the outer multiplier rather than the inner one.
+    #[test]
+    fn uwb_fold_uses_outer_multiplier_and_nyquist_sign() {
+        let src: Vec<f64> = (0..8).map(|i| i as f64 - 3.5).collect();
+        let g = 2.0f32;
+        let mut out = vec![0.0f64; 8];
+        folded_uwb_excitation_slice(&src, g, &mut out);
+        for (n, (&o, &s)) in out.iter().zip(src.iter()).enumerate() {
+            let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let want = UWB_FOLD_RECONSTRUCTION_MULT * f64::from(g) * sign * s;
+            assert!((o - want).abs() < 1e-12, "n={n}: {o} vs {want}");
+        }
     }
 }

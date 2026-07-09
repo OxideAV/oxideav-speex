@@ -534,7 +534,8 @@ pub use hb_excitation_gain::{
     HB_EXC_GAIN_BITS_MODE_1,
 };
 pub use hb_fold::{
-    folded_hb_excitation_slice, folded_hb_excitation_subframe, HB_FOLD_RECONSTRUCTION_MULT,
+    folded_hb_excitation_slice, folded_hb_excitation_subframe, folded_uwb_excitation_slice,
+    upsample_hb_excitation_linear, HB_FOLD_RECONSTRUCTION_MULT, UWB_FOLD_RECONSTRUCTION_MULT,
 };
 pub use hb_innovation::{
     decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,

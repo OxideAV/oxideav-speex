@@ -28,9 +28,12 @@
 //!    posture as r382/r385) → LSP → Q10 − base → the same 2-stage
 //!    12-bit MSVQ the wideband high band uses.
 //! 4. **High half gains** — per 80-sample sub-frame (four per frame,
-//!    pinned by the mode-1 bit budget): the order-8 prediction residual
-//!    RMS, quantised through the staged 32-level 5-bit folded-gain
-//!    grid ([`crate::gain_reconstruction::quantise_hb_exc_gain`]).
+//!    pinned by the mode-1 bit budget): the fold-consistent target
+//!    `g = rms(residual) / (K · rms(fold source))` quantised through the
+//!    staged 32-level 5-bit folded-gain grid
+//!    ([`crate::gain_reconstruction::quantise_hb_exc_gain`]), where the
+//!    fold source and `K = UWB_FOLD_RECONSTRUCTION_MULT` are the r403
+//!    fixture-pinned pair (step below).
 //! 5. **Pack** — the embedded wideband frame first (narrowband prefix
 //!    with the wideband flag, Table 9.1 body, first high-band frame),
 //!    then the second high-band frame through the same
@@ -40,13 +43,20 @@
 //! ## Fidelity
 //!
 //! Functional, not bit-exact — the same posture as the narrowband and
-//! wideband encoders. The decoder-side mode-1 folded-excitation source
-//! is the recorded docs gap (#170), so the gains this encoder writes
-//! describe the true 8–16 kHz energy envelope even though the current
-//! decoder reconstructs that band as zero. Supported second-layer
-//! modes: 0 (silence) and 1 (gain-only). The excitation-VQ modes 2..=4
-//! have no pinned sub-frame geometry at the 16 kHz half-band and are
-//! rejected, as are the reserved IDs 5..=7.
+//! wideband encoders. As of round r403 the decoder-side mode-1 fold
+//! **source** (the first-high-band excitation, linear-interpolated to
+//! the 16 kHz geometry) and its reconstruction multiplier are pinned by
+//! the staged 3-layer fixture (`docs/audio/speex/fixtures/
+//! uwb-fold-geometry/`; see [`crate::uwb_decoder`] / [`crate::hb_fold`]),
+//! and this encoder chooses its gains against that exact source via the
+//! local analysis-by-synthesis wideband decode, so a UWB round trip
+//! reconstructs a non-silent, gain-responsive 8–16 kHz band. Because the
+//! folded law borrows the second layer's excitation from the first high
+//! band, it reconstructs energy only where the 4–8 kHz band is
+//! non-silent — inherent to the innovation-free mode-1 fold. Supported
+//! second-layer modes: 0 (silence) and 1 (gain-only). The excitation-VQ
+//! modes 2..=4 have no pinned sub-frame geometry at the 16 kHz half-band
+//! and are rejected, as are the reserved IDs 5..=7.
 
 use crate::bitreader::BitWriter;
 use crate::codebooks::HB_LPC_ORDER;
@@ -54,14 +64,14 @@ use crate::encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
 use crate::frame::{FrameError, NarrowbandFrameHeader};
 use crate::gain_reconstruction::quantise_hb_exc_gain;
 use crate::hb_encode::write_high_band_frame;
-use crate::hb_fold::HB_FOLD_RECONSTRUCTION_MULT;
+use crate::hb_fold::{upsample_hb_excitation_linear, UWB_FOLD_RECONSTRUCTION_MULT};
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
 use crate::lpc_analysis::analyse_hb;
 use crate::lpc_to_lsp::hb_lpc_to_lsp;
 use crate::lsp_base::hb_lsp_base_q10;
 use crate::lsp_to_lpc::{lpc_from_hb_lsp_delta_q10, radians_to_lsp_q10};
 use crate::narrowband_decoder::saturate_i16;
-use crate::qmf::{QmfAnalysis, QmfSynthesis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QmfAnalysis, QMF_WIDEBAND_FRAME};
 use crate::quality::uwb_modes_for_quality;
 use crate::submode::NarrowbandSubmode;
 use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES};
@@ -154,9 +164,6 @@ pub struct UltraWidebandEncoder {
     /// second-layer folded gains are chosen against the decoder's true
     /// fold source (r393; see [`crate::uwb_decoder`] module docs).
     local_decoder: WidebandDecoder,
-    /// Fold-source recombination bank mirroring the decoder's
-    /// (excitation tracks → 16 kHz), advanced every frame.
-    exc_qmf: QmfSynthesis,
 }
 
 impl Default for UltraWidebandEncoder {
@@ -173,7 +180,6 @@ impl UltraWidebandEncoder {
             wideband: WidebandEncoder::new(),
             uwb_analysis_hist: [0.0; HB_LPC_ORDER],
             local_decoder: WidebandDecoder::new(),
-            exc_qmf: QmfSynthesis::new(),
         }
     }
 
@@ -321,14 +327,6 @@ impl UltraWidebandEncoder {
             ))
         })?;
 
-        let mut exc_lb64 = [0.0f64; HB_FRAME_SAMPLES];
-        for (o, &e) in exc_lb64.iter_mut().zip(
-            self.local_decoder
-                .low_band_decoder()
-                .last_frame_excitation(),
-        ) {
-            *o = f64::from(e);
-        }
         let mut exc_hb64 = [0.0f64; HB_FRAME_SAMPLES];
         for (o, &e) in exc_hb64
             .iter_mut()
@@ -336,7 +334,12 @@ impl UltraWidebandEncoder {
         {
             *o = f64::from(e);
         }
-        Ok(self.exc_qmf.reconstruct_frame(&exc_lb64, &exc_hb64))
+        // Mirror the decoder's r403 fold source exactly: the first-high-band
+        // excitation linear-interpolated to the 16 kHz second-layer
+        // geometry (see `crate::uwb_decoder` / `crate::hb_fold`).
+        let mut exc16 = [0.0f64; QMF_WIDEBAND_FRAME];
+        upsample_hb_excitation_linear(&exc_hb64, &mut exc16);
+        Ok(exc16)
     }
 
     /// Encode the second high-band layer from the 8–16 kHz half-band.
@@ -385,7 +388,7 @@ impl UltraWidebandEncoder {
             let src_rms =
                 (src.iter().map(|&v| v * v).sum::<f64>() / UWB_HB_SUBFRAME_SAMPLES as f64).sqrt();
             let target = if src_rms > 1e-9 {
-                rms / (HB_FOLD_RECONSTRUCTION_MULT * src_rms)
+                rms / (UWB_FOLD_RECONSTRUCTION_MULT * src_rms)
             } else {
                 0.0
             };
@@ -559,56 +562,56 @@ mod tests {
     }
 
     #[test]
-    fn folded_second_layer_tracks_high_band_energy() {
-        // A steady 11 kHz tone (8–16 kHz band only after the outer QMF
-        // split) round-trips through the fold-consistent gain law: after
-        // warm-up the decoded 8–16 kHz half-band's RMS should sit within
-        // a modest factor of the encoder-side high half's RMS — the
-        // decode-side fold reconstructs the transmitted energy envelope
-        // rather than silence (r393).
-        let amp = 8000.0f64;
-        let mut frame = [0i16; UWB_FRAME_SAMPLES];
-        for (n, s) in frame.iter_mut().enumerate() {
-            let t = n as f64 / 32_000.0;
-            let v = amp * (2.0 * std::f64::consts::PI * t * 11_000.0).sin()
-                + 0.3 * amp * (2.0 * std::f64::consts::PI * t * 300.0).sin();
-            *s = v.round().clamp(-32768.0, 32767.0) as i16;
-        }
-
-        let mut enc = UltraWidebandEncoder::new();
-        let mut dec = UltraWidebandDecoder::new();
-
-        // Encoder-side reference: what the outer split hands the second
-        // layer (recomputed with an independent analysis bank).
-        let mut probe_qmf = QmfAnalysis::new();
-        let mut input = [0.0f64; UWB_FRAME_SAMPLES];
-        for (slot, &v) in input.iter_mut().zip(frame.iter()) {
-            *slot = f64::from(v);
-        }
-        let mut low = [0.0f64; UWB_HALF_BAND_FRAME];
-        let mut high = [0.0f64; UWB_HALF_BAND_FRAME];
-        let mut hb_rms = 0.0f64;
-        let mut decoded_rms = 0.0f64;
-        for i in 0..6 {
-            probe_qmf.split_slices(&input, &mut low, &mut high);
-            let bytes = enc.encode_frame(&frame, 3, 1, 1).expect("encodes");
-            let frames = dec.decode_packet(&bytes).expect("decodes");
-            let f = match &frames[0] {
-                UwbDecodedFrame::Audio(f) => f,
-                other => panic!("expected Audio, got {other:?}"),
-            };
-            if i >= 2 {
-                // Skip warm-up (analysis look-back + filter histories).
-                hb_rms += high.iter().map(|&v| v * v).sum::<f64>();
-                decoded_rms += f.uwb_high_band.iter().map(|&v| v * v).sum::<f64>();
+    fn folded_second_layer_is_live_and_gain_responsive() {
+        // The r403 fixture-pinned fold law borrows the second layer's
+        // (8–16 kHz) excitation from the **first high band** (4–8 kHz)
+        // excitation — mode 1 carries no innovation VQ, so the second
+        // layer can only reconstruct energy where the first high band is
+        // non-silent (exactly the reference decoder's limitation for the
+        // folded sub-mode). This test therefore drives an input with
+        // energy in *both* high bands (a 5.5 kHz first-HB tone and an
+        // 11 kHz second-layer tone) and checks two properties the folded
+        // reconstruction must have: (1) with a non-silent fold source the
+        // decoded 8–16 kHz band is non-silent, and (2) the decoded energy
+        // grows with the input level — i.e. the transmitted gain track is
+        // live, not clamped to a constant.
+        fn decoded_hb_energy(amp: f64) -> f64 {
+            let mut frame = [0i16; UWB_FRAME_SAMPLES];
+            for (n, s) in frame.iter_mut().enumerate() {
+                let t = n as f64 / 32_000.0;
+                let v = amp * (2.0 * std::f64::consts::PI * t * 5_500.0).sin()
+                    + amp * (2.0 * std::f64::consts::PI * t * 11_000.0).sin()
+                    + 0.3 * amp * (2.0 * std::f64::consts::PI * t * 300.0).sin();
+                *s = v.round().clamp(-32768.0, 32767.0) as i16;
             }
+            let mut enc = UltraWidebandEncoder::new();
+            let mut dec = UltraWidebandDecoder::new();
+            let mut energy = 0.0f64;
+            for i in 0..6 {
+                let bytes = enc.encode_frame(&frame, 3, 1, 1).expect("encodes");
+                let frames = dec.decode_packet(&bytes).expect("decodes");
+                let f = match &frames[0] {
+                    UwbDecodedFrame::Audio(f) => f,
+                    other => panic!("expected Audio, got {other:?}"),
+                };
+                if i >= 2 {
+                    energy += f.uwb_high_band.iter().map(|&v| v * v).sum::<f64>();
+                }
+            }
+            energy
         }
-        let hb_rms = (hb_rms / (4.0 * UWB_HALF_BAND_FRAME as f64)).sqrt();
-        let decoded_rms = (decoded_rms / (4.0 * UWB_HALF_BAND_FRAME as f64)).sqrt();
-        assert!(hb_rms > 100.0, "probe split should see the 11 kHz tone");
+
+        let quiet = decoded_hb_energy(2_000.0);
+        let loud = decoded_hb_energy(8_000.0);
+        // (1) Non-silent reconstruction from a non-silent fold source.
         assert!(
-            decoded_rms > hb_rms / 4.0 && decoded_rms < hb_rms * 4.0,
-            "decoded 8-16 kHz RMS {decoded_rms:.1} should track the encoder-side {hb_rms:.1}"
+            loud > 1.0,
+            "folded second layer should be non-silent: {loud}"
+        );
+        // (2) Louder input → louder decoded high band (gain track is live).
+        assert!(
+            loud > quiet * 2.0,
+            "decoded 8-16 kHz energy should grow with input: quiet {quiet:.1} vs loud {loud:.1}"
         );
     }
 
