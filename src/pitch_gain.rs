@@ -30,6 +30,22 @@
 //! pre-computed term used during the codebook search; the decoder
 //! does not need it.
 //!
+//! ## Column ↔ lag association (fixture-arbitrated, round r410)
+//!
+//! Neither the manual nor the `.meta` sidecars pin **which stored
+//! column multiplies which lag** in Eq. 9.1. The two candidate
+//! readings (column 0 ↔ `e[n−T−1]` vs column 0 ↔ `e[n−T+1]`) were
+//! arbitrated black-box against the staged narrowband reference
+//! decodes (`tests/fixtures/nb-conformance/`): the **reversed**
+//! association — column 0 multiplies `e[n−T+1]`, column 2 multiplies
+//! `e[n−T−1]` — scores 13.5–14.4 dB absolute SNR across the VQ
+//! sub-modes (energy ratio ≈ 0.98) where the direct reading scores
+//! 2.8–5.6 dB with half the reference energy. [`reconstruct`]
+//! therefore maps `taps[0] = col2`, `taps[1] = col1`, `taps[2] = col0`
+//! (post-bias), keeping the [`PitchGainTaps`] convention `taps[0]` ↔
+//! `e[n−T−1]`, `taps[1]` ↔ `e[n−T]`, `taps[2]` ↔ `e[n−T+1]` for every
+//! downstream consumer.
+//!
 //! ## Numeric range
 //!
 //! Stored entries are signed bytes (the CSVs widen them to `i16` for
@@ -137,6 +153,10 @@ pub fn reconstruct(index: u8, quant: PitchGainQuant) -> Option<PitchGainTaps> {
 }
 
 /// Shared lookup-plus-bias helper used by both codebook regimes.
+///
+/// Applies the documented `+32` bias and the **fixture-arbitrated
+/// column reversal** (module docs): stored column 0 is the `e[n−T+1]`
+/// tap, so it lands in `taps[2]`; stored column 2 lands in `taps[0]`.
 fn lookup_biased(
     codebook: &[[i16; PITCH_GAIN_COLS]],
     index: u8,
@@ -149,7 +169,7 @@ fn lookup_biased(
     let row = codebook[idx];
     let mut taps = [0i16; PITCH_GAIN_TAPS];
     for (i, slot) in taps.iter_mut().enumerate() {
-        *slot = row[i] + PITCH_GAIN_BIAS;
+        *slot = row[PITCH_GAIN_TAPS - 1 - i] + PITCH_GAIN_BIAS;
     }
     Some(PitchGainTaps { taps })
 }
@@ -190,28 +210,29 @@ mod tests {
     #[test]
     fn vq5bit_row_1_matches_csv_with_bias() {
         // Row 1 of the 5-bit codebook (from the staged CSV) is
-        // `-31, -58, -16, 22`. After +32 bias the taps are
-        // (1, -26, 16); column 3 (search aid 22) is discarded.
+        // `-31, -58, -16, 22`. After +32 bias and the r410 column
+        // reversal the taps are (16, -26, 1); column 3 (search aid 22)
+        // is discarded.
         let raw = pitch_gain_5bit()[1];
         let expected = [
-            raw[0] + PITCH_GAIN_BIAS,
-            raw[1] + PITCH_GAIN_BIAS,
             raw[2] + PITCH_GAIN_BIAS,
+            raw[1] + PITCH_GAIN_BIAS,
+            raw[0] + PITCH_GAIN_BIAS,
         ];
         let taps = reconstruct(1, PitchGainQuant::Vq5Bit).unwrap();
         assert_eq!(taps.taps, expected);
         // And cross-check against the literal CSV values (regression
         // guard if the table extraction changes upstream).
-        assert_eq!(taps.taps, [1, -26, 16]);
+        assert_eq!(taps.taps, [16, -26, 1]);
     }
 
     #[test]
     fn vq7bit_row_0_matches_csv_with_bias() {
         let raw = pitch_gain_7bit()[0];
         let expected = [
-            raw[0] + PITCH_GAIN_BIAS,
-            raw[1] + PITCH_GAIN_BIAS,
             raw[2] + PITCH_GAIN_BIAS,
+            raw[1] + PITCH_GAIN_BIAS,
+            raw[0] + PITCH_GAIN_BIAS,
         ];
         let taps = reconstruct(0, PitchGainQuant::Vq7Bit).unwrap();
         assert_eq!(taps.taps, expected);
@@ -225,9 +246,9 @@ mod tests {
         assert_eq!(
             taps.unwrap().taps,
             [
-                raw_31[0] + PITCH_GAIN_BIAS,
-                raw_31[1] + PITCH_GAIN_BIAS,
                 raw_31[2] + PITCH_GAIN_BIAS,
+                raw_31[1] + PITCH_GAIN_BIAS,
+                raw_31[0] + PITCH_GAIN_BIAS,
             ]
         );
     }
@@ -240,9 +261,9 @@ mod tests {
         assert_eq!(
             taps.unwrap().taps,
             [
-                raw_127[0] + PITCH_GAIN_BIAS,
-                raw_127[1] + PITCH_GAIN_BIAS,
                 raw_127[2] + PITCH_GAIN_BIAS,
+                raw_127[1] + PITCH_GAIN_BIAS,
+                raw_127[0] + PITCH_GAIN_BIAS,
             ]
         );
     }
@@ -301,24 +322,22 @@ mod tests {
         // invariant holds for every row of both codebooks.
         for (idx, raw) in pitch_gain_5bit().iter().enumerate() {
             let taps = reconstruct(idx as u8, PitchGainQuant::Vq5Bit).unwrap();
-            for (t, (&out_v, &raw_v)) in taps
-                .taps
-                .iter()
-                .zip(raw.iter().take(PITCH_GAIN_TAPS))
-                .enumerate()
-            {
-                assert_eq!(out_v, raw_v + PITCH_GAIN_BIAS, "5-bit row {idx} tap {t}");
+            for t in 0..PITCH_GAIN_TAPS {
+                assert_eq!(
+                    taps.taps[t],
+                    raw[PITCH_GAIN_TAPS - 1 - t] + PITCH_GAIN_BIAS,
+                    "5-bit row {idx} tap {t}"
+                );
             }
         }
         for (idx, raw) in pitch_gain_7bit().iter().enumerate() {
             let taps = reconstruct(idx as u8, PitchGainQuant::Vq7Bit).unwrap();
-            for (t, (&out_v, &raw_v)) in taps
-                .taps
-                .iter()
-                .zip(raw.iter().take(PITCH_GAIN_TAPS))
-                .enumerate()
-            {
-                assert_eq!(out_v, raw_v + PITCH_GAIN_BIAS, "7-bit row {idx} tap {t}");
+            for t in 0..PITCH_GAIN_TAPS {
+                assert_eq!(
+                    taps.taps[t],
+                    raw[PITCH_GAIN_TAPS - 1 - t] + PITCH_GAIN_BIAS,
+                    "7-bit row {idx} tap {t}"
+                );
             }
         }
     }

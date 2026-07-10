@@ -6,7 +6,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Round r410: **3-tap pitch-gain VQ column ↔ lag association reversed**
+  (fixture-arbitrated). The staged pitch-gain codebook `.meta` labels
+  columns 0–2 `g0, g1, g2` but does not pin which column multiplies
+  which Eq. 9.1 lag; the crate's original direct reading (column 0 ↔
+  `e[n−T−1]`) decoded the VQ sub-modes at 2.8–5.6 dB absolute SNR with
+  **half** the reference energy. Black-box arbitration against the new
+  `tests/fixtures/nb-conformance/` reference decodes pins the reversed
+  association (column 0 ↔ `e[n−T+1]`): `pitch_gain::reconstruct` now
+  maps `taps[0] = col2, taps[1] = col1, taps[2] = col0`, lifting the VQ
+  sub-modes to 13.4–14.4 dB / 0.98 energy ratio.
+- Round r410: **in-sub-frame pitch recursion for short periods**
+  (`gain_scaled_pitch_subframe_recursive`, now used by
+  `NarrowbandDecoder`). For `T < 40` the §9.2 reads at `n − T + off ≥ 0`
+  resolve to the **pitch-only partial** already produced inside the
+  current sub-frame (with the tap gains bounded to a 0.9 total for
+  those recursive reads — the staged `provenance/02` 0.9
+  pitch-coefficient constant family), not to the manual's
+  `n − 2T + off` repeat rule. Arbitrated black-box across ten staged
+  reference decodes: the repeat rule scores 6.8 / 9.3 dB on the
+  OL-pitch sub-modes 8 / 2 where the recursion scores 12.7–13.4 dB;
+  recursing over the composed excitation instead of the pitch-only
+  partial overshoots energy 2.8×. Fine-pitch sub-modes are within
+  ±0.4 dB of the repeat rule (recorded residual ambiguity).
+
 ### Added
+
+- Round r410: **narrowband decode-conformance matrix**
+  (`tests/nb_conformance_fixture.rs` + `tests/fixtures/nb-conformance/`)
+  — ten black-box `speexenc`/`speexdec --no-enh` reference fixtures
+  (tone-mix at qualities 1/2/3/5/7/9 = Table 9.2 sub-modes
+  8/2/3/4/5/6, plus a pitch-gliding speech-like source at qualities
+  1/2/3/7), each CI-gated on absolute SNR / correlation / energy-ratio
+  floors, raw and through the fitted `OutputHighpass`, with the
+  40-sample look-ahead alignment pinned. Measured r410: raw
+  10.5–14.4 dB (energy 0.95–1.08), high-passed 13.1–19.5 dB — up from
+  2.8–6.8 dB (energy 0.50–1.02) before the two pitch-path fixes.
 
 - Round r393: **WB mode-1 folded high-band excitation — externally
   arbitrated and wired** (`hb_fold` module; closes the #170 fold-law

@@ -68,7 +68,7 @@ use crate::adaptive_codebook::ExcitationBuffer;
 use crate::fixed_codebook_gain::FixedCodebookGainIndices;
 use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
 use crate::gain_scaled_innovation::gain_scaled_innovation_from_indices;
-use crate::gain_scaled_pitch::gain_scaled_pitch_subframe;
+use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_recursive;
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::lsp_to_lpc::{subframe_lpc_set_with_base, LPC_ORDER};
 use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MIN};
@@ -299,14 +299,6 @@ impl NarrowbandDecoder {
         for sf_idx in 0..SUBFRAMES_PER_FRAME {
             let lpc: [f64; LPC_ORDER] = lpc_sets[sf_idx];
 
-            // Pitch (adaptive-codebook) contribution p[n].
-            let taps = Self::pitch_taps(body, submode, sf_idx);
-            let p = match Self::pitch_period(body, submode, sf_idx) {
-                Some(period) => gain_scaled_pitch_subframe(period, taps, &self.excitation)
-                    .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?,
-                None => [0.0f32; SUBFRAME_SAMPLES],
-            };
-
             // Innovation (fixed-codebook) contribution c[n].
             let c_raw = body.subframes[sf_idx]
                 .innovation_sub_vector(submode)
@@ -316,6 +308,18 @@ impl NarrowbandDecoder {
             let gain_indices = FixedCodebookGainIndices::from_body(body, submode, sf_idx)
                 .ok_or(NarrowbandDecodeError::GainIndicesUnavailable)?;
             let c = gain_scaled_innovation_from_indices(&c_raw, gain_indices);
+
+            // Pitch (adaptive-codebook) contribution p[n], with the
+            // r410 fixture-arbitrated in-sub-frame recursion for short
+            // pitch periods (see `gain_scaled_pitch_subframe_recursive`).
+            let taps = Self::pitch_taps(body, submode, sf_idx);
+            let p = match Self::pitch_period(body, submode, sf_idx) {
+                Some(period) => {
+                    gain_scaled_pitch_subframe_recursive(period, taps, &self.excitation)
+                        .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?
+                }
+                None => [0.0f32; SUBFRAME_SAMPLES],
+            };
 
             // Full excitation e[n] = p[n] + c[n].
             let e = gain_scaled_excitation_subframe(&p, &c);

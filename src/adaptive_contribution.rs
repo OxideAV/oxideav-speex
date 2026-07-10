@@ -514,16 +514,18 @@ mod tests {
         for i in 0..150 {
             buffer.push((i as i16 - 75) * 5);
         }
-        // 5-bit codebook index 1 → (1, -26, 16) per the round-r208 pin.
+        // 5-bit codebook index 1 → (16, -26, 1) per the r410
+        // column-reversal pin (`pitch_gain` module docs).
         let taps = reconstruct(1, PitchGainQuant::Vq5Bit).unwrap();
+        assert_eq!(taps.taps, [16, -26, 1]);
         let out = adaptive_contribution_subframe(80, taps, &buffer).unwrap();
         // Pin n=0 against a direct dot-product evaluation.
         //   lookbacks for T=80, n=0: -81, -80, -79.
         //   buffer.lookup(-k) = (150-k-75) * 5 = (75-k) * 5.
-        //   ea[0] = 1 * (75-81)*5 + (-26) * (75-80)*5 + 16 * (75-79)*5
-        //         = 1 * -30 + (-26) * -25 + 16 * -20
-        //         = -30 + 650 + -320 = 300.
-        assert_eq!(out[0], 300, "decoder composition ea[0] mismatch");
+        //   ea[0] = 16 * (75-81)*5 + (-26) * (75-80)*5 + 1 * (75-79)*5
+        //         = 16 * -30 + (-26) * -25 + 1 * -20
+        //         = -480 + 650 + -20 = 150.
+        assert_eq!(out[0], 150, "decoder composition ea[0] mismatch");
         // Smoke-test the rest are finite + within the documented
         // headroom band.
         for (n, &v) in out.iter().enumerate() {
