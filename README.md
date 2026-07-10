@@ -33,9 +33,11 @@ three rate classes (all CI-gated, absolute — no fitted gain):
   fixture set that arbitrated the r410 **crossover-shaped folded
   high-band law** (see `hb_fold`).
 * **Ultra-wideband** (round r403, `tests/uwb_fold_geometry_fixture.rs`):
-  the 3-layer fixture at 19.1 dB / 0.994 full-signal 32 kHz, embedded
-  wideband layers 21.7 dB / 0.997, folded second layer correlation
-  0.93.
+  the 3-layer tone fixture at 19.1 dB / 0.994 full-signal 32 kHz,
+  embedded wideband layers 21.7 dB / 0.997, folded second layer
+  correlation 0.93. On **speech-like material** the 3-layer path is
+  known-divergent (2.0 dB, r410 — a distinct outer-layer mechanism,
+  tracked by `tests/uwb_conformance_fixture.rs`; recorded follow-up).
 
 What is implemented and tested:
 

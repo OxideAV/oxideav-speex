@@ -50,6 +50,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round r410: **ultra-wideband speech tracking gate**
+  (`tests/uwb_conformance_fixture.rs` + `tests/fixtures/uwb-conformance/`)
+  — a 32 kHz speech-like quality-4 fixture pinning a newly measured
+  **known divergence** of the 3-layer path on non-stationary material
+  (2.0 dB / 0.78 corr / 1.66× energy full-signal; the embedded 0–8 kHz
+  half scores 2.3 dB where the same code scores 15.6 dB on the
+  standalone wideband speech fixture, and the 8–16 kHz folded layer
+  overshoots ≈10×). The divergence is *not* the inner fold law (shaping
+  the outer fold by analogy regresses the tone anchor without fixing
+  this) — recorded follow-up; the gate holds tracking floors.
+
 - Round r410: **wideband decode-conformance matrix**
   (`tests/wb_conformance_fixture.rs` + `tests/fixtures/wb-conformance/`)
   — speech-like (pitch-glide) 16 kHz fixtures at qualities 4/6/8
