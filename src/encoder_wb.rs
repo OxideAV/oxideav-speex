@@ -354,11 +354,12 @@ impl WidebandEncoder {
                 }
                 None => {
                     // Mode 1: gain-only — the decoder reconstructs by
-                    // folding the low-band excitation
-                    // (e = K·g·(−1)ⁿ·e_lb, r393 fixture-pinned law), so
-                    // the transmitted gain is the fold-consistent target
-                    // g = rms(residual)/(K·rms(e_lb)) against the
-                    // embedded narrowband encoder's locally
+                    // folding the low-band excitation with the r410
+                    // crossover-shaped law (e = C·g·|A_hb(π)|^E·(−1)ⁿ·
+                    // e_lb, crate::hb_fold docs), so the transmitted
+                    // gain is the fold-consistent target
+                    // g = rms(residual)/(C·|A_hb(π)|^E·rms(e_lb))
+                    // against the embedded narrowband encoder's locally
                     // reconstructed excitation (the analysis-by-
                     // synthesis mirror of the decoder's fold source).
                     let src = self.low_band.last_frame_excitation();
@@ -366,8 +367,9 @@ impl WidebandEncoder {
                     let src_rms = (sf_src.iter().map(|&v| v * v).sum::<f64>()
                         / HB_SUBFRAME_SAMPLES as f64)
                         .sqrt();
-                    let target = if src_rms > 1e-9 {
-                        r_rms / (crate::hb_fold::HB_FOLD_RECONSTRUCTION_MULT * src_rms)
+                    let unit_scale = crate::hb_fold::folded_hb_scale(1.0, &lpc_sets[sf]);
+                    let target = if src_rms > 1e-9 && unit_scale > 1e-12 {
+                        r_rms / (unit_scale * src_rms)
                     } else {
                         0.0
                     };

@@ -32,8 +32,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   partial overshoots energy 2.8×. Fine-pitch sub-modes are within
   ±0.4 dB of the repeat rule (recorded residual ambiguity).
 
+- Round r410: **crossover-shaped folded high-band law**
+  (`hb_fold::folded_hb_scale`, superseding the flat r393 constant in
+  the decode + encode paths). The r393 `K = 1/(2·√2)` matched the
+  near-stationary tone fixture but overshot real speech by up to 130×
+  per frame in envelope troughs (`wb_q4` fixture: −12.9 dB full-signal,
+  20× energy). Synthetic oracle streams sweeping the 12-bit high-band
+  LSP envelope against the reference decoder pin the missing factor as
+  the envelope's **magnitude response at the 4 kHz QMF crossover**:
+  `scale = min(0.17·|A_hb(π)|, 0.35355)·g` — linear (slope
+  0.171…0.189) over the probed `|A_hb(π)| ≤ 1.4` region, saturating at
+  the r393 constant where both real-stream anchors sit
+  (`wb-mode1-folded` 2.4…3.6, `uwb-fold-geometry` embedded layer 3.56;
+  both unchanged to within 0.01 dB). `wb_q4` moves to 15.6 dB /
+  1.01× energy. A residual per-frame factor ≤ ≈6× on some speech
+  frames remains unattributed (follow-up).
+
 ### Added
 
+- Round r410: **wideband decode-conformance matrix**
+  (`tests/wb_conformance_fixture.rs` + `tests/fixtures/wb-conformance/`)
+  — speech-like (pitch-glide) 16 kHz fixtures at qualities 4/6/8
+  (Table 10.2 ladders NB 4 + HB 1, NB 5 + HB 2, NB 6 + HB 3), the first
+  reference comparison of the high-band excitation-VQ sub-modes 2/3
+  (18.3 / 18.2 dB full-signal) and of the folded sub-mode on speech
+  (15.6 dB), CI-gated with per-fixture alignment pins.
 - Round r410: **narrowband decode-conformance matrix**
   (`tests/nb_conformance_fixture.rs` + `tests/fixtures/nb-conformance/`)
   — ten black-box `speexenc`/`speexdec --no-enh` reference fixtures

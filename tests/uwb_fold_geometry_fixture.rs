@@ -148,6 +148,7 @@ fn uwb_three_layer_decode_matches_reference() {
     // --- Full-signal absolute conformance (measured r403: 19.1 dB /
     // corr 0.994; floors leave margin for platform float variance). ---
     let (snr, corr) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("UWB full: {snr:.2} dB corr {corr:.5}");
     assert!(snr >= 16.0, "full-signal absolute SNR {snr:.2} dB < 16 dB");
     assert!(corr >= 0.985, "full-signal correlation {corr:.4} < 0.985");
 
@@ -168,6 +169,7 @@ fn uwb_three_layer_decode_matches_reference() {
     // Low 16 kHz half = the embedded wideband layers (NB + first HB) —
     // externally validated end-to-end for the first time (r403).
     let (lsnr, lcorr) = score(&our_low, &ref_low, REF_LEAD_HALF);
+    println!("UWB low(0-8k WB layers): {lsnr:.2} dB corr {lcorr:.5}");
     assert!(
         lsnr >= 18.0,
         "embedded wideband (low 16 kHz) SNR {lsnr:.2} dB < 18 dB"
@@ -179,6 +181,7 @@ fn uwb_three_layer_decode_matches_reference() {
 
     // Second folded layer (8–16 kHz) — the r403 fold-source gate proper.
     let (hsnr, hcorr) = score(&our_high, &ref_high, REF_LEAD_HALF);
+    println!("UWB high(8-16k fold): {hsnr:.2} dB corr {hcorr:.5}");
     assert!(hsnr >= 6.0, "second-layer (folded) SNR {hsnr:.2} dB < 6 dB");
     assert!(hcorr >= 0.88, "second-layer correlation {hcorr:.4} < 0.88");
     let he_ours: f64 = our_high.iter().map(|v| v * v).sum();
@@ -208,6 +211,7 @@ fn output_highpass_improves_reference_match() {
     let mut hp = OutputHighpass::for_sample_rate(32_000);
     hp.process_slice(&mut ours);
     let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("UWB hp: raw {raw_snr:.2} -> {hp_snr:.2} dB corr {hp_corr:.5}");
 
     assert!(
         hp_snr > raw_snr + 1.0,

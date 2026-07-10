@@ -294,7 +294,8 @@ pub fn synthesise_high_band_frame_folded_exc(
             lb.copy_from_slice(
                 &lb_excitation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
             );
-            crate::hb_fold::folded_hb_excitation_subframe(&lb, gain)
+            // r410 crossover-shaped folded law (crate::hb_fold docs).
+            crate::hb_fold::folded_hb_excitation_subframe_shaped(&lb, gain, &lpc)
         } else {
             let e_hb = crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body(
                 body, submode, sf,

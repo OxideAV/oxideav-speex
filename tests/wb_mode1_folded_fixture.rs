@@ -147,6 +147,7 @@ fn folded_high_band_decode_matches_reference() {
     // --- Full-signal absolute conformance (measured r393: 16.7 dB /
     // corr 0.9894; floors leave margin for platform float variance). ---
     let (snr, corr) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("WB full: {snr:.2} dB corr {corr:.5}");
     assert!(snr >= 14.0, "full-signal absolute SNR {snr:.2} dB < 14 dB");
     assert!(corr >= 0.985, "full-signal correlation {corr:.4} < 0.985");
 
@@ -155,6 +156,7 @@ fn folded_high_band_decode_matches_reference() {
     let e_ours: f64 = ours.iter().map(|v| v * v).sum();
     let e_ref: f64 = reference.iter().map(|v| v * v).sum();
     let ratio = e_ours / e_ref;
+    println!("WB energy ratio: {ratio:.4}");
     assert!(
         (0.85..=1.15).contains(&ratio),
         "decode/reference energy ratio {ratio:.4} outside [0.85, 1.15]"
@@ -166,6 +168,7 @@ fn folded_high_band_decode_matches_reference() {
     let (our_low, our_high) = split_bands(&ours);
 
     let (hsnr, hcorr) = score(&our_high, &ref_high, REF_LEAD_HALF);
+    println!("WB high: {hsnr:.2} dB corr {hcorr:.5}");
     assert!(
         hsnr >= 30.0,
         "high-band (folded) absolute SNR {hsnr:.2} dB < 30 dB"
@@ -173,6 +176,7 @@ fn folded_high_band_decode_matches_reference() {
     assert!(hcorr >= 0.999, "high-band correlation {hcorr:.4} < 0.999");
 
     let (lsnr, lcorr) = score(&our_low, &ref_low, REF_LEAD_HALF);
+    println!("WB low: {lsnr:.2} dB corr {lcorr:.5}");
     assert!(lsnr >= 12.0, "low-band absolute SNR {lsnr:.2} dB < 12 dB");
     assert!(lcorr >= 0.975, "low-band correlation {lcorr:.4} < 0.975");
 
@@ -206,6 +210,7 @@ fn output_highpass_improves_reference_match() {
     let mut hp = OutputHighpass::for_sample_rate(16_000);
     hp.process_slice(&mut ours);
     let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("WB hp: raw {raw_snr:.2} -> {hp_snr:.2} dB corr {hp_corr:.5}");
 
     assert!(
         hp_snr > raw_snr + 0.5,
