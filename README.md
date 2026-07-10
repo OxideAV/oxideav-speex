@@ -13,16 +13,31 @@ material staged at
 
 **Clean-room rebuild in progress — externally validated decoder.** The
 full decode path is not yet bit-exact, and the framework codec entry
-points still return `Error::NotImplemented`; as of round r393 the
-wideband decode is **externally validated against the reference
-decoder** on the staged `wb-mode1-folded` fixture (16.7 dB absolute
-SNR / 0.989 correlation full-signal, 38.9 dB / 0.99994 on the folded
-high band, absolute level calibrated to 0.97× — CI-gated), and as of
-round r403 the **ultra-wideband 3-layer decode** is likewise externally
-validated on the staged `uwb-fold-geometry` fixture (19.1 dB / 0.994
-full-signal 32 kHz, embedded wideband layers 21.6 dB / 0.997, folded
-second layer correlation 0.93 — CI-gated). What is implemented and
-tested:
+points still return `Error::NotImplemented`; the decoder is
+**externally validated against the reference decoder** across all
+three rate classes (all CI-gated, absolute — no fitted gain):
+
+* **Narrowband** (round r410, `tests/nb_conformance_fixture.rs`):
+  ten black-box reference-decoder (`--no-enh`) fixtures — Table 9.2 sub-modes
+  8/2/3/4/5/6 on a tone mix plus a pitch-gliding speech-like source —
+  decode at **10.5–14.4 dB** absolute SNR (energy ratio 0.95–1.08),
+  **13.1–19.5 dB** through the fitted output high-pass; up from
+  2.8–6.8 dB (half the reference energy) before the round's two
+  pitch-path fixes (VQ column↔lag reversal + in-sub-frame recursion).
+* **Wideband** (r393 tone gate + r410 speech matrix,
+  `tests/wb_mode1_folded_fixture.rs` / `tests/wb_conformance_fixture.rs`):
+  the tone fixture at 16.7 dB full-signal / **38.9 dB, corr 0.99994**
+  on the folded high band; speech-like fixtures at qualities 4/6/8 at
+  **15.6 / 18.3 / 18.2 dB** full-signal — the first reference
+  comparison of the high-band excitation-VQ sub-modes 2/3, and the
+  fixture set that arbitrated the r410 **crossover-shaped folded
+  high-band law** (see `hb_fold`).
+* **Ultra-wideband** (round r403, `tests/uwb_fold_geometry_fixture.rs`):
+  the 3-layer fixture at 19.1 dB / 0.994 full-signal 32 kHz, embedded
+  wideband layers 21.7 dB / 0.997, folded second layer correlation
+  0.93.
+
+What is implemented and tested:
 
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
@@ -196,19 +211,23 @@ tested:
   header's mode field to the embedded sub-band recursion descriptor.
 
 * **WB mode-1 folded high-band excitation — externally arbitrated**
-  (round r393, `hb_fold`). The gain-only high-band sub-mode's
-  reconstruction law is now pinned against the staged
-  `docs/audio/speex/fixtures/wb-mode1-folded/` reference decode:
-  `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]`, where `e_lb` is the embedded
-  narrowband frame's composed excitation
+  (rounds r393 + r410, `hb_fold`). The gain-only high-band sub-mode's
+  reconstruction law is pinned against the staged reference decodes:
+  `e_hb[n] = min(C·|A_hb(π)|, K)·g·(−1)ⁿ·e_lb[n]`, where `e_lb` is the
+  embedded narrowband frame's composed excitation
   (`NarrowbandDecoder::last_frame_excitation`), `(−1)ⁿ` is the
   sample-level spectral fold (manual §10.2's QMF axis reversal;
   candidate conventions without it score ≤ 0.31 high-band correlation
   against the reference vs **0.9999** for this law), `g` the staged
-  32-level `fold_quant_bound` level and `K =
-  HB_FOLD_RECONSTRUCTION_MULT` (adopted `1/(2·√2)`, inside the
-  measured `0.3516…0.3549` window). Wired through
-  `synthesise_high_band_frame_folded` into every wideband decode path.
+  32-level `fold_quant_bound` level, and the scale is the r410
+  **crossover-shaped** factor: proportional (slope `C = 0.17`,
+  oracle-measured 0.171…0.189) to the high-band envelope's magnitude
+  response at the 4 kHz QMF crossover, saturating at the r393 flat
+  constant `K = 1/(2·√2)` where both real-stream anchors sit. The flat
+  law overshot speech troughs by up to 130× per frame (`wb_q4` fixture
+  −12.9 dB → 15.6 dB with the shaping). Wired through
+  `synthesise_high_band_frame_folded` into every wideband decode path
+  and mirrored in the WB encoder's mode-1 gain selection.
 * **Absolute signal-domain calibration** (round r393,
   `INNOVATION_CODEBOOK_SCALE`). The same fixture calibrates the
   `signed char` innovation codebook rows as **Q5 fractions**
@@ -489,17 +508,24 @@ mode-1 fixture.
   composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a split
   matching both the 80-bit budget *and* the 40-sample count, so the
   binding stays a recorded docs gap.)
-* **Sub-1 % constants pending a bit-exact low band** — the r393 fixture
-  arbitration (below) leaves two constants pinned only to ≈ ±1 %: the
-  exact fold constant `K` (adopted `1/(2·√2)` inside the measured
-  `0.3516…0.3549` window) and the exact-vs-adopted `1/32` innovation
-  row scale (measured `0.03154`). Both windows collapse once the
-  remaining low-band envelope deltas close. Two measured residuals
-  remain unattributed: the reference's default **output high-pass**
-  (manual §Codec-control `SPEEX_SET_HIGHPASS`, default on — transfer
-  not staged; measured ≈ 1st/2nd-order, cutoff ≈ 30 Hz, +1.6 dB if
-  fitted) and a frame-rate AM sideband difference around strong tones
-  (≈ 1.25 kHz on the fixture).
+* **Sub-1 % constants pending a bit-exact low band** — the fixture
+  arbitrations leave constants pinned only to a few %: the fold
+  ceiling `K` (adopted `1/(2·√2)` inside the measured `0.3516…0.3549`
+  window), the crossover slope `C = 0.17` (oracle-measured
+  `0.171…0.189`), and the exact-vs-adopted `1/32` innovation row scale
+  (measured `0.03154`). Residuals remaining unattributed: the exact
+  shape of the fold law's transition between the oracle-probed linear
+  region (`|A_hb(π)| ≤ 1.4`) and the fixture-pinned saturated region
+  (`≥ 2.4`); a per-frame folded-band factor of up to ≈6× on some
+  speech frames (`wb_q4`'s high band scores −6.9 dB at the right
+  energy); the reference's default **output high-pass** (manual
+  §Codec-control `SPEEX_SET_HIGHPASS`, default on — transfer not
+  staged; measured ≈ 1st/2nd-order, cutoff ≈ 30 Hz; +3…5 dB across the
+  NB matrix when fitted) and a frame-rate AM sideband difference
+  around strong tones (≈ 1.25 kHz on the tone fixture). The
+  in-sub-frame pitch recursion's fine-pitch reads sit within ±0.4 dB
+  of the manual's repeat rule on the staged fixtures — the exact
+  reference behaviour there needs a behavioural trace (docs ask).
 
 ## Usage
 

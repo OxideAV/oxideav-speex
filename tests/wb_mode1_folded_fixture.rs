@@ -177,8 +177,9 @@ fn folded_high_band_decode_matches_reference() {
 
     let (lsnr, lcorr) = score(&our_low, &ref_low, REF_LEAD_HALF);
     println!("WB low: {lsnr:.2} dB corr {lcorr:.5}");
-    assert!(lsnr >= 12.0, "low-band absolute SNR {lsnr:.2} dB < 12 dB");
-    assert!(lcorr >= 0.975, "low-band correlation {lcorr:.4} < 0.975");
+    // r410 (NB pitch-path fixes): measured 14.70 dB / 0.983.
+    assert!(lsnr >= 13.5, "low-band absolute SNR {lsnr:.2} dB < 13.5 dB");
+    assert!(lcorr >= 0.98, "low-band correlation {lcorr:.4} < 0.98");
 
     // The folded high band carries real (non-silent) energy at the
     // right level: ratio pinned tightly because the fold gain law has
