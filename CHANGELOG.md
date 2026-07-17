@@ -6,6 +6,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-speex/compare/v0.0.7...v0.0.8) - 2026-07-17
+
+### Other
+
+- doc(hidden) the internal CELP plumbing re-exports
+- speech-material tracking gate exposes a distinct 3-layer divergence
+- docs(readme) + gates: record r410 conformance matrix; raise WB low-band floors
+- crossover-shaped folded high-band law, oracle-arbitrated + speech-fixture conformance gate
+- pitch VQ lag-order + short-pitch recursion arbitrated against reference decodes
+- *(readme)* record r403 ultra-wideband 3-layer external validation
+- add decoder robustness / fuzz gate
+- gate the output high-pass improvement on the 3-layer fixture
+- add 3-layer fold-geometry fixture conformance gate
+- pin second-layer fold source against staged 3-layer fixture
+
 ### Changed
 
 - Marked the internal CELP-chain plumbing re-exports (LSP/LPC conversion,
