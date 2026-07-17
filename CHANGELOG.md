@@ -6,6 +6,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Marked the internal CELP-chain plumbing re-exports (LSP/LPC conversion,
+  codebook tables, gain grids, QMF/synthesis filters, pitch/innovation
+  search — 225 crate-root items) `#[doc(hidden)]`, so semver tooling
+  tracks only the documented decode/encode/framing surface; no semantic
+  or signature changes.
+
 ### Fixed
 
 - Round r410: **3-tap pitch-gain VQ column ↔ lag association reversed**

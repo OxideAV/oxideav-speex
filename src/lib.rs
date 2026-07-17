@@ -321,7 +321,7 @@
 //!
 //! * **Round r286** (this commit) — narrowband **LSP→LPC conversion +
 //!   the LPC synthesis filter**, closing the decoder README's
-//!   "lacks LSP→LPC + synthesis filter" tail. The new [`lsp_to_lpc`]
+//!   "lacks LSP→LPC + synthesis filter" tail. The new `lsp_to_lpc`
 //!   module turns a set of LSP angular frequencies into the ten
 //!   linear-prediction coefficients of the analysis filter
 //!   `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ` via the standard auxiliary-polynomial
@@ -329,7 +329,7 @@
 //!   per-LSP second-order sections `[1, −2cos(ωₖ), 1]` and applying
 //!   the `(1 ± z⁻¹)` boundary factors). Spec basis: *The Speex Codec
 //!   Manual* §9.1 ("converted back to the LPC filter Â(z)") + §9.4
-//!   ("the synthesis filter S(z) = 1/A(z)"). [`lsp_to_lpc`] is the
+//!   ("the synthesis filter S(z) = 1/A(z)"). `lsp_to_lpc` is the
 //!   general float transform; [`lsp_q10_to_radians`] /
 //!   [`lsp_vector_q10_to_radians`] / [`lpc_from_lsp_q10`] bridge the
 //!   r194/r200 Q10 reconstruction under a documented angular-unit
@@ -467,43 +467,66 @@ mod weighting;
 mod wideband;
 mod wideband_decoder;
 
+// internal: closed-loop pitch-search plumbing, exposed for tests only
+#[doc(hidden)]
 pub use abs_search::{
     closed_loop_pitch_search, weighted_synthesis_zero_state, ClosedLoopPitch, WeightFactors,
 };
+// internal: long-term-predictor index/buffer plumbing, exposed for tests only
+#[doc(hidden)]
 pub use adaptive_codebook::{
     resolve_lookback, sample_lookback_indices, subframe_lookback_indices, ExcitationBuffer,
     ExcitationError, ADAPTIVE_CODEBOOK_TAPS, EXCITATION_HISTORY_LEN, TAP_PITCH_OFFSETS,
 };
+// internal: adaptive-codebook contribution plumbing, exposed for tests only
+#[doc(hidden)]
 pub use adaptive_contribution::{
     adaptive_contribution_sample, adaptive_contribution_subframe, AdaptiveContributionError,
 };
 pub use bitreader::{BitError, BitReader, BitWriter};
+// internal: raw codebook-table accessors, exposed for tests only
+#[doc(hidden)]
 pub use codebooks::{
     hb_innovation_10_32, hb_innovation_8_128, hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2,
     innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
     innovation_8_128, lpc_analysis_window_float, lpc_analysis_window_q15, lpc_lag_window_float,
     lpc_lag_window_q15, nb_lsp_high1, nb_lsp_high2, nb_lsp_low1, nb_lsp_low2, nb_lsp_scale,
     nb_lsp_stage0, pitch_gain_5bit, pitch_gain_7bit, qmf_h0_float, qmf_h0_q15, InnovationShape,
-    NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES, LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN,
-    NB_LSP_ORDER, NB_LSP_SPLIT_HALF, NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES,
-    PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS, PITCH_GAIN_COLS, QMF_FILTER_LEN,
+    NbLspScale, HB_LSP_STAGE_ENTRIES, LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN,
+    NB_LSP_SPLIT_HALF, NB_LSP_STAGE_ENTRIES, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES,
+    PITCH_GAIN_BIAS, PITCH_GAIN_COLS, QMF_FILTER_LEN,
 };
+// stable: these two order constants appear in visible signatures
+// ([`NarrowbandFrameBody::reconstructed_lsp_q10`] / [`WidebandHighBandBody::hb_lpc`])
+pub use codebooks::{HB_LPC_ORDER, NB_LSP_ORDER};
 pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
 pub use encoder_nb::{EncodeError, NarrowbandEncoder, NB_FRAME_SAMPLES};
 pub use encoder_uwb::{
     UltraWidebandEncoder, UwbEncodeError, UwbFrameBodies, UWB_HB_SUBFRAME_SAMPLES,
 };
 pub use encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
+// internal: raw excitation composition plumbing, exposed for tests only
+#[doc(hidden)]
 pub use excitation::{raw_excitation_sample, raw_excitation_subframe, RAW_EXCITATION_SAMPLES};
+// stable: typed gain-index pair returned by
+// [`NarrowbandFrameBody::fixed_codebook_gain_indices`] (plus its two field types)
 pub use fixed_codebook_gain::{
-    fixed_codebook_gain_indices, FixedCodebookGainIndices, FrameInnovationGainIndex,
-    SubFrameInnovationGainCorrection, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
+    FixedCodebookGainIndices, FrameInnovationGainIndex, SubFrameInnovationGainCorrection,
 };
+// internal: gain-index batch helper + bit-budget constants, exposed for tests only
+#[doc(hidden)]
+pub use fixed_codebook_gain::{
+    fixed_codebook_gain_indices, FRAME_OL_EXC_GAIN_BITS, FRAME_OL_EXC_GAIN_ENTRIES,
+};
+// internal: mode-7 forced pitch-gain grid plumbing, exposed for tests only
+#[doc(hidden)]
 pub use forced_pitch_gain::{
     forced_pitch_coef, forced_pitch_gain_taps, FORCED_PITCH_GAIN_BITS, FORCED_PITCH_GAIN_LEVELS,
     FORCED_PITCH_GAIN_STEP,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+// internal: scalar gain quantiser tables/helpers, exposed for tests only
+#[doc(hidden)]
 pub use gain_reconstruction::{
     hb_folded_gain_levels, hb_gain_correction_levels, hb_gc_quant_bound, nb_ol_exc_gain_levels,
     nb_subframe_gain_bound_1bit, nb_subframe_gain_bounds_3bit, nb_subframe_gain_levels_1bit,
@@ -513,61 +536,107 @@ pub use gain_reconstruction::{
     HB_FOLDED_GAIN_LEVELS, HB_GAIN_CORRECTION_LEVELS, NB_OL_EXC_GAIN_LEVELS,
     NB_SUBFRAME_GAIN_LEVELS_1BIT, NB_SUBFRAME_GAIN_LEVELS_3BIT,
 };
+// internal: gain-scaled excitation plumbing, exposed for tests only
+#[doc(hidden)]
 pub use gain_scaled_excitation::{
     gain_scaled_excitation_sample, gain_scaled_excitation_subframe, GAIN_SCALED_EXCITATION_SAMPLES,
 };
+// internal: gain-scaled high-band innovation plumbing, exposed for tests only
+#[doc(hidden)]
 pub use gain_scaled_hb_innovation::{
     gain_scaled_hb_innovation_from_body, gain_scaled_hb_innovation_sample,
     gain_scaled_hb_innovation_subframe, GAIN_SCALED_HB_INNOVATION_SAMPLES,
 };
+// internal: gain-scaled innovation plumbing, exposed for tests only
+#[doc(hidden)]
 pub use gain_scaled_innovation::{
     gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,
     gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES, INNOVATION_CODEBOOK_SCALE,
 };
+// internal: gain-scaled pitch contribution plumbing, exposed for tests only
+#[doc(hidden)]
 pub use gain_scaled_pitch::{
     gain_scaled_pitch_sample, gain_scaled_pitch_subframe, GAIN_SCALED_PITCH_SAMPLES,
     PITCH_GAIN_SCALING,
 };
+// internal: high-band frame-writer plumbing behind [`WidebandEncoder`], exposed for tests only
+#[doc(hidden)]
 pub use hb_encode::{encode_wideband_frame, write_high_band_body, write_high_band_frame};
+// stable: typed gain index returned by [`WidebandHighBandBody::hb_excitation_gain_indices`]
+pub use hb_excitation_gain::HbExcitationGainIndex;
+// internal: gain-index batch helper + bit-width constants, exposed for tests only
+#[doc(hidden)]
 pub use hb_excitation_gain::{
-    hb_excitation_gain_indices, HbExcitationGainIndex, HB_EXC_GAIN_BITS_MODES_2_TO_4,
-    HB_EXC_GAIN_BITS_MODE_1,
+    hb_excitation_gain_indices, HB_EXC_GAIN_BITS_MODES_2_TO_4, HB_EXC_GAIN_BITS_MODE_1,
 };
+// internal: folded high-band excitation law plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_fold::{
     folded_hb_excitation_slice, folded_hb_excitation_subframe, folded_uwb_excitation_slice,
     upsample_hb_excitation_linear, HB_FOLD_RECONSTRUCTION_MULT, UWB_FOLD_RECONSTRUCTION_MULT,
 };
+// stable: error + sub-frame length used in the visible
+// [`WidebandHighBandBody::hb_innovation_sub_vector`] signature
+pub use hb_innovation::{HbInnovationError, HB_SUBFRAME_SAMPLES};
+// internal: high-band innovation codebook plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_innovation::{
-    decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationError,
-    HbInnovationMapping, HB_SUBFRAME_SAMPLES,
+    decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationMapping,
 };
+// internal: high-band innovation search plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_innovation_search::{search_hb_innovation, HbInnovationChoice};
+// stable: typed MSVQ stage pair returned by [`WidebandHighBandBody::lsp_stages`]
+pub use hb_lsp::HbLspStages;
+// internal: high-band LSP MSVQ plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_lsp::{
     pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10,
-    reconstruct_q10 as reconstruct_hb_lsp_q10, HbLspStages, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
+    reconstruct_q10 as reconstruct_hb_lsp_q10, HB_LSP_INDEX_MASK, HB_LSP_OUTPUT_Q,
     HB_LSP_PACKED_BITS, HB_LSP_STAGE_BITS,
 };
+// internal: high-band LSP interpolation plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_lsp_interp::{HbSubFrameLsp, HB_LSP_INTERP_OUTPUT_Q, HB_LSP_SUBFRAMES_PER_FRAME};
+// internal: high-band synthesis filter plumbing, exposed for tests only
+#[doc(hidden)]
 pub use hb_synthesis::HbSynthesisFilter;
 pub use header::{
     HeaderError, SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND,
     SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN,
 };
+// stable: error + sub-frame length used in the visible
+// [`NarrowbandFrameBody::innovation_sub_vector`] signature
+pub use innovation::{InnovationError, SUBFRAME_SAMPLES};
+// internal: narrowband innovation codebook plumbing, exposed for tests only
+#[doc(hidden)]
 pub use innovation::{
     decode_subframe as decode_innovation_subframe, sub_vector as innovation_sub_vector,
-    InnovationCodebook, InnovationError, InnovationMapping, SUBFRAME_SAMPLES,
+    InnovationCodebook, InnovationMapping,
 };
+// internal: narrowband innovation search plumbing, exposed for tests only
+#[doc(hidden)]
 pub use innovation_search::{search_innovation, InnovationChoice};
+// internal: encoder LPC analysis plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lpc_analysis::{
     analyse as lpc_analyse, analyse_hb as hb_lpc_analyse, apply_analysis_window, autocorrelate,
     levinson_durbin, stabilise_autocorrelation, HbLpcCoefficients, LpcAnalysisError,
     LpcCoefficients, AUTOCORR_LAGS, HB_AUTOCORR_LAGS, LPC_NOISE_FLOOR,
 };
+// internal: encoder LPC->LSP root-find plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lpc_to_lsp::{hb_lpc_to_lsp, lpc_to_lsp, LpcToLspError, LSP_BISECT_ITERS, LSP_SCAN_STEPS};
+// stable: typed VQ stage split returned by [`NarrowbandFrameBody::lsp_stages`]
+pub use lsp::NbLspStages;
+// internal: narrowband LSP VQ plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lsp::{
-    reconstruct_q10 as reconstruct_nb_lsp_q10, NbLspStages, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
+    reconstruct_q10 as reconstruct_nb_lsp_q10, NB_LSP_INDEX_MASK, NB_LSP_OUTPUT_Q,
     NB_LSP_STAGES_18BIT, NB_LSP_STAGES_30BIT, NB_LSP_STAGE_BITS,
 };
+// internal: LSP base-vector/margin plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lsp_base::{
     add_hb_lsp_base, add_nb_lsp_base, enforce_lsp_margin_radians, hb_lsp_base_q10,
     hb_lsp_base_radians, hb_lsp_margin_radians, nb_lsp_base_q10, nb_lsp_base_radians,
@@ -575,19 +644,33 @@ pub use lsp_base::{
     HB_LSP_MARGIN_RADIANS, NB_LSP_BASE_INTERCEPT_Q10, NB_LSP_BASE_SLOPE_Q10, NB_LSP_MARGIN_Q10,
     NB_LSP_MARGIN_RADIANS,
 };
-pub use lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+// stable: per-sub-frame LSP matrix returned by
+// [`NarrowbandFrameBody::interpolated_lsp_q12`] (+ its public array-length constant)
+pub use lsp_interp::{NbSubFrameLsp, NB_LSP_SUBFRAMES_PER_FRAME};
+// internal: interpolation Q-format constant, exposed for tests only
+#[doc(hidden)]
+pub use lsp_interp::NB_LSP_INTERP_OUTPUT_Q;
+// internal: LSP_PI storage-domain plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lsp_pi_domain::{
     hb_lsp_linear_storage, lsp_storage_to_q10, lsp_storage_to_radians, nb_lsp_linear_storage,
     radians_to_lsp_storage, LSP_PI,
 };
+// internal: encoder LSP-VQ quantiser plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lsp_quant::{pack_lsp_index, quantise_lsp_q10};
+// stable: LPC order constant used in the visible
+// [`NarrowbandDecoder::synthesis_history`] signature
+pub use lsp_to_lpc::LPC_ORDER;
+// internal: LSP->LPC conversion plumbing, exposed for tests only
+#[doc(hidden)]
 pub use lsp_to_lpc::{
     hb_lsp_q10_to_radians, hb_lsp_to_lpc, hb_lsp_with_base_q10, hb_subframe_lpc_set_with_base,
     lpc_from_hb_lsp_delta_q10, lpc_from_hb_lsp_q10, lpc_from_hb_subframe_lsp_q12,
     lpc_from_lsp_delta_q10, lpc_from_lsp_q10, lpc_from_subframe_lsp_q12, lsp_q10_to_radians,
     lsp_qn_to_radians, lsp_to_lpc, lsp_vector_q10_to_radians, lsp_vector_radians_to_q10,
     nb_lsp_with_base_q10, radians_to_lsp_q10, subframe_lpc_set, subframe_lpc_set_with_base,
-    HB_LPC_ORDER_OUT, LPC_ORDER,
+    HB_LPC_ORDER_OUT,
 };
 pub use narrowband_body::{
     NarrowbandBodyError, NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX,
@@ -596,12 +679,26 @@ pub use narrowband_body::{
 pub use narrowband_decoder::{
     saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
 };
+// internal: narrowband frame-writer plumbing behind [`NarrowbandEncoder`], exposed for tests only
+#[doc(hidden)]
 pub use nb_encode::{encode_narrowband_frame, write_narrowband_body, write_packet_terminator};
+// internal: open-loop pitch estimation plumbing, exposed for tests only
+#[doc(hidden)]
 pub use ol_pitch::{estimate_open_loop_pitch, estimate_open_loop_pitch_range, OpenLoopPitch};
 pub use output_highpass::{OutputHighpass, OUTPUT_HIGHPASS_CUTOFF_HZ};
 pub use packet::{parse_packet, FrameKind, PacketError, PacketFrame, PacketFrames, PacketSummary};
-pub use pitch_gain::{reconstruct as reconstruct_pitch_gain, PitchGainTaps, PITCH_GAIN_TAPS};
-pub use qmf::{QmfAnalysis, QmfSynthesis, QMF_HALF_BAND_FRAME, QMF_WIDEBAND_FRAME};
+// stable: 3-tap gain triple returned by [`NarrowbandSubFrameIndices::pitch_gain_taps`]
+// (+ its public array-length constant)
+pub use pitch_gain::{PitchGainTaps, PITCH_GAIN_TAPS};
+// internal: pitch-gain VQ reconstruction helper, exposed for tests only
+#[doc(hidden)]
+pub use pitch_gain::reconstruct as reconstruct_pitch_gain;
+// stable: wideband frame length used in visible PCM signatures
+// ([`WidebandFrame::wideband_pcm`] / [`DecodedFrame::Wideband`])
+pub use qmf::QMF_WIDEBAND_FRAME;
+// internal: QMF filterbank plumbing, exposed for tests only
+#[doc(hidden)]
+pub use qmf::{QmfAnalysis, QmfSynthesis, QMF_HALF_BAND_FRAME};
 pub use quality::{
     nb_mode_for_quality, uwb_bitrate_bps, uwb_modes_for_quality, wb_bitrate_bps,
     wb_modes_for_quality, UwbQualityModes, WbQualityModes, FRAMES_PER_SECOND, MAX_QUALITY,
@@ -614,17 +711,26 @@ pub use signalling::{
 };
 pub use stream_decoder::{SpeexStreamDecoder, StreamDecodeError};
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
+// internal: narrowband LPC synthesis filter plumbing, exposed for tests only
+#[doc(hidden)]
 pub use synthesis::SynthesisFilter;
 pub use uwb_decoder::{
     UltraWidebandDecoder, UltraWidebandFrame, UwbDecodeError, UwbDecodedFrame, UWB_FRAME_SAMPLES,
     UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES,
 };
 pub use vad::{EnergyVad, DTX_MODE};
+// stable: high-band frame length used in visible signatures
+// ([`WidebandFrame::high_band`] / [`WidebandDecoder::last_hb_excitation`])
+pub use wb_synthesis::HB_FRAME_SAMPLES;
+// internal: high-band synthesis assembly plumbing, exposed for tests only
+#[doc(hidden)]
 pub use wb_synthesis::{
     synthesise_high_band_frame, synthesise_high_band_frame_folded,
     synthesise_high_band_frame_folded_exc, synthesise_high_band_frame_interp, SubBandLayer,
-    UwbFrameLayout, HB_FRAME_SAMPLES, HB_SUBFRAMES_PER_FRAME,
+    UwbFrameLayout, HB_SUBFRAMES_PER_FRAME,
 };
+// internal: perceptual-weighting filter plumbing, exposed for tests only
+#[doc(hidden)]
 pub use weighting::{weighted_coeffs, PerceptualWeighting, WEIGHT_GAMMA1, WEIGHT_GAMMA2};
 pub use wideband::{
     HighBandSubFrameIndices, WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader,

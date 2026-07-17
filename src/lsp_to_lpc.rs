@@ -175,7 +175,7 @@ pub fn lsp_vector_q10_to_radians(lsp_q10: &[i32; NB_LSP_ORDER]) -> [f64; NB_LSP_
 /// exact inverse of the decoder's `ω = value / 2^Q` (the
 /// provenance-confirmed angular-unit fact, see [`crate::lsp_pi_domain`]).
 /// Round-to-nearest is used so the value and its decode are mutually
-/// nearest. This is the bridge from the [`crate::lpc_to_lsp`] root-finder
+/// nearest. This is the bridge from the `crate::lpc_to_lsp` root-finder
 /// output (radians) into the Q10 domain [`crate::lsp_quant`] searches.
 pub fn radians_to_lsp_q10(omega: f64) -> i32 {
     (omega * f64::from(1u32 << NB_LSP_OUTPUT_Q)).round() as i32

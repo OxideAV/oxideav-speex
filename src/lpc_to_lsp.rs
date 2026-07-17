@@ -186,7 +186,7 @@ fn eval_on_circle(coeffs: &[f64], omega: f64) -> f64 {
 /// root-finding on its auxiliary polynomials.
 ///
 /// Returns the `LPC_ORDER` LSP angles `ωₖ ∈ (0, π)` in ascending order
-/// (the exact input convention [`crate::lsp_to_lpc`] consumes). Errors
+/// (the exact input convention `crate::lsp_to_lpc` consumes). Errors
 /// with [`LpcToLspError::RootsNotFound`] if fewer than `LPC_ORDER` roots
 /// are recovered (an unstable / non-minimum-phase filter).
 pub fn lpc_to_lsp(a: &[f64; LPC_ORDER]) -> Result<[f64; LPC_ORDER], LpcToLspError> {

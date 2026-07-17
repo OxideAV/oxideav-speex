@@ -139,7 +139,7 @@ pub const fn hb_lsp_margin_radians() -> f64 {
 /// `docs/audio/speex/provenance/02-speex-gain-quant.md`) guarantees the
 /// reconstructed LSP set stays a **valid, strictly-interlaced** set so
 /// the LSP→LPC auxiliary-polynomial root split (see
-/// [`crate::lsp_to_lpc`]) yields a stable filter:
+/// `crate::lsp_to_lpc`) yields a stable filter:
 ///
 /// 1. **forward pass** — clamp `lsp[0]` up to at least `margin`
 ///    (off `ω = 0`), then for each `i` raise `lsp[i]` to at least
