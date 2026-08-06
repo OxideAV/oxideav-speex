@@ -215,6 +215,40 @@ impl SpeexHeader {
         })
     }
 
+    /// Serialise the header to its fixed Table 7.1 wire layout — the
+    /// exact inverse of [`SpeexHeader::parse`] (8-byte magic, 20-byte
+    /// version string, thirteen little-endian 32-bit fields, 80 bytes
+    /// total). `parse(write_bytes(h)) == h` for every header whose
+    /// `speex_string` is the [`SPEEX_MAGIC`]; the stored `speex_string`
+    /// is written verbatim, so a hand-built header with a wrong magic
+    /// round-trips to the same parse error a foreign stream would get.
+    pub fn write_bytes(&self) -> [u8; SPEEX_HEADER_LEN] {
+        let mut out = [0u8; SPEEX_HEADER_LEN];
+        out[0..SPEEX_STRING_LEN].copy_from_slice(&self.speex_string);
+        out[SPEEX_STRING_LEN..SPEEX_STRING_LEN + SPEEX_VERSION_LEN]
+            .copy_from_slice(&self.speex_version);
+        let mut off = SPEEX_STRING_LEN + SPEEX_VERSION_LEN;
+        for v in [
+            self.speex_version_id,
+            self.header_size,
+            self.rate,
+            self.mode,
+            self.mode_bitstream_version,
+            self.nb_channels,
+            self.bitrate,
+            self.frame_size,
+            self.vbr,
+            self.frames_per_packet,
+            self.extra_headers,
+            self.reserved1,
+            self.reserved2,
+        ] {
+            out[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            off += 4;
+        }
+        out
+    }
+
     /// Return the `speex_version` field as a `&str` trimmed of trailing
     /// NUL padding. Returns `None` if the field is not valid UTF-8.
     pub fn version_str(&self) -> Option<&str> {
@@ -452,5 +486,23 @@ mod tests {
         assert!(h.is_narrowband());
         assert_eq!(h.mode_sampling_rate_hz(), Some(8_000));
         assert!(!h.rate_matches_mode(), "rate 16000 contradicts NB mode");
+    }
+
+    #[test]
+    fn write_bytes_is_the_exact_parse_inverse() {
+        // Byte-for-byte round trip on every rate class (write ∘ parse =
+        // identity on the 80-byte header, parse ∘ write = identity on
+        // the struct).
+        for (rate, mode, frame_size) in [
+            (8_000u32, SPEEX_MODE_NARROWBAND, 160u32),
+            (16_000, SPEEX_MODE_WIDEBAND, 320),
+            (32_000, SPEEX_MODE_ULTRAWIDEBAND, 640),
+        ] {
+            let buf = synth_header(rate, mode, frame_size, 1);
+            let h = SpeexHeader::parse(&buf).unwrap();
+            let out = h.write_bytes();
+            assert_eq!(&out[..], &buf[..SPEEX_HEADER_LEN], "mode {mode}");
+            assert_eq!(SpeexHeader::parse(&out).unwrap(), h, "mode {mode}");
+        }
     }
 }

@@ -390,25 +390,19 @@
 //!   (multiplying the §8.4 innovation by the gain) remains a downstream
 //!   synthesis layer.
 //!
-//! Frame decode, encoder, and the `Decoder` / `Encoder` trait wiring
-//! against `oxideav-core` still return [`Error::NotImplemented`]; the
-//! r191 codebook accessors + r194 narrowband LSP reconstruction +
-//! r200 sub-frame LSP interpolation + r208 pitch-gain VQ
-//! reconstruction + r214 high-band LSP MSVQ reconstruction +
-//! r220 narrowband innovation sub-vector dispatch + r230 high-band
-//! innovation sub-vector dispatch + r234 adaptive-codebook index
-//! resolution + excitation history buffer + r241 adaptive-codebook
-//! contribution sum + r244 raw excitation composition primitive +
-//! r261 fixed-codebook gain index composition primitive + r269
-//! high-band excitation-gain index primitive + r277 per-mode
-//! innovation binding for modes 2 / 3 / 4 / 5 + r286 LSP→LPC
-//! conversion + LPC synthesis filter now compose into a real PCM
-//! path for one narrowband fixture, though the public
-//! `Decoder`/`Encoder` trait surface is not yet wired.
+//! * **Round r438** — the `oxideav-core` framework surface is wired
+//!   (see [`framework`](module docs on [`SpeexFrameworkDecoder`] /
+//!   [`SpeexFrameworkEncoder`]): [`register`] installs real `Decoder` /
+//!   `Encoder` factories under the id `"speex"` (payload magic
+//!   `Speex   `), and the dual-API [`make_decoder`] / [`make_encoder`]
+//!   free functions expose the same factories directly. The same round
+//!   bound the last two narrowband sub-modes (1 and 7) from the staged
+//!   `nb-innovation-binding.md`, so every Table 9.1 mode — and with it
+//!   every quality 0..=10 narrowband, 0..=9 wideband/ultra-wideband —
+//!   encodes and decodes. Wideband quality 10 (high-band mode 4) and
+//!   the intensity-stereo reconstruction law remain recorded docs gaps.
 
 #![warn(missing_debug_implementations)]
-
-use oxideav_core::RuntimeContext;
 
 mod abs_search;
 mod adaptive_codebook;
@@ -423,6 +417,7 @@ mod excitation;
 mod fixed_codebook_gain;
 mod forced_pitch_gain;
 mod frame;
+mod framework;
 mod gain_reconstruction;
 mod gain_scaled_excitation;
 mod gain_scaled_hb_innovation;
@@ -525,6 +520,10 @@ pub use forced_pitch_gain::{
     FORCED_PITCH_GAIN_STEP,
 };
 pub use frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+pub use framework::{
+    make_decoder, make_encoder, register, SpeexEncoderOptions, SpeexFrameworkDecoder,
+    SpeexFrameworkEncoder,
+};
 // internal: scalar gain quantiser tables/helpers, exposed for tests only
 #[doc(hidden)]
 pub use gain_reconstruction::{
@@ -739,15 +738,13 @@ pub use wideband::{
 };
 pub use wideband_decoder::{WidebandDecodeError, WidebandDecoder, WidebandFrame};
 
-/// Crate-local error type. Until the full clean-room rebuild lands, the
-/// codec-level public API paths return [`Error::NotImplemented`]; the
-/// Ogg/Speex header parser surfaces its own [`HeaderError`] and the
-/// per-frame parser surfaces [`FrameError`].
+/// Crate-local error type aggregating the parse-layer errors. The
+/// decode/encode paths surface their own typed errors
+/// ([`DecodeError`], [`EncodeError`], …); the framework
+/// [`make_decoder`] / [`make_encoder`] surface maps everything into
+/// `oxideav_core::Error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The crate's frame decoder / encoder has not been re-implemented
-    /// against the spec yet.
-    NotImplemented,
     /// The Ogg/Speex stream header failed to parse — see [`HeaderError`].
     Header(HeaderError),
     /// The per-frame leading prefix failed to parse — see [`FrameError`].
@@ -768,10 +765,6 @@ pub enum Error {
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Error::NotImplemented => write!(
-                f,
-                "oxideav-speex: clean-room rebuild in progress — frame decoder/encoder not yet wired up"
-            ),
             Error::Header(e) => write!(f, "oxideav-speex: {}", e),
             Error::Frame(e) => write!(f, "oxideav-speex: {}", e),
             Error::NarrowbandBody(e) => write!(f, "oxideav-speex: {}", e),
@@ -785,7 +778,6 @@ impl core::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::NotImplemented => None,
             Error::Header(e) => Some(e),
             Error::Frame(e) => Some(e),
             Error::NarrowbandBody(e) => Some(e),
@@ -831,10 +823,5 @@ impl From<PacketError> for Error {
         Error::Packet(e)
     }
 }
-
-/// No-op codec registration — the rebuild has no encoder/decoder to
-/// hand to the runtime context yet. Header parsing is exposed as a free
-/// function via [`SpeexHeader::parse`].
-pub fn register(_ctx: &mut RuntimeContext) {}
 
 oxideav_core::register!("speex", register);
