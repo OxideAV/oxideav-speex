@@ -239,10 +239,10 @@ impl WidebandEncoder {
     /// per-layer sub-modes through the Table 10.2-derived wideband
     /// quality ladder ([`crate::wb_modes_for_quality`]).
     ///
-    /// The encode-side gaps constrain the usable range: quality 0
-    /// selects narrowband mode 1, qualities 9..=10 narrowband mode 7
-    /// (both undocumented-innovation) and quality 10 high-band mode 4
-    /// (docs-gapped codebook binding); qualities 1..=8 encode.
+    /// Qualities 0..=9 encode (r438 — narrowband modes 1 and 7 are now
+    /// bound by the staged `nb-innovation-binding.md`). Quality 10
+    /// selects high-band mode 4, whose innovation-codebook binding is
+    /// the remaining recorded docs gap, and is rejected.
     pub fn encode_packet_quality(
         &mut self,
         frames: &[[i16; QMF_WIDEBAND_FRAME]],
@@ -530,7 +530,7 @@ mod tests {
         // one frame + terminator packs to the staged bits-per-frame
         // total and decodes through the top-level SpeexDecoder.
         use crate::quality::{wb_bitrate_bps, FRAMES_PER_SECOND};
-        for q in 1..=8u8 {
+        for q in 0..=9u8 {
             let mut enc = WidebandEncoder::new();
             let frames = [wideband_frame(5000.0)];
             let pkt = enc
@@ -541,13 +541,17 @@ mod tests {
             let mut dec = crate::SpeexDecoder::new();
             assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");
         }
-        // Gapped qualities are rejected (q0 NB mode 1; q9/q10 NB mode 7
-        // / HB mode 4).
+        // Quality 10 selects high-band mode 4, whose innovation-codebook
+        // binding is the remaining recorded docs gap; out-of-range
+        // qualities are rejected too.
         let mut enc = WidebandEncoder::new();
         let frames = [wideband_frame(5000.0)];
-        for q in [0u8, 9, 10, 11] {
-            assert!(enc.encode_packet_quality(&frames, q).is_err(), "q{q}");
-        }
+        assert_eq!(
+            enc.encode_packet_quality(&frames, 10),
+            Err(WbEncodeError::UndocumentedHbInnovation(4)),
+            "q10 -> HB mode 4 docs gap"
+        );
+        assert!(enc.encode_packet_quality(&frames, 11).is_err(), "q11");
     }
 
     #[test]

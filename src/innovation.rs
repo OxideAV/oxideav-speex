@@ -66,20 +66,29 @@
 //! cross-check too (e.g. mode 3 = 8000 bps total carries the 4000 bps
 //! innovation stream; mode 6 = 18 200 bps carries 12 800 bps).
 //!
-//! Two modes remain [`InnovationMapping::Undocumented`]:
+//! The last two modes are pinned by the staged black-box binding doc
+//! (`docs/audio/speex/nb-innovation-binding.md`, established via the
+//! `provenance/03` single-bit-perturbation staircase measurements):
 //!
-//! * **Mode 1** (2.15 kbps vocoder) has `innovation_vq_bits = 0` — no
-//!   VQ field on the wire at all — yet is not the silent mode 0: per
-//!   Table 9.2 it transmits "mostly comfort noise". The excitation
-//!   *generation* rule for this vocoder mode (how `c[n]` is synthesised
-//!   without a codebook index) is not in the staged material.
-//! * **Mode 7** (24.6 kbps) has `innovation_vq_bits = 96` → 19 200 bps,
-//!   a rate no staged codebook is annotated with; 96 bits admit no
-//!   `index_bits × count` / 40-sample-consistent decomposition over a
-//!   single staged shape (96 = 12 × 8 bits would need 12 sub-vectors of
-//!   length 3⅓). A multi-stage scheme is plausible but undocumented.
-//!
-//! Both are recorded as docs gaps in the README.
+//! * **Mode 1** (2.15 kbps vocoder) has `innovation_vq_bits = 0` — **no
+//!   innovation codebook at all** (binding doc §4). Its four
+//!   per-sub-frame 1-bit "innovation gain" fields are on the wire (they
+//!   make the frame 43 bits) but *no value of any of them changes any
+//!   decoded output sample*; a decoder must read them to stay
+//!   bit-synchronised and then discard them. The fixed-codebook
+//!   contribution is therefore zero, exactly as in mode 0 —
+//!   [`InnovationMapping::for_mode`] maps mode 1 to
+//!   [`InnovationMapping::Silence`]. (The frame's audible content comes
+//!   entirely from the frame-level OL pitch / OL pitch-gain / OL
+//!   excitation-gain fields.)
+//! * **Mode 7** (24.6 kbps) has `innovation_vq_bits = 96` → **two
+//!   independent 48-bit quantisation stages** over the same 40-sample
+//!   sub-frame, each eight 6-bit sub-vectors of 5 samples against the
+//!   single staged 5 × 64 codebook (`sv5-64` — the same table mode 5
+//!   uses single-stage; binding doc §2–§3 measured two staircases both
+//!   restarting at the sub-frame's first sample). The decoder sums the
+//!   two stages' looked-up sub-vectors:
+//!   [`InnovationMapping::DocumentedTwoStage`].
 //!
 //! ## What this module does NOT do
 //!
@@ -197,9 +206,14 @@ pub const SUBFRAME_SAMPLES: usize = 40;
 /// Per-mode innovation dispatch resolved from the staged material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InnovationMapping {
-    /// Silence sub-mode (mode 0). No innovation field on the wire; the
-    /// `c[n]` sub-vector is implicitly all zero (no fixed-codebook
-    /// contribution per §9.3 row "Innovation VQ" = 0 bits).
+    /// No innovation vector on the wire — the `c[n]` sub-vector is
+    /// implicitly all zero. Two modes land here: mode 0 (silence — no
+    /// innovation field per §9.3 row "Innovation VQ" = 0 bits) and mode
+    /// 1 (vocoder — the staged binding doc §4 pins that it transmits no
+    /// innovation codebook and that its four 1-bit per-sub-frame
+    /// innovation-gain fields never reach the decoded output; the frame
+    /// body parser consumes those bits, this dispatcher contributes
+    /// zero).
     Silence,
     /// Documented per-mode binding: the sub-frame's 40 samples come
     /// from `count` concatenated lookups against `codebook`, taking
@@ -214,12 +228,26 @@ pub enum InnovationMapping {
         /// (must satisfy `codebook.sub_vector_len() * count == SUBFRAME_SAMPLES`).
         count: u8,
     },
+    /// Two independent quantisation stages over the same 40-sample
+    /// sub-frame (mode 7; staged binding doc §2–§3). Each stage is
+    /// `count` concatenated `codebook` lookups covering the sub-frame
+    /// (stage 1 in the field's most-significant half, stage 2 — the
+    /// residual refinement — in the least-significant half, matching
+    /// the wire order the staircase measurements pinned). The decoded
+    /// `c[n]` is the element-wise **sum** of the two stages' rows.
+    DocumentedTwoStage {
+        /// The codebook shape both stages index (only one staged
+        /// codebook has the measured 5-sample / 6-bit geometry).
+        codebook: InnovationCodebook,
+        /// Sub-vectors per stage
+        /// (`codebook.sub_vector_len() * count == SUBFRAME_SAMPLES`).
+        count: u8,
+    },
     /// The per-mode excitation handling is not documented in the
-    /// staged `docs/audio/speex/` material. Two modes fall here: mode
-    /// 1 (0-bit VQ field; the vocoder excitation-generation rule is
-    /// unstaged) and mode 7 (96-bit field → 19 200 bps innovation
-    /// rate, which no staged codebook is annotated with). Recorded
-    /// in the README as docs gaps.
+    /// staged `docs/audio/speex/` material. Since the r438 binding of
+    /// modes 1 and 7 (staged `nb-innovation-binding.md`) no Table 9.1
+    /// mode resolves here; the variant is kept for hand-built
+    /// [`NarrowbandSubmode`] values outside the documented table.
     Undocumented,
 }
 
@@ -227,16 +255,17 @@ impl InnovationMapping {
     /// Resolve the per-mode innovation dispatcher from a narrowband
     /// sub-mode.
     ///
-    /// Returns [`InnovationMapping::Silence`] for mode 0
-    /// (no innovation field), [`InnovationMapping::Documented`] for
-    /// the six modes whose codebook binding is grounded by the staged
-    /// material (modes 2 / 3 / 4 / 5 via the per-codebook innovation
-    /// bit-rate annotations, modes 6 / 8 via the companion §2.3 worked
-    /// examples), and [`InnovationMapping::Undocumented`] for modes
-    /// 1 and 7 (see module docs).
+    /// Returns [`InnovationMapping::Silence`] for modes 0 and 1 (no
+    /// innovation vector on the wire — binding doc §4 for mode 1),
+    /// [`InnovationMapping::Documented`] for the six single-stage modes
+    /// (modes 2 / 3 / 4 / 5 via the per-codebook innovation bit-rate
+    /// annotations, modes 6 / 8 via the companion §2.3 worked
+    /// examples), [`InnovationMapping::DocumentedTwoStage`] for mode 7
+    /// (binding doc §2–§3), and [`InnovationMapping::Undocumented`]
+    /// only for IDs outside Table 9.1.
     pub const fn for_mode(submode: &NarrowbandSubmode) -> Self {
         match submode.mode_id {
-            0 => InnovationMapping::Silence,
+            0 | 1 => InnovationMapping::Silence,
             2 => InnovationMapping::Documented {
                 codebook: InnovationCodebook::Sv10_16,
                 count: 4,
@@ -255,6 +284,10 @@ impl InnovationMapping {
             },
             6 => InnovationMapping::Documented {
                 codebook: InnovationCodebook::Sv5_256,
+                count: 8,
+            },
+            7 => InnovationMapping::DocumentedTwoStage {
+                codebook: InnovationCodebook::Sv5_64,
                 count: 8,
             },
             8 => InnovationMapping::Documented {
@@ -321,37 +354,66 @@ pub fn decode_subframe(
         InnovationMapping::Silence => Ok([0i16; SUBFRAME_SAMPLES]),
         InnovationMapping::Undocumented => Err(InnovationError::Undocumented),
         InnovationMapping::Documented { codebook, count } => {
-            let sv_len = codebook.sub_vector_len();
-            let bits = codebook.index_bits() as u32;
-            let total_bits = bits * u32::from(count);
-            debug_assert!(
-                total_bits as usize <= 128,
-                "innovation total bits exceeds u128 capacity"
-            );
-            debug_assert_eq!(
-                sv_len * usize::from(count),
-                SUBFRAME_SAMPLES,
-                "innovation dispatch sub-vectors must cover 40 samples"
-            );
-
-            let mask = if bits == 0 { 0 } else { (1u128 << bits) - 1 };
+            decode_stage(codebook, count, innovation_vq_index)
+        }
+        InnovationMapping::DocumentedTwoStage { codebook, count } => {
+            // Stage 1 occupies the field's most-significant half (it is
+            // first on the wire — binding doc §2's first staircase),
+            // stage 2 the least-significant half. The decoded c[n] is
+            // the element-wise sum of the two stages.
+            let stage_bits = u32::from(codebook.index_bits()) * u32::from(count);
+            let mask = (1u128 << stage_bits) - 1;
+            let stage1 = decode_stage(codebook, count, (innovation_vq_index >> stage_bits) & mask)?;
+            let stage2 = decode_stage(codebook, count, innovation_vq_index & mask)?;
             let mut out = [0i16; SUBFRAME_SAMPLES];
-            // The packed field's MSB carries sub-vector 0 (since the
-            // parser shifted earlier reads up by `chunk` for every
-            // subsequent read — see `read_wide` in narrowband_body).
-            for sv in 0..count {
-                let shift = u32::from(count - 1 - sv) * bits;
-                let idx = ((innovation_vq_index >> shift) & mask) as u32;
-                let row = sub_vector(codebook, idx).ok_or(InnovationError::IndexOutOfRange {
-                    sub_vector: sv,
-                    index: idx,
-                })?;
-                let base = usize::from(sv) * sv_len;
-                out[base..base + sv_len].copy_from_slice(row);
+            for (o, (&a, &b)) in out.iter_mut().zip(stage1.iter().zip(stage2.iter())) {
+                // Staged rows are signed-char-range Q5 fractions, so the
+                // two-stage sum stays far inside i16; saturate anyway so
+                // a hand-built table can never wrap.
+                *o = (i32::from(a) + i32::from(b)).clamp(-32768, 32767) as i16;
             }
             Ok(out)
         }
     }
+}
+
+/// Decode one quantisation stage: `count` concatenated `codebook`
+/// lookups off the packed MSB-first field, covering the 40-sample
+/// sub-frame.
+fn decode_stage(
+    codebook: InnovationCodebook,
+    count: u8,
+    packed: u128,
+) -> Result<[i16; SUBFRAME_SAMPLES], InnovationError> {
+    let sv_len = codebook.sub_vector_len();
+    let bits = codebook.index_bits() as u32;
+    let total_bits = bits * u32::from(count);
+    debug_assert!(
+        total_bits as usize <= 128,
+        "innovation total bits exceeds u128 capacity"
+    );
+    debug_assert_eq!(
+        sv_len * usize::from(count),
+        SUBFRAME_SAMPLES,
+        "innovation dispatch sub-vectors must cover 40 samples"
+    );
+
+    let mask = if bits == 0 { 0 } else { (1u128 << bits) - 1 };
+    let mut out = [0i16; SUBFRAME_SAMPLES];
+    // The packed field's MSB carries sub-vector 0 (since the parser
+    // shifted earlier reads up by `chunk` for every subsequent read —
+    // see `read_wide` in narrowband_body).
+    for sv in 0..count {
+        let shift = u32::from(count - 1 - sv) * bits;
+        let idx = ((packed >> shift) & mask) as u32;
+        let row = sub_vector(codebook, idx).ok_or(InnovationError::IndexOutOfRange {
+            sub_vector: sv,
+            index: idx,
+        })?;
+        let base = usize::from(sv) * sv_len;
+        out[base..base + sv_len].copy_from_slice(row);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -496,72 +558,93 @@ mod tests {
             (InnovationCodebook::Sv20_32, 2000),
         ];
         for s in NARROWBAND_SUBMODES {
-            if let InnovationMapping::Documented { codebook, .. } = InnovationMapping::for_mode(&s)
-            {
-                let bps = u32::from(s.innovation_vq_bits) * 200;
-                let annotated = annotated_bps
-                    .iter()
-                    .find(|(cb, _)| *cb == codebook)
-                    .map(|&(_, b)| b)
-                    .unwrap();
-                assert_eq!(
-                    bps, annotated,
-                    "mode {}: Table 9.1 rate must match the staged annotation",
-                    s.mode_id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn mapping_undocumented_for_modes_without_grounded_binding() {
-        // Mode 1: 0-bit VQ field, vocoder excitation generation unstaged.
-        // Mode 7: 96 bits → 19 200 bps, no staged codebook at that rate.
-        for mode_id in [1u8, 7] {
-            let s = NarrowbandSubmode::for_id(mode_id).unwrap();
+            let (codebook, stages) = match InnovationMapping::for_mode(&s) {
+                InnovationMapping::Documented { codebook, .. } => (codebook, 1u32),
+                InnovationMapping::DocumentedTwoStage { codebook, .. } => (codebook, 2u32),
+                _ => continue,
+            };
+            let bps = u32::from(s.innovation_vq_bits) * 200;
+            let annotated = annotated_bps
+                .iter()
+                .find(|(cb, _)| *cb == codebook)
+                .map(|&(_, b)| b)
+                .unwrap();
             assert_eq!(
-                InnovationMapping::for_mode(&s),
-                InnovationMapping::Undocumented,
-                "mode {mode_id}"
+                bps,
+                annotated * stages,
+                "mode {}: Table 9.1 rate must match the staged annotation × stages",
+                s.mode_id
             );
         }
     }
 
     #[test]
-    fn documented_mappings_satisfy_40_sample_constraint() {
-        // Both documented mode dispatchers must yield exactly
-        // sub_vector_len * count == 40 samples per sub-frame.
-        for s in NARROWBAND_SUBMODES {
-            if let InnovationMapping::Documented { codebook, count } =
-                InnovationMapping::for_mode(&s)
-            {
-                assert_eq!(
-                    codebook.sub_vector_len() * usize::from(count),
-                    SUBFRAME_SAMPLES,
-                    "mode {} sub-vector dispatch must cover 40 samples",
-                    s.mode_id
-                );
+    fn mapping_mode_1_is_silence_and_mode_7_is_two_stage() {
+        // Binding doc §4: mode 1 transmits no innovation codebook (its
+        // 1-bit gain fields are inert) — same zero contribution as mode 0.
+        let m1 = NarrowbandSubmode::for_id(1).unwrap();
+        assert_eq!(InnovationMapping::for_mode(&m1), InnovationMapping::Silence);
+        // Binding doc §2–§3: mode 7 is two 48-bit stages of 8 × Sv5_64.
+        let m7 = NarrowbandSubmode::for_id(7).unwrap();
+        assert_eq!(
+            InnovationMapping::for_mode(&m7),
+            InnovationMapping::DocumentedTwoStage {
+                codebook: InnovationCodebook::Sv5_64,
+                count: 8,
             }
+        );
+    }
+
+    #[test]
+    fn mapping_undocumented_only_outside_table_9_1() {
+        // A hand-built sub-mode with an out-of-table ID still lands on
+        // the Undocumented arm (the parser never produces one).
+        let mut s = NarrowbandSubmode::for_id(5).unwrap();
+        s.mode_id = 9;
+        assert_eq!(
+            InnovationMapping::for_mode(&s),
+            InnovationMapping::Undocumented
+        );
+        assert_eq!(decode_subframe(&s, 0), Err(InnovationError::Undocumented));
+    }
+
+    #[test]
+    fn documented_mappings_satisfy_40_sample_constraint() {
+        // Every documented dispatcher (each stage of it) must yield
+        // exactly sub_vector_len * count == 40 samples per sub-frame.
+        for s in NARROWBAND_SUBMODES {
+            let (codebook, count) = match InnovationMapping::for_mode(&s) {
+                InnovationMapping::Documented { codebook, count }
+                | InnovationMapping::DocumentedTwoStage { codebook, count } => (codebook, count),
+                _ => continue,
+            };
+            assert_eq!(
+                codebook.sub_vector_len() * usize::from(count),
+                SUBFRAME_SAMPLES,
+                "mode {} sub-vector dispatch must cover 40 samples",
+                s.mode_id
+            );
         }
     }
 
     #[test]
     fn documented_mappings_match_bit_budget() {
-        // Sum of per-sub-vector index widths times count must equal
-        // the sub-mode's innovation_vq_bits.
+        // Sum of per-sub-vector index widths times count (times the
+        // stage count) must equal the sub-mode's innovation_vq_bits.
         for s in NARROWBAND_SUBMODES {
-            if let InnovationMapping::Documented { codebook, count } =
-                InnovationMapping::for_mode(&s)
-            {
-                let total = u32::from(codebook.index_bits()) * u32::from(count);
-                assert_eq!(
-                    total,
-                    u32::from(s.innovation_vq_bits),
-                    "mode {} dispatch bits {total} != table {} bits",
-                    s.mode_id,
-                    s.innovation_vq_bits
-                );
-            }
+            let (codebook, count, stages) = match InnovationMapping::for_mode(&s) {
+                InnovationMapping::Documented { codebook, count } => (codebook, count, 1u32),
+                InnovationMapping::DocumentedTwoStage { codebook, count } => (codebook, count, 2),
+                _ => continue,
+            };
+            let total = u32::from(codebook.index_bits()) * u32::from(count) * stages;
+            assert_eq!(
+                total,
+                u32::from(s.innovation_vq_bits),
+                "mode {} dispatch bits {total} != table {} bits",
+                s.mode_id,
+                s.innovation_vq_bits
+            );
         }
     }
 
@@ -574,15 +657,70 @@ mod tests {
     }
 
     #[test]
-    fn decode_subframe_undocumented_returns_error() {
-        for mode_id in [1u8, 7] {
-            let s = NarrowbandSubmode::for_id(mode_id).unwrap();
-            let r = decode_subframe(&s, 0);
-            assert_eq!(
-                r,
-                Err(InnovationError::Undocumented),
-                "mode {mode_id} should report Undocumented"
-            );
+    fn decode_subframe_mode_1_is_all_zero() {
+        // Mode 1 carries no innovation vector (binding doc §4): the
+        // fixed-codebook contribution is exactly zero.
+        let s = NarrowbandSubmode::for_id(1).unwrap();
+        let v = decode_subframe(&s, 0).unwrap();
+        assert!(v.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn decode_subframe_mode_7_sums_the_two_stages() {
+        // Mode 7: two 48-bit stages of 8 × Sv5_64 over the same 40
+        // samples; the decoded c[n] is the element-wise sum. Pack
+        // distinct per-stage index sequences and check every sample.
+        let s = NarrowbandSubmode::for_id(7).unwrap();
+        let stage1: [u32; 8] = [0, 1, 2, 7, 13, 33, 50, 63];
+        let stage2: [u32; 8] = [63, 50, 33, 13, 7, 2, 1, 0];
+        let mut packed: u128 = 0;
+        for &idx in stage1.iter().chain(stage2.iter()) {
+            packed = (packed << 6) | u128::from(idx);
+        }
+        let v = decode_subframe(&s, packed).unwrap();
+        for sv in 0..8 {
+            let r1 = &innovation_5_64()[stage1[sv] as usize];
+            let r2 = &innovation_5_64()[stage2[sv] as usize];
+            for k in 0..5 {
+                assert_eq!(
+                    v[sv * 5 + k],
+                    r1[k] + r2[k],
+                    "sub-vector {sv} sample {k} must be the stage sum"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_subframe_mode_7_stage_1_is_most_significant() {
+        // A single non-zero index in the top 6 bits of the 96-bit field
+        // belongs to stage 1, sub-vector 0 — its row (plus stage 2's
+        // row 0) must land at samples 0..5.
+        let s = NarrowbandSubmode::for_id(7).unwrap();
+        let packed = 42u128 << (15 * 6);
+        let v = decode_subframe(&s, packed).unwrap();
+        let row42 = &innovation_5_64()[42];
+        let row0 = &innovation_5_64()[0];
+        for k in 0..5 {
+            assert_eq!(v[k], row42[k] + row0[k], "sample {k}");
+        }
+        for sv in 1..8 {
+            for k in 0..5 {
+                assert_eq!(v[sv * 5 + k], 2 * row0[k], "sub-vector {sv} sample {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn decode_subframe_mode_7_max_indices_all_resolve() {
+        let s = NarrowbandSubmode::for_id(7).unwrap();
+        let packed = (1u128 << 96) - 1;
+        let v = decode_subframe(&s, packed).unwrap();
+        let max_row = &innovation_5_64()[63];
+        for sv in 0..8 {
+            for k in 0..5 {
+                assert_eq!(v[sv * 5 + k], 2 * max_row[k]);
+            }
         }
     }
 

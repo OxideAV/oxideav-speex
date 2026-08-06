@@ -612,10 +612,10 @@ mod tests {
     }
 
     #[test]
-    fn every_documented_mode_with_innovation_decodes() {
-        // Modes whose innovation binding is documented (0, 2, 3, 4, 5,
-        // 6, 8) decode; modes 1 and 7 surface the documented gap.
-        for mode in [0u8, 2, 3, 4, 5, 6, 8] {
+    fn every_table_9_1_mode_decodes() {
+        // All nine Table 9.1 modes decode (r438 — the staged
+        // `nb-innovation-binding.md` bound modes 1 and 7).
+        for mode in [0u8, 1, 2, 3, 4, 5, 6, 7, 8] {
             let (submode, body) = parse(mode);
             let mut dec = NarrowbandDecoder::new();
             let pcm = dec
@@ -627,18 +627,45 @@ mod tests {
         }
     }
 
+    /// Mode 1's four 1-bit per-sub-frame innovation-gain fields are
+    /// inert (binding doc §4): flipping them must not change one output
+    /// sample. Decode the same mode-1 frame with the fields at 1
+    /// (all-ones frame) and forced to 0 — identical PCM, both frames.
     #[test]
-    fn undocumented_innovation_modes_report_gap() {
-        for mode in [1u8, 7] {
-            let (submode, body) = parse(mode);
-            let mut dec = NarrowbandDecoder::new();
-            match dec.decode_frame(&body, &submode) {
-                Err(NarrowbandDecodeError::InnovationUndocumented { mode_id }) => {
-                    assert_eq!(mode_id, mode);
-                }
-                other => panic!("mode {mode} expected docs gap, got {other:?}"),
-            }
+    fn mode_1_innovation_gain_bits_are_inert() {
+        let (submode, body_ones) = parse(1);
+        let mut body_zeros = body_ones;
+        for sf in &mut body_zeros.subframes {
+            sf.innovation_gain_index = 0;
         }
+        let mut dec_a = NarrowbandDecoder::new();
+        let mut dec_b = NarrowbandDecoder::new();
+        for _ in 0..3 {
+            let a = dec_a.decode_frame(&body_ones, &submode).unwrap();
+            let b = dec_b.decode_frame(&body_zeros, &submode).unwrap();
+            assert_eq!(a, b, "inert bits changed the decode");
+        }
+    }
+
+    /// Mode 7's innovation is the sum of its two 48-bit stages: zeroing
+    /// the second stage must change the decoded PCM (the stage is
+    /// load-bearing), while the frame still decodes.
+    #[test]
+    fn mode_7_second_stage_is_load_bearing() {
+        let (submode, body_full) = parse(7);
+        let mut body_one_stage = body_full;
+        for sf in &mut body_one_stage.subframes {
+            // Keep stage 1 (top 48 bits), zero stage 2.
+            sf.innovation_vq_index &= ((1u128 << 48) - 1) << 48;
+        }
+        let mut dec_a = NarrowbandDecoder::new();
+        let mut dec_b = NarrowbandDecoder::new();
+        let a = dec_a.decode_frame(&body_full, &submode).unwrap();
+        let b = dec_b.decode_frame(&body_one_stage, &submode).unwrap();
+        assert!(
+            a.iter().zip(b.iter()).any(|(&x, &y)| x != y),
+            "stage 2 should contribute to the decoded PCM"
+        );
     }
 
     #[test]

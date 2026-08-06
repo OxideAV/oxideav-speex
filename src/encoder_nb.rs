@@ -37,9 +37,26 @@
 //! (the mapping between residual magnitude and the `exp(qe/3.5)` OL-gain
 //! domain) is part of the crate's documented gain-Q-format gap; this
 //! encoder chooses gains by direct magnitude matching against the staged
-//! reconstruction levels. Supported modes are the documented-innovation
-//! ones (2 / 3 / 4 / 5 / 6 / 8); modes 1 / 7 (undocumented innovation)
-//! and mode 0 (pure silence) are handled as their degenerate cases.
+//! reconstruction levels.
+//!
+//! All nine Table 9.1 modes encode (r438; the staged
+//! `nb-innovation-binding.md` pinned the last two):
+//!
+//! * modes 2 / 3 / 4 / 5 / 6 / 8 — single-stage innovation VQ;
+//! * mode 7 — **two-stage** innovation (stage 2 quantises the residual
+//!   stage 1 leaves, binding doc §3);
+//! * mode 1 — the vocoder mode: no innovation vector; the excitation is
+//!   the frame-level forced pitch path alone, and the four inert 1-bit
+//!   innovation-gain fields are written as `0` (the value the binding
+//!   doc §4 observed on every reference-encoded frame);
+//! * mode 0 — pure silence.
+//!
+//! Modes with a frame-level open-loop pitch field (1 / 2 / 8) estimate
+//! it by normalised correlation over the frame residual against the
+//! excitation history ([`crate::estimate_open_loop_pitch`]); the
+//! forced-gain modes (1 / 8) quantise the correlation coefficient
+//! through the staged `provenance/02` law (0.9 damping, `15·coef`
+//! clamped to the 4-bit grid).
 
 use crate::adaptive_codebook::{resolve_lookback, TAP_PITCH_OFFSETS};
 use crate::frame::FrameError;
@@ -58,6 +75,7 @@ use crate::narrowband_body::{
     NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX, PITCH_PERIOD_MIN,
 };
 use crate::nb_encode::encode_narrowband_frame;
+use crate::ol_pitch::estimate_open_loop_pitch;
 use crate::pitch_gain;
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 
@@ -101,6 +119,20 @@ impl From<FrameError> for EncodeError {
     fn from(e: FrameError) -> Self {
         EncodeError::Pack(e)
     }
+}
+
+/// Frame-level pitch decisions shared by all four sub-frames — the
+/// encode-side counterpart of the two frame-level Table 9.1 pitch rows.
+#[derive(Debug, Clone, Copy, Default)]
+struct PitchPlan {
+    /// Frame-level open-loop pitch period (modes 1 / 2 / 8). Also the
+    /// fixed per-sub-frame lag for modes without a fine-pitch field
+    /// (the wire transmits no per-sub-frame period there).
+    ol_period: Option<u16>,
+    /// Forced (frame-level) pitch-gain taps for the `OL pitch gain`
+    /// modes (1 / 8) — the same single-centre-tap reconstruction the
+    /// decoder applies ([`crate::forced_pitch_gain_taps`]).
+    forced_taps: Option<pitch_gain::PitchGainTaps>,
 }
 
 /// Stateful narrowband CELP encoder. One instance encodes a continuous
@@ -177,10 +209,10 @@ impl NarrowbandEncoder {
     /// narrowband sub-mode through the Table 9.2 quality ladder
     /// ([`crate::nb_mode_for_quality`]).
     ///
-    /// The encode-side innovation gaps constrain the usable range:
-    /// qualities 0, 9 and 10 select modes 1 / 6 / 7 — mode 1 and 7 carry
-    /// the undocumented-innovation binding and are rejected; qualities
-    /// 1..=8 encode (modes 8 / 2 / 3 / 3 / 4 / 4 / 5 / 5).
+    /// Every quality 0..=10 encodes (r438 — the staged
+    /// `nb-innovation-binding.md` bound the vocoder mode 1 behind
+    /// quality 0 and the two-stage mode 7 behind qualities 9..=10's
+    /// mode ladder tail).
     pub fn encode_packet_quality(
         &mut self,
         frames: &[[i16; NB_FRAME_SAMPLES]],
@@ -228,25 +260,30 @@ impl NarrowbandEncoder {
 
         // --- Excitation: per sub-frame pitch + innovation. ---
         let mapping = InnovationMapping::for_mode(submode);
-        let (codebook, count) = match mapping {
-            InnovationMapping::Silence => (None, 0u8),
-            InnovationMapping::Documented { codebook, count } => (Some(codebook), count),
+        let (codebook, count, stages) = match mapping {
+            InnovationMapping::Silence => (None, 0u8, 0u8),
+            InnovationMapping::Documented { codebook, count } => (Some(codebook), count, 1),
+            InnovationMapping::DocumentedTwoStage { codebook, count } => (Some(codebook), count, 2),
             InnovationMapping::Undocumented => {
                 return Err(EncodeError::UndocumentedInnovation(submode.mode_id))
             }
         };
 
-        let (frame_gain_idx, subframes, _err) =
-            self.refine_frame_gain(&input, &lpc_sets, frame_gain_est, codebook, count, submode);
+        // Frame-level OL pitch fields (modes 1 / 2 / 8), estimated on
+        // the whole-frame scratch residual before the real pass.
+        let (ol_pitch_index, ol_pitch_gain_index, plan) =
+            self.plan_ol_pitch(&input, &lpc_sets, submode);
 
-        // Frame-level OL pitch field (modes 1 / 2 / 8): reuse the first
-        // sub-frame's period estimate as the frame value.
-        let ol_pitch_index = if submode.ol_pitch_bits > 0 {
-            let (period, _, _) = self.search_pitch(&[0.0; SUBFRAME_SAMPLES], submode.pitch_gain);
-            (period.saturating_sub(PITCH_PERIOD_MIN)) as u8
-        } else {
-            0
-        };
+        let (frame_gain_idx, subframes, _err) = self.refine_frame_gain(
+            &input,
+            &lpc_sets,
+            frame_gain_est,
+            codebook,
+            count,
+            stages,
+            &plan,
+            submode,
+        );
 
         // Advance analysis-window look-back and commit envelope state.
         self.prev_input_tail
@@ -256,10 +293,49 @@ impl NarrowbandEncoder {
         Ok(NarrowbandFrameBody {
             lsp_index,
             ol_pitch_index,
-            ol_pitch_gain_index: 0,
+            ol_pitch_gain_index,
             ol_exc_gain_index: frame_gain_field(frame_gain_idx),
             subframes,
         })
+    }
+
+    /// Estimate the frame-level open-loop pitch fields (Table 9.1 `OL
+    /// pitch` / `OL pitch gain` rows, modes 1 / 2 / 8) on the scratch
+    /// whole-frame residual, and build the [`PitchPlan`] the sub-frame
+    /// pass consumes.
+    ///
+    /// The period is the normalised-correlation open-loop estimate
+    /// ([`estimate_open_loop_pitch`]) of the residual against the
+    /// excitation history. For the forced-gain modes (1 / 8) the pitch
+    /// coefficient at that lag is quantised through the staged
+    /// `provenance/02` law: `coef = 0.9 · corr/energy` (the documented
+    /// damping), clamped to the `0.99` synthesis bound, encoded as
+    /// `15 · coef` on the 4-bit grid.
+    fn plan_ol_pitch(
+        &self,
+        input: &[f64],
+        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+        submode: &NarrowbandSubmode,
+    ) -> (u8, u8, PitchPlan) {
+        if submode.ol_pitch_bits == 0 {
+            return (0, 0, PitchPlan::default());
+        }
+        let residual = self.scratch_frame_residual(input, lpc_sets);
+        let ol = estimate_open_loop_pitch(&self.exc_hist, &residual);
+        let (gain_quant, forced_taps) = if submode.ol_pitch_gain_bits > 0 {
+            let q = forced_gain_quant(&self.exc_hist, &residual, ol.period);
+            (q, Some(crate::forced_pitch_gain::forced_pitch_gain_taps(q)))
+        } else {
+            (0, None)
+        };
+        (
+            ol.wire_index(),
+            gain_quant,
+            PitchPlan {
+                ol_period: Some(ol.period),
+                forced_taps,
+            },
+        )
     }
 
     /// Encode the four sub-frames at a fixed reconstructed frame gain
@@ -275,6 +351,8 @@ impl NarrowbandEncoder {
         g_frame: f64,
         codebook: Option<InnovationCodebook>,
         count: u8,
+        stages: u8,
+        plan: &PitchPlan,
         submode: &NarrowbandSubmode,
     ) -> ([NarrowbandSubFrameIndices; SUBFRAMES], f64) {
         let pitch_quant = submode.pitch_gain;
@@ -289,8 +367,32 @@ impl NarrowbandEncoder {
             // Residual r[n] = A(z)·input (analysis filter, continuous state).
             let residual = self.analysis_residual(block, lpc);
 
-            // Pitch search in the excitation domain.
-            let (period, pitch_gain_idx, taps) = self.search_pitch(&residual, pitch_quant);
+            // Pitch, dispatched exactly along the decoder's Table 9.1
+            // rows so every transmitted field is the one the decoder
+            // reads back:
+            // * fine-pitch modes (3..=7): full per-sub-frame lag + VQ
+            //   gain search;
+            // * OL-period VQ mode (2): the wire carries no per-sub-frame
+            //   lag, so the 3-tap gain VQ is searched at the frame's OL
+            //   period;
+            // * forced-gain modes (1 / 8): the frame-level forced taps
+            //   at the frame's OL period, no per-sub-frame search;
+            // * silence (0): no pitch contribution.
+            let (period, pitch_gain_idx, taps) = match pitch_quant {
+                PitchGainQuant::None => {
+                    let period = plan.ol_period.unwrap_or(PITCH_PERIOD_MIN);
+                    let taps = plan
+                        .forced_taps
+                        .unwrap_or(pitch_gain::PitchGainTaps::SILENCE);
+                    (period, 0u8, taps)
+                }
+                _ if has_fine_pitch => self.search_pitch(&residual, pitch_quant),
+                _ => {
+                    let period = plan.ol_period.unwrap_or(PITCH_PERIOD_MIN);
+                    let (idx, taps) = self.search_pitch_gains_at(&residual, pitch_quant, period);
+                    (period, idx, taps)
+                }
+            };
             let pitch = self.pitch_contribution(period, &taps);
 
             // Innovation on the pitch-removed residual.
@@ -300,7 +402,9 @@ impl NarrowbandEncoder {
             }
 
             let (innovation_gain_idx, innovation_vq, exc) = match codebook {
-                Some(cb) => self.encode_innovation(&r2, &pitch, g_frame, cb, count, submode),
+                Some(cb) => {
+                    self.encode_innovation(&r2, &pitch, g_frame, cb, count, stages, submode)
+                }
                 None => (0u8, 0u128, pitch),
             };
 
@@ -352,6 +456,8 @@ impl NarrowbandEncoder {
         estimate: crate::fixed_codebook_gain::FrameInnovationGainIndex,
         codebook: Option<InnovationCodebook>,
         count: u8,
+        stages: u8,
+        plan: &PitchPlan,
         submode: &NarrowbandSubmode,
     ) -> (
         crate::fixed_codebook_gain::FrameInnovationGainIndex,
@@ -382,7 +488,7 @@ impl NarrowbandEncoder {
             let g = f64::from(reconstruct_frame_ol_exc_gain(cand));
             let mut trial = self.clone();
             let (subframes, err) =
-                trial.encode_subframes(input, lpc_sets, g, codebook, count, submode);
+                trial.encode_subframes(input, lpc_sets, g, codebook, count, stages, plan, submode);
             if best.as_ref().map_or(true, |(e, _, _, _)| err < *e) {
                 best = Some((err, cand, subframes, trial));
             }
@@ -449,20 +555,8 @@ impl NarrowbandEncoder {
         lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
         submode: &NarrowbandSubmode,
     ) -> f64 {
-        let mut hist = self.analysis_hist;
-        let mut energy = 0.0_f64;
-        for (sf, lpc) in lpc_sets.iter().enumerate() {
-            let block = &input[sf * SUBFRAME_SAMPLES..(sf + 1) * SUBFRAME_SAMPLES];
-            for &x in block {
-                let mut r = x;
-                for (i, &c) in lpc.iter().enumerate() {
-                    r -= c * hist[LPC_ORDER - 1 - i];
-                }
-                hist.rotate_left(1);
-                hist[LPC_ORDER - 1] = x;
-                energy += r * r;
-            }
-        }
+        let residual = self.scratch_frame_residual(input, lpc_sets);
+        let energy: f64 = residual.iter().map(|&r| r * r).sum();
         let rms = (energy / NB_FRAME_SAMPLES as f64).sqrt();
         // The decode law scales codebook rows by INNOVATION_CODEBOOK_SCALE
         // (Q5 signed-char rows, see `gain_scaled_innovation`), so the
@@ -477,6 +571,31 @@ impl NarrowbandEncoder {
         } else {
             rms
         }
+    }
+
+    /// Whole-frame residual through a **scratch** analysis filter (the
+    /// real per-sub-frame pass keeps its continuous state untouched) —
+    /// shared by the frame-gain estimate and the open-loop pitch plan.
+    fn scratch_frame_residual(
+        &self,
+        input: &[f64],
+        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+    ) -> [f64; NB_FRAME_SAMPLES] {
+        let mut hist = self.analysis_hist;
+        let mut out = [0.0_f64; NB_FRAME_SAMPLES];
+        for (sf, lpc) in lpc_sets.iter().enumerate() {
+            let block = &input[sf * SUBFRAME_SAMPLES..(sf + 1) * SUBFRAME_SAMPLES];
+            for (n, &x) in block.iter().enumerate() {
+                let mut r = x;
+                for (i, &c) in lpc.iter().enumerate() {
+                    r -= c * hist[LPC_ORDER - 1 - i];
+                }
+                hist.rotate_left(1);
+                hist[LPC_ORDER - 1] = x;
+                out[sf * SUBFRAME_SAMPLES + n] = r;
+            }
+        }
+        out
     }
 
     /// Residual `r[n] = x[n] − Σ a[i]·x[n−1−i]` (analysis / prediction-error
@@ -545,6 +664,44 @@ impl NarrowbandEncoder {
         (best.0, best.1, best.2)
     }
 
+    /// Gain-only adaptive-codebook search at a **fixed** pitch period —
+    /// for modes whose wire format carries a frame-level OL period and
+    /// per-sub-frame 3-tap gain VQ but no per-sub-frame lag (mode 2).
+    fn search_pitch_gains_at(
+        &self,
+        residual: &[f64; SUBFRAME_SAMPLES],
+        quant: PitchGainQuant,
+        period: u16,
+    ) -> (u8, pitch_gain::PitchGainTaps) {
+        let n_entries: u16 = match quant {
+            PitchGainQuant::Vq5Bit => 32,
+            PitchGainQuant::Vq7Bit => 128,
+            PitchGainQuant::None => return (0, pitch_gain::PitchGainTaps::SILENCE),
+        };
+        let basis = self.pitch_basis(period);
+        let mut best = (0u8, pitch_gain::PitchGainTaps::SILENCE, f64::INFINITY);
+        for idx in 0..n_entries {
+            let Some(taps) = pitch_gain::reconstruct(idx as u8, quant) else {
+                continue;
+            };
+            let g = [
+                f64::from(taps.taps[0]) / 64.0,
+                f64::from(taps.taps[1]) / 64.0,
+                f64::from(taps.taps[2]) / 64.0,
+            ];
+            let mut err = 0.0_f64;
+            for (n, &rv) in residual.iter().enumerate() {
+                let p = g[0] * basis[0][n] + g[1] * basis[1][n] + g[2] * basis[2][n];
+                let d = rv - p;
+                err += d * d;
+            }
+            if err < best.2 {
+                best = (idx as u8, taps, err);
+            }
+        }
+        (best.0, best.1)
+    }
+
     /// Three adaptive-codebook basis vectors (offsets −T−1, −T, −T+1) for
     /// pitch period `t`.
     fn pitch_basis(&self, t: u16) -> [[f64; SUBFRAME_SAMPLES]; 3] {
@@ -583,6 +740,13 @@ impl NarrowbandEncoder {
 
     /// Innovation encode: choose the codebook indices + sub-frame gain
     /// correction and return `(innovation_gain_index, packed_vq, excitation)`.
+    ///
+    /// `stages` is `1` for the single-stage modes and `2` for mode 7's
+    /// two-pass quantisation (binding doc §3): the second stage searches
+    /// the residual the first stage leaves, and the decoded innovation
+    /// is the sum of both stages' rows — exactly what
+    /// [`crate::innovation::decode_subframe`] reconstructs.
+    #[allow(clippy::too_many_arguments)]
     fn encode_innovation(
         &self,
         r2: &[f64; SUBFRAME_SAMPLES],
@@ -590,6 +754,7 @@ impl NarrowbandEncoder {
         g_frame: f64,
         codebook: InnovationCodebook,
         count: u8,
+        stages: u8,
         submode: &NarrowbandSubmode,
     ) -> (u8, u128, [f64; SUBFRAME_SAMPLES]) {
         // Work in the decode-law domain: codebook rows carry the Q5
@@ -621,6 +786,27 @@ impl NarrowbandEncoder {
                 }
             }
         }
+        let mut packed = choice.packed;
+
+        if stages == 2 {
+            // Stage 2 quantises the residual stage 1 leaves at the same
+            // working gain; the two stages' rows sum in the decode law.
+            let mut r3 = [0.0_f64; SUBFRAME_SAMPLES];
+            for n in 0..SUBFRAME_SAMPLES {
+                r3[n] = r2[n] - g_guess * cb[n];
+            }
+            let choice2 = search_innovation(&r3, g_guess * scale, codebook, count);
+            for (sv, &idx) in choice2.indices.iter().enumerate() {
+                if let Some(row) = sub_vector(codebook, idx) {
+                    let base = sv * sv_len;
+                    for (k, &v) in row.iter().enumerate() {
+                        cb[base + k] += f64::from(v) * scale;
+                    }
+                }
+            }
+            let stage_bits = u32::from(codebook.index_bits()) * u32::from(count);
+            packed = (packed << stage_bits) | choice2.packed;
+        }
 
         // Sub-frame gain correction: quantise α/g_frame into the field.
         let dot: f64 = r2.iter().zip(cb.iter()).map(|(&a, &b)| a * b).sum();
@@ -641,7 +827,7 @@ impl NarrowbandEncoder {
         for n in 0..SUBFRAME_SAMPLES {
             exc[n] = pitch[n] + gain * cb[n];
         }
-        (correction_field(correction), choice.packed, exc)
+        (correction_field(correction), packed, exc)
     }
 
     /// The most recent frame's locally reconstructed excitation
@@ -674,6 +860,37 @@ impl NarrowbandEncoder {
     fn commit_lsp(&mut self, active: [i32; LPC_ORDER]) {
         self.prev_lsp_q10 = Some(active);
     }
+}
+
+/// Quantise the frame's forced (open-loop) pitch coefficient at lag
+/// `period` into the 4-bit `OL pitch gain` field (modes 1 / 8).
+///
+/// The coefficient is the normalised correlation of the frame residual
+/// against the `period`-delayed excitation history, damped by the
+/// staged `provenance/02` factor `0.9` and clamped to the recorded
+/// `0.99` synthesis bound, then encoded through the staged forward law
+/// `15 · coef` clamped to `[0, 15]` (the exact inverse of the decoder's
+/// `0.066667 · quant`). A non-positive correlation (no pitch match)
+/// encodes as `0` — no pitch contribution.
+fn forced_gain_quant(hist: &[f64], frame: &[f64], period: u16) -> u8 {
+    let hlen = hist.len();
+    let t = period as usize;
+    let mut corr = 0.0_f64;
+    let mut energy = 0.0_f64;
+    for (n, &s) in frame.iter().enumerate() {
+        let d = if n >= t {
+            frame[n - t]
+        } else {
+            hist[hlen - (t - n)]
+        };
+        corr += s * d;
+        energy += d * d;
+    }
+    if corr <= 0.0 || energy <= 0.0 {
+        return 0;
+    }
+    let coef = (0.9 * corr / energy).clamp(0.0, 0.99);
+    ((15.0 * coef).round() as i32).clamp(0, 15) as u8
 }
 
 /// Extract the 5-bit OL exc-gain field value from a quantised index.
@@ -744,7 +961,7 @@ mod tests {
 
     #[test]
     fn encodes_documented_modes_to_valid_frames() {
-        for mode in [2u8, 3, 4, 5, 6, 8] {
+        for mode in [1u8, 2, 3, 4, 5, 6, 7, 8] {
             let mut enc = NarrowbandEncoder::new();
             let frame = voiced_frame(40, 4000.0);
             let bytes = enc.encode_frame(&frame, mode).expect("encode");
@@ -753,13 +970,51 @@ mod tests {
     }
 
     #[test]
-    fn undocumented_modes_are_rejected() {
+    fn mode_7_two_stage_frames_decode() {
+        // Mode 7 (24.6 kbps): two-stage innovation. A multi-frame
+        // packet must decode to finite, non-silent PCM.
         let mut enc = NarrowbandEncoder::new();
-        let frame = voiced_frame(50, 2000.0);
-        assert_eq!(
-            enc.encode_frame(&frame, 7),
-            Err(EncodeError::UndocumentedInnovation(7))
+        let frames = [voiced_frame(45, 5000.0), voiced_frame(45, 5200.0)];
+        let pkt = enc.encode_packet(&frames, 7).expect("mode 7 encodes");
+        let mut dec = crate::SpeexDecoder::new();
+        let pcm = dec.decode_packet_pcm_i16(&pkt).expect("mode 7 decodes");
+        assert_eq!(pcm.len(), 2 * NB_FRAME_SAMPLES);
+        assert!(
+            pcm.iter().any(|&s| s != 0),
+            "mode 7 PCM should be non-silent"
         );
+    }
+
+    #[test]
+    fn mode_1_vocoder_frames_decode_with_forced_pitch() {
+        // Mode 1 (2.15 kbps vocoder): no innovation vector; the audible
+        // content is the forced pitch path. Warm the encoder with a
+        // frame so the excitation history is live, then check the
+        // second frame transmits a non-zero forced gain and that the
+        // stream decodes.
+        let mut enc = NarrowbandEncoder::new();
+        let f0 = voiced_frame(40, 8000.0);
+        let _ = enc.encode_frame_body(&f0, 1).expect("frame 0");
+        let body = enc.encode_frame_body(&f0, 1).expect("frame 1");
+        assert!(
+            body.ol_pitch_gain_index > 0,
+            "periodic input over a live history should transmit a forced pitch gain"
+        );
+        // The four inert 1-bit innovation-gain fields are written 0
+        // (binding doc §4: the reference encoder writes all of them 0).
+        for sf in &body.subframes {
+            assert_eq!(sf.innovation_gain_index, 0);
+        }
+        let mut enc2 = NarrowbandEncoder::new();
+        let pkt = enc2
+            .encode_packet(&[f0, voiced_frame(40, 8000.0)], 1)
+            .expect("mode 1 packet");
+        let mut dec = crate::SpeexDecoder::new();
+        let pcm = dec.decode_packet_pcm_i16(&pkt).expect("mode 1 decodes");
+        assert_eq!(pcm.len(), 2 * NB_FRAME_SAMPLES);
+        assert!(pcm
+            .iter()
+            .all(|&s| (-32768..=32767).contains(&i32::from(s))));
     }
 
     #[test]
@@ -824,14 +1079,16 @@ mod tests {
 
             // Single-pass baseline at the estimate's reconstructed gain.
             let g_est = f64::from(reconstruct_frame_ol_exc_gain(est));
+            let plan = PitchPlan::default();
             let mut base = probe.clone();
-            let (_, err_base) =
-                base.encode_subframes(&input, &lpc_sets, g_est, codebook, count, &submode);
+            let (_, err_base) = base.encode_subframes(
+                &input, &lpc_sets, g_est, codebook, count, 1, &plan, &submode,
+            );
 
             // Closed-loop refinement.
             let mut refined = probe.clone();
-            let (_, _, err_ref) =
-                refined.refine_frame_gain(&input, &lpc_sets, est, codebook, count, &submode);
+            let (_, _, err_ref) = refined
+                .refine_frame_gain(&input, &lpc_sets, est, codebook, count, 1, &plan, &submode);
             assert!(
                 err_ref <= err_base + 1e-9,
                 "amp {amp}: refined {err_ref} worse than single-pass {err_base}"
@@ -841,10 +1098,11 @@ mod tests {
 
     #[test]
     fn quality_packets_match_ladder_budgets() {
-        // encode_packet_quality wires the Table 9.2 ladder: for each
-        // encodable quality, one frame + terminator packs to exactly
-        // ceil((mode_bits + 5) / 8) bytes and decodes.
-        for q in 1..=8u8 {
+        // encode_packet_quality wires the Table 9.2 ladder: for EVERY
+        // quality 0..=10 (r438 — modes 1 and 7 are now bound), one
+        // frame + terminator packs to exactly ceil((mode_bits + 5) / 8)
+        // bytes and decodes.
+        for q in 0..=10u8 {
             let mode = crate::quality::nb_mode_for_quality(q).unwrap();
             let submode = NarrowbandSubmode::for_id(mode).unwrap();
             let mut enc = NarrowbandEncoder::new();
@@ -857,17 +1115,9 @@ mod tests {
             let mut dec = crate::SpeexDecoder::new();
             assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");
         }
-        // Qualities selecting undocumented-innovation modes are rejected.
+        // Out-of-range qualities are rejected.
         let mut enc = NarrowbandEncoder::new();
         let frames = [voiced_frame(60, 6000.0)];
-        assert!(
-            enc.encode_packet_quality(&frames, 0).is_err(),
-            "q0 -> mode 1"
-        );
-        assert!(
-            enc.encode_packet_quality(&frames, 10).is_err(),
-            "q10 -> mode 7"
-        );
         assert!(
             enc.encode_packet_quality(&frames, 11).is_err(),
             "q11 out of range"
