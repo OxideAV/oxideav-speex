@@ -64,6 +64,36 @@
 //! lack a pinned sub-frame geometry at the 16 kHz half-band rate
 //! (Table 10.1's VQ budgets are stated for the 8 kHz half-band) and
 //! surface [`UwbDecodeError::UwbLayerUndocumented`].
+//!
+//! ## Campaign-A differential-debug of the speech oracle
+//!
+//! The staged speech oracle `fixtures/uwb-speech-3layer/` (issue #273
+//! item 2) supplies a per-frame reference trace. Re-parsing the stream
+//! reproduces that trace **bit-exactly** for all 126 frames — every NB /
+//! HB / UWB sub-mode, both high-band layers' 12-bit LSP MSVQ stage
+//! indices `(i1,i2)`, and all eight 5-bit folded-gain indices
+//! (`tests/uwb_speech_3layer_fixture.rs`). So the three-layer framing +
+//! index-extraction path is reference-exact; the residual PCM divergence
+//! lives entirely in the folded **reconstruction**. Per-band mean
+//! |error| over the 111 non-silent frames: 0–4 kHz ≈ 1.1 dB (accurate),
+//! 4–8 kHz ≈ 4.8 dB, 8–16 kHz ≈ 7.1 dB, concentrating on the
+//! high-formant frames (weak low band, strong high bands).
+//!
+//! `docs/audio/speex/hb-folded-gain.md` §7.4 pins the outer layer's fold
+//! source as the WB layer's **synthesized** high-band signal
+//! ([`WidebandFrame::high_band`], post HB synthesis filter) 2×-upsampled
+//! with the zero-stuff image pair, scaled by the same kneeless
+//! `C·|Â_uwb(π)|` law the WB layer uses. On the frames whose fold source
+//! (the WB high band) is itself accurate, that law drives the 8–16 kHz
+//! band to <1 dB (from ≈7 dB). It is **not adopted** here because it
+//! conflicts with the `uwb-fold-geometry` **tone** oracle: that
+//! fixture's outer band carries independent 10/13.5 kHz source tones
+//! that a gain-only mode-1 fold structurally cannot reproduce, and the
+//! synthesized-signal source over-amplifies its resonant envelope
+//! (outer-band SNR 6 → −7 dB, full-signal 19 → 6 dB). No single scale
+//! reconciles the two staged oracles; the reconciling reference fact
+//! (the exact outer source normalisation across flat vs resonant
+//! envelopes) is a **docs gap** — see the crate README.
 
 use crate::bitreader::BitReader;
 use crate::codebooks::HB_LPC_ORDER;

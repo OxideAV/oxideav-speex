@@ -37,9 +37,16 @@ absolute — no fitted gain):
 * **Ultra-wideband** (round r403, `tests/uwb_fold_geometry_fixture.rs`):
   the 3-layer tone fixture at 19.1 dB / 0.994 full-signal 32 kHz,
   embedded wideband layers 21.7 dB / 0.997, folded second layer
-  correlation 0.93. On **speech-like material** the 3-layer path is
-  known-divergent (2.0 dB, r410 — a distinct outer-layer mechanism,
-  tracked by `tests/uwb_conformance_fixture.rs`; recorded follow-up).
+  correlation 0.93. On the staged **3-layer speech** oracle
+  (`tests/uwb_speech_3layer_fixture.rs`, campaign A) the decode measures
+  **16.33 dB** full-signal 32 kHz, and its framing is **bit-exact
+  against the reference decoder's own per-frame trace** — all 126
+  frames' NB / HB / UWB sub-modes, both high-band layers' 12-bit LSP
+  MSVQ stage indices `(i1,i2)`, and all eight 5-bit folded-gain indices
+  match, so the whole three-layer parse + index-extraction path is
+  reference-exact. Per-band mean |error|: 0–4 kHz ≈ 1.1 dB (accurate),
+  4–8 kHz ≈ 4.8 dB, 8–16 kHz ≈ 7.1 dB — the residual is in the folded
+  high-band *reconstruction*, not the framing (see "Not yet supported").
 
 What is implemented and tested:
 
@@ -525,24 +532,48 @@ mode-1 fixture.
   offset) — these are bit-exactness details, not sample-correctness ones;
   the sample-correct textbook reconstruction is what ships. Recorded docs
   gap, isolated to the delay convention.
+* **Ultra-wideband 3-layer speech fold — outer-layer reconstruction
+  divergence (campaign A).** The framing is bit-exact against the
+  staged speech oracle's per-frame trace (above), so the residual is
+  purely in the folded high-band *reconstruction*: 4–8 kHz ≈ 4.8 dB and
+  8–16 kHz ≈ 7.1 dB mean band |error|, concentrated on high-formant
+  frames. `docs/audio/speex/hb-folded-gain.md` §7.4 pins the outer
+  layer's fold source as the wideband layer's **synthesized** high-band
+  signal (post HB synthesis filter) 2×-upsampled with the zero-stuff
+  image pair, scaled by the same kneeless `C·|Â_uwb(π)|` law as the WB
+  layer — and on the frames whose fold source is itself accurate that
+  law drives the 8–16 kHz band from ≈7 dB to **<1 dB**. It is not
+  adopted because it **conflicts with the `uwb-fold-geometry` tone
+  oracle**: that fixture's outer band carries independent 10/13.5 kHz
+  source tones a gain-only mode-1 fold cannot reproduce, and the
+  synthesized-signal source over-amplifies its resonant envelope
+  (outer-band 6 → −7 dB, full 19 → 6 dB). No single scale reconciles
+  the two staged oracles. **Docs gap:** the exact outer source
+  normalisation across flat vs resonant transmitted envelopes (a
+  reference behavioural trace of a *speech* mode-1 UWB stream sweeping
+  the transmitted high-band envelope, which §7.3's synthetic sweeps did
+  not cover). The current default keeps the r403 excitation-source /
+  `UWB_FOLD_RECONSTRUCTION_MULT = 1/16` law (tone-fixture-green,
+  speech outer ≈7 dB low), fixture-calibrated to ≈±5 %.
 * **Ultra-wideband excitation-VQ modes (2..=4) — sub-frame geometry
-  gap.** The second-layer fold *source* is now **externally pinned**
-  (see the r403 capability entry below); what remains gapped for the
-  ultra-wideband band is the sub-frame geometry of the
-  excitation-VQ modes 2..=4 at the 16 kHz half-band rate (Table 10.1's
-  VQ budgets are stated for the 8 kHz half-band), which the decoder
-  surfaces as `UwbLayerUndocumented` rather than guessing. The exact
-  outer fold reconstruction multiplier (`UWB_FOLD_RECONSTRUCTION_MULT
-  = 1/16`) is fixture-calibrated to ≈±5 % pending a bit-exact low
-  band, the same posture as the inner wideband constant.
+  gap.** The second-layer fold *source* is externally pinned (r403);
+  what remains gapped for the ultra-wideband band is the sub-frame
+  geometry of the excitation-VQ modes 2..=4 at the 16 kHz half-band
+  rate (Table 10.1's VQ budgets are stated for the 8 kHz half-band),
+  which the decoder surfaces as `UwbLayerUndocumented` rather than
+  guessing.
 * Innovation binding for **high-band mode 4** (the last gapped
   sub-mode — narrowband modes 1 and 7 were bound in r438 by the staged
   `nb-innovation-binding.md`). Mode 4 = 80 bits / 40-sample sub-frame:
   neither staged high-band codebook shape — `HbSv8_128` (8 samples,
   8-bit composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a
-  split matching both the 80-bit budget *and* the 40-sample count, and
-  the staged bit-flip probes cover only the wideband mode-1 high band,
-  so the binding stays a recorded docs gap. It gates wideband /
+  split matching both the 80-bit budget *and* the 40-sample count.
+  **Campaign A confirmed no staged fixture carries mode-4 material to
+  probe:** all three staged high-band fixtures (`wb-mode1-folded`,
+  `uwb-fold-geometry`, `uwb-speech-3layer`) are **all mode-1** in every
+  frame, and the docs give only mode 4's bit *budget* (Table 10.1: 80
+  VQ bits) not its codebook geometry — so the binding cannot be
+  observer-probed and stays a recorded docs gap. It gates wideband /
   ultra-wideband quality 10 (44 kbit/s) encoding.
 * **Intensity-stereo reconstruction.** The staged material pins the
   in-band stereo message's existence and 8-bit size (Table 5.1 code 9)

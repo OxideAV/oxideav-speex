@@ -6,6 +6,43 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Campaign A: **ultra-wideband 3-layer speech conformance gate**
+  (`tests/uwb_speech_3layer_fixture.rs`) on the staged
+  `docs/audio/speex/fixtures/uwb-speech-3layer/` oracle. Its
+  `framing_matches_reference_trace` re-parses the stream and asserts —
+  **bit-exactly across all 126 frames** — every NB / high-band /
+  ultra-wideband sub-mode, both high-band layers' 12-bit LSP MSVQ stage
+  indices `(i1,i2)`, and all eight 5-bit folded-gain indices against the
+  reference decoder's own per-frame `frame-trace.txt`, proving the whole
+  three-layer parse + index-extraction path is reference-exact.
+  `decode_tracks_reference` pins the 32 kHz decode's full-signal SNR
+  (16.33 dB) and per-band mean |error| (0–4 kHz ≈ 1.1 dB accurate;
+  4–8 / 8–16 kHz ≈ 4.8 / 7.1 dB tracking) so a reconstruction fix shows
+  up as a floor raise and a regression fails loudly.
+
+### Fixed / investigated
+
+- Campaign A **differential-debug of the UWB speech divergence**. The
+  bit-exact framing (above) localises the residual to the folded
+  high-band *reconstruction*, not the parse. `hb-folded-gain.md` §7.4's
+  outer-layer law (fold source = the wideband layer's **synthesized**
+  high-band signal, 2×-upsampled with the zero-stuff image pair, scaled
+  by the same kneeless `C·|Â_uwb(π)|` law as the WB layer, `C = 0.17`
+  coinciding with the inner slope) drives the 8–16 kHz band from ≈7 dB
+  to **<1 dB** on the frames whose fold source is itself accurate — but
+  it **conflicts with the `uwb-fold-geometry` tone oracle** (independent
+  10/13.5 kHz outer tones a gain-only mode-1 fold cannot reproduce; the
+  synthesized-signal source over-amplifies its resonant envelope,
+  regressing that fixture 19 → 6 dB). No single scale reconciles the two
+  staged oracles, so the default decode path is unchanged and the exact
+  outer source normalisation is recorded as a docs gap (README). Also
+  confirmed: **no staged fixture carries high-band mode-4 material** —
+  all three high-band fixtures are all-mode-1 — so the mode-4 codebook
+  binding (WB/UWB quality 10) cannot be observer-probed and stays a
+  precise docs gap.
+
 ## [0.0.9](https://github.com/OxideAV/oxideav-speex/compare/v0.0.8...v0.0.9) - 2026-08-06
 
 ### Other
