@@ -391,8 +391,8 @@
 //!   synthesis layer.
 //!
 //! * **Round r438** — the `oxideav-core` framework surface is wired
-//!   (see [`framework`](module docs on [`SpeexFrameworkDecoder`] /
-//!   [`SpeexFrameworkEncoder`]): [`register`] installs real `Decoder` /
+//!   (see [`SpeexFrameworkDecoder`] / [`SpeexFrameworkEncoder`]):
+//!   [`register`] installs real `Decoder` /
 //!   `Encoder` factories under the id `"speex"` (payload magic
 //!   `Speex   `), and the dual-API [`make_decoder`] / [`make_encoder`]
 //!   free functions expose the same factories directly. The same round

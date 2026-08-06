@@ -6,6 +6,54 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round r438: **the `oxideav-core` framework surface is wired** — the
+  generic codec entry points no longer return `NotImplemented`.
+  `register()` installs real decoder + encoder factories under the id
+  `"speex"` (claiming the Ogg payload magic `Speex   `), and the
+  dual-API `make_decoder` / `make_encoder` free functions expose the
+  same factories directly. The framework decoder drives
+  `SpeexStreamDecoder` (header from `extradata`, from `sample_rate`, or
+  from the in-band `Speex   ` header packet with comment/extra-header
+  skip) and emits interleaved-S16 `AudioFrame`s; the framework encoder
+  re-blocks arbitrary-length S16 input into 20 ms frames, emits one
+  self-contained packet per frame, honours a `quality` (0..=10) option,
+  and carries the 80-byte stream header in `output_params().extradata`
+  (`SpeexHeader::write_bytes`, the new exact Table 7.1 serialiser).
+- Round r438: **narrowband modes 1 and 7 decode and encode**, bound by
+  the staged `docs/audio/speex/nb-innovation-binding.md`: mode 1 (2.15
+  kbps vocoder, quality 0) has **no innovation codebook** — its four
+  1-bit innovation-gain fields are read and discarded (they are inert
+  in the reference decoder) and the excitation is the frame-level
+  forced pitch path, which the encoder now drives with a real
+  open-loop pitch estimate and the staged `provenance/02` forced-gain
+  law (0.9 damping, `15·coef` on the 4-bit grid); mode 7 (24.6 kbps,
+  quality 10) is **two independent 48-bit innovation stages** of eight
+  6-bit `sv5-64` lookups summed by the decoder, with the encoder
+  searching stage 2 on the residual stage 1 leaves. Every narrowband
+  quality 0..=10 — and wideband/ultra-wideband 0..=9 — now encodes;
+  WB/UWB quality 10 stays gated on the high-band mode-4
+  innovation-binding docs gap and is rejected with that gap named.
+- Round r438: **2-channel stream handling (documented fallback, not
+  intensity stereo)**. The staged material defines the in-band
+  intensity-stereo message's existence and 8-bit size (Table 5.1 code
+  9) but not its payload semantics or L/R reconstruction law — a
+  recorded docs gap — so the framework decoder emits shape-correct
+  interleaved 2-channel PCM with both channels carrying the
+  transmitted signal, and the framework encoder accepts 2-channel
+  input by `(L+R)/2` downmix to a mono stream.
+
+### Changed
+
+- Mode-2 encoding now searches its 3-tap pitch-gain VQ at the
+  transmitted frame-level open-loop period (the wire carries no
+  per-sub-frame lag for that mode), and mode 8 transmits a real forced
+  open-loop pitch gain instead of a hardwired `0` — both previously
+  paired gains with untransmitted or zeroed lags.
+- Removed `Error::NotImplemented`: no code path returns it since the
+  framework wiring landed.
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-speex/compare/v0.0.7...v0.0.8) - 2026-07-17
 
 ### Other

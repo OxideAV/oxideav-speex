@@ -11,11 +11,13 @@ material staged at
 
 ## Status
 
-**Clean-room rebuild in progress — externally validated decoder.** The
-full decode path is not yet bit-exact, and the framework codec entry
-points still return `Error::NotImplemented`; the decoder is
-**externally validated against the reference decoder** across all
-three rate classes (all CI-gated, absolute — no fitted gain):
+**Clean-room rebuild in progress — externally validated decoder,
+framework-integrated (r438).** The full decode path is not yet
+bit-exact; the framework codec entry points are **wired** (see the
+"Framework integration" bullet below), every Table 9.1 narrowband mode
+decodes and encodes, and the decoder is **externally validated against
+the reference decoder** across all three rate classes (all CI-gated,
+absolute — no fitted gain):
 
 * **Narrowband** (round r410, `tests/nb_conformance_fixture.rs`):
   ten black-box reference-decoder (`--no-enh`) fixtures — Table 9.2 sub-modes
@@ -41,9 +43,39 @@ three rate classes (all CI-gated, absolute — no fitted gain):
 
 What is implemented and tested:
 
+* **Framework integration** (round r438) — `register()` installs real
+  `oxideav-core` decoder + encoder factories under the codec id
+  `speex` (claiming the Ogg payload magic `Speex   `), alongside the
+  dual-API `make_decoder` / `make_encoder` free functions. The
+  framework decoder drives `SpeexStreamDecoder` (header from
+  `extradata`, from `sample_rate`, or from the in-band header packet
+  with comment/extra-header skip) and emits interleaved-S16 audio
+  frames; the framework encoder re-blocks S16 input into 20 ms frames,
+  emits one self-contained packet per frame, honours a `quality`
+  (0..=10) option, and carries the 80-byte stream header
+  (`SpeexHeader::write_bytes`) in its output parameters. **Stereo
+  posture:** the in-band intensity-stereo message is parsed and
+  surfaced (`InbandRequest::IntensityStereo`), but its 8-bit payload's
+  semantics and the L/R reconstruction law are not in the staged docs
+  (recorded gap), so a 2-channel stream decodes with both channels
+  carrying the transmitted signal and 2-channel encoder input is
+  downmixed `(L+R)/2` to a mono stream.
+* **All nine Table 9.1 narrowband modes decode and encode** (round
+  r438, staged `nb-innovation-binding.md`): mode 1 (2.15 kbps vocoder,
+  quality 0) carries no innovation codebook — its four 1-bit
+  innovation-gain fields are read and discarded (inert in the
+  reference decoder, §4 of the binding doc) and its excitation is the
+  frame-level forced pitch path, encoder-driven by a real open-loop
+  pitch estimate + the staged `provenance/02` forced-gain law; mode 7
+  (24.6 kbps, quality 10) is two independent 48-bit innovation stages
+  of eight 6-bit `sv5-64` lookups, summed by the decoder, stage 2
+  searched on stage 1's residual by the encoder. Narrowband qualities
+  0..=10 and wideband/ultra-wideband qualities 0..=9 all encode;
+  WB/UWB quality 10 stays gated on the high-band mode-4 binding gap.
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
-  / ultra-wideband mode cross-check (manual §7.3, RFC 5574 §3).
+  / ultra-wideband mode cross-check (manual §7.3, RFC 5574 §3), plus
+  the exact Table 7.1 serialiser `write_bytes` (r438).
 * **Frame framing** — the per-frame 5-bit prefix
   (`NarrowbandFrameHeader`), the typed narrowband sub-mode table
   (modes 0..=8, manual Table 9.1), the §5.5 in-band signalling and
@@ -431,11 +463,10 @@ mode-1 fixture.
   38.9 dB) with the remaining low-band deltas attributed to the
   unpinned output high-pass transfer and a frame-rate AM sideband
   difference around strong tones, **not** to `lsp_cos` (which gates
-  only fixed-point-build interop). The framework `Decoder` endpoints
-  return `Error::NotImplemented` until reference-equivalence closes;
-  the free-function `SpeexDecoder` / `SpeexStreamDecoder` /
-  `NarrowbandDecoder` / `WidebandDecoder` decode paths are the public
-  surface in the meantime.
+  only fixed-point-build interop). Both API layers ship: the framework
+  `Decoder` / `Encoder` factories (r438) and the free-function
+  `SpeexDecoder` / `SpeexStreamDecoder` / `NarrowbandDecoder` /
+  `WidebandDecoder` decode paths.
 * **Narrowband encoder — end-to-end (functional).** Round r382 drove the
   encoder from the r372 envelope chain to a full narrowband encode
   (`NarrowbandEncoder`): LPC analysis → multi-stage LSP-VQ → per-sub-frame
@@ -455,8 +486,9 @@ mode-1 fixture.
   **Functional, not bit-exact**: the reference gain normalisation (the
   mapping between residual magnitude and the `exp(qe/3.5)` OL-gain domain)
   is part of the documented gain-Q-format gap, so this encoder chooses
-  gains by direct magnitude matching. Modes 2/3/4/5/6/8 are supported;
-  modes 1/7 (undocumented innovation) are rejected. Still missing for a
+  gains by direct magnitude matching. All nine Table 9.1 modes are
+  supported (r438: mode 1 via the forced-pitch vocoder path, mode 7 via
+  the two-stage innovation search). Still missing for a
   *reference-equivalent* encoder: the exact perceptual-domain joint
   pitch+innovation search ordering and the exact gain normalisation.
 * **Wideband (sub-band CELP) encoder — end-to-end (functional).** Round
@@ -503,13 +535,32 @@ mode-1 fixture.
   outer fold reconstruction multiplier (`UWB_FOLD_RECONSTRUCTION_MULT
   = 1/16`) is fixture-calibrated to ≈±5 % pending a bit-exact low
   band, the same posture as the inner wideband constant.
-* Per-mode innovation handling for narrowband modes 1 and 7 and
-  high-band mode 4, whose decomposition the staged inventory does not
-  yet uniquely fix. (Mode 4 = 80 bits / 40-sample sub-frame: neither
-  staged high-band codebook shape — `HbSv8_128` (8 samples, 8-bit
-  composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a split
-  matching both the 80-bit budget *and* the 40-sample count, so the
-  binding stays a recorded docs gap.)
+* Innovation binding for **high-band mode 4** (the last gapped
+  sub-mode — narrowband modes 1 and 7 were bound in r438 by the staged
+  `nb-innovation-binding.md`). Mode 4 = 80 bits / 40-sample sub-frame:
+  neither staged high-band codebook shape — `HbSv8_128` (8 samples,
+  8-bit composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a
+  split matching both the 80-bit budget *and* the 40-sample count, and
+  the staged bit-flip probes cover only the wideband mode-1 high band,
+  so the binding stays a recorded docs gap. It gates wideband /
+  ultra-wideband quality 10 (44 kbit/s) encoding.
+* **Intensity-stereo reconstruction.** The staged material pins the
+  in-band stereo message's existence and 8-bit size (Table 5.1 code 9)
+  and RFC 5574 declares its own payload format mono-only, but neither
+  states the payload's field layout (balance / energy-ratio split) nor
+  the L/R reconstruction law, nor how a stereo input is folded to the
+  transmitted mono signal. Recorded docs gap; until it closes,
+  2-channel streams decode with both channels carrying the transmitted
+  signal (framework surface) and the raw code-9 payload is surfaced
+  via `InbandRequest::IntensityStereo`.
+* **Mode-1 comfort-noise excitation.** The binding doc pins that mode 1
+  transmits no innovation and that its excitation is set by the
+  frame-level fields, but the decoder-side noise-generation rule the
+  reference uses for the vocoder mode (what the OL excitation gain
+  scales when the pitch history is cold) is not staged — this crate's
+  mode-1 decode renders the forced pitch path over a zero innovation,
+  which is exact in structure but noise-free. Recorded docs gap
+  (behavioural trace of a quality-0 stream would close it).
 * **Sub-1 % constants pending a bit-exact low band** — the fixture
   arbitrations leave constants pinned only to a few %: the fold
   ceiling `K` (adopted `1/(2·√2)` inside the measured `0.3516…0.3549`
@@ -533,11 +584,13 @@ mode-1 fixture.
 
 ```toml
 [dependencies]
-oxideav-speex = "0.1"
+oxideav-speex = "0.0"
 ```
 
-Disable default features for the framing / parse surface without the
-framework dependency.
+Register into an `oxideav_core::RuntimeContext` via `register()`, build
+codecs directly with `make_decoder` / `make_encoder`, or use the direct
+types (`SpeexDecoder`, `SpeexStreamDecoder`, `NarrowbandEncoder`,
+`WidebandEncoder`, `UltraWidebandEncoder`) without the registry.
 
 ## License
 
