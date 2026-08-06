@@ -6,6 +6,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-speex/compare/v0.0.8...v0.0.9) - 2026-08-06
+
+### Other
+
+- README + CHANGELOG for the r438 framework wiring, mode 1/7 binding, and stereo/HB-mode-4 gap posture
+- wire the oxideav-core registry surface — real Decoder/Encoder factories, dual-API make_ functions, header writer
+- bind modes 1 and 7 from the staged innovation-binding doc — every Table 9.1 mode now encodes and decodes
+
 ### Added
 
 - Round r438: **the `oxideav-core` framework surface is wired** — the
