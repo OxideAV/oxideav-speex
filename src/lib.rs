@@ -452,6 +452,7 @@ mod pitch_gain;
 mod qmf;
 mod quality;
 mod signalling;
+mod stereo;
 mod stream_decoder;
 mod submode;
 mod synthesis;
@@ -572,7 +573,8 @@ pub use hb_excitation_gain::{
 #[doc(hidden)]
 pub use hb_fold::{
     folded_hb_excitation_slice, folded_hb_excitation_subframe, folded_uwb_excitation_slice,
-    upsample_hb_excitation_linear, HB_FOLD_RECONSTRUCTION_MULT, UWB_FOLD_RECONSTRUCTION_MULT,
+    hb_crossover_response, upsample_hb_excitation_linear, HB_FOLD_RECONSTRUCTION_MULT,
+    UWB_FOLD_RECONSTRUCTION_MULT,
 };
 // stable: error + sub-frame length used in the visible
 // [`WidebandHighBandBody::hb_innovation_sub_vector`] signature
@@ -708,7 +710,11 @@ pub use signalling::{
     InbandMessage, InbandRequest, RateModeConfig, SignallingError, CUSTOM_INBAND_MAX_BYTES,
     CUSTOM_INBAND_SIZE_BITS, INBAND_CODE_BITS, INBAND_TABLE_5_1,
 };
-pub use stream_decoder::{SpeexStreamDecoder, StreamDecodeError};
+pub use stereo::{
+    downmix_mean, encode_stereo_payload, pack_stereo_payload, stereo_gains, StereoDecoder,
+    StereoGains, STEREO_E_RATIO, STEREO_INTERP_A,
+};
+pub use stream_decoder::{SpeexStreamDecoder, StereoFrame, StreamDecodeError};
 pub use submode::{LspQuant, NarrowbandSubmode, PitchGainQuant, Submode, NARROWBAND_SUBMODES};
 // internal: narrowband LPC synthesis filter plumbing, exposed for tests only
 #[doc(hidden)]

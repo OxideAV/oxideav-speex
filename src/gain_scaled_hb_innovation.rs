@@ -89,10 +89,13 @@
 //!   [`crate::hb_synthesis`] layer that consumes this excitation).
 //! * No QMF recombination of the low + high half-bands (that is the
 //!   wideband-synthesis-assembly layer).
-//! * No mode-4 coverage: [`crate::decode_hb_subframe`] returns
-//!   [`crate::HbInnovationError::Undocumented`] for mode 4 (the staged
-//!   inventory does not bind its codebook), so this module surfaces the
-//!   same error for mode 4.
+//! * Mode 4 (80-bit two-stage) is decoded here via the float two-stage
+//!   path ([`crate::hb_innovation::decode_hb_subframe_mode4_f32`],
+//!   stage 2 at weight 0.4) rather than the `[i16; 40]`
+//!   [`crate::decode_hb_subframe`] lookup, then scaled by the same gain
+//!   / `INNOVATION_CODEBOOK_SCALE` — see
+//!   `docs/audio/speex/hb-innovation-binding.md`. A residual on the
+//!   absolute per-frame HB-innovation gain law remains (crate README).
 
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE;
@@ -172,10 +175,22 @@ pub fn gain_scaled_hb_innovation_from_body(
     submode: &WidebandHighBandSubmode,
     sub_idx: usize,
 ) -> Result<[f32; GAIN_SCALED_HB_INNOVATION_SAMPLES], HbInnovationError> {
-    let c_raw = decode_hb_subframe(submode, body.subframes[sub_idx].excitation_vq_index)?;
     let gain = HbExcitationGainIndex::from_body(body, submode, sub_idx)
         .map(reconstruct_hb_exc_gain)
         .unwrap_or(0.0);
+    // Mode 4 (80-bit two-stage): float codebook shape (sign + 0.4 stage 2),
+    // then the shared gain / codebook-scale (docs hb-innovation-binding.md).
+    if submode.excitation_vq_bits == 80 {
+        let shape = crate::hb_innovation::decode_hb_subframe_mode4_f32(
+            body.subframes[sub_idx].excitation_vq_index,
+        );
+        let mut out = [0.0f32; GAIN_SCALED_HB_INNOVATION_SAMPLES];
+        for (slot, &s) in out.iter_mut().zip(shape.iter()) {
+            *slot = gain * INNOVATION_CODEBOOK_SCALE * s;
+        }
+        return Ok(out);
+    }
+    let c_raw = decode_hb_subframe(submode, body.subframes[sub_idx].excitation_vq_index)?;
     Ok(gain_scaled_hb_innovation_subframe(&c_raw, gain))
 }
 
@@ -292,13 +307,28 @@ mod tests {
         }
     }
 
-    /// Mode 4 surfaces the documented `Undocumented` codebook-binding gap.
+    /// Mode 4 now decodes via the two-stage (0.4-weighted) `sv8-128`
+    /// binding (`docs/audio/speex/hb-innovation-binding.md`): a non-zero
+    /// codeword + gain produces a non-silent excitation.
     #[test]
-    fn mode_4_returns_undocumented() {
+    fn mode_4_decodes_two_stage() {
         let submode = WIDEBAND_HIGH_BAND_SUBMODES[4];
-        let body = mk_body(0, [(1, 0); 4]);
-        let r = gain_scaled_hb_innovation_from_body(&body, &submode, 0);
-        assert_eq!(r, Err(HbInnovationError::Undocumented));
+        // Stage 1 group 0 = index 5 (sign 0); everything else zero (index
+        // 0). 80-bit field: top 8 bits = 0x05, rest 0.
+        let vq: u128 = 0x05u128 << 72;
+        let body = mk_body(0, [(5, vq), (0, 0), (0, 0), (0, 0)]);
+        let e = gain_scaled_hb_innovation_from_body(&body, &submode, 0).unwrap();
+        assert!(e.iter().all(|v| v.is_finite()), "finite");
+        assert!(
+            e.iter().any(|&v| v != 0.0),
+            "mode 4 must produce excitation"
+        );
+        // Stage 2 adds a 0.4-weighted refinement: setting the stage-2
+        // group changes the result (mode 4 ≠ mode 3).
+        let vq2: u128 = (0x05u128 << 72) | (0x07u128 << 32); // stage-2 group 0 = idx 7
+        let body2 = mk_body(0, [(5, vq2), (0, 0), (0, 0), (0, 0)]);
+        let e2 = gain_scaled_hb_innovation_from_body(&body2, &submode, 0).unwrap();
+        assert!(e2 != e, "stage 2 refinement must change the excitation");
     }
 
     /// Mode 2 (4 × `HbSv10_32`) — the convenience path equals the

@@ -42,7 +42,7 @@
 //! |    1 |                  0 | [`HbInnovationMapping::Silence`] (gain-only, no VQ field) |
 //! |    2 |                 20 | 4 × `HbSv10_32` (4 × 5-bit indices × 10 samples)          |
 //! |    3 |                 40 | 5 × `HbSv8_128` (5 × (7+1) bits × 8 samples)              |
-//! |    4 |                 80 | [`HbInnovationMapping::Undocumented`] (no unique pinning) |
+//! |    4 |                 80 | two-stage 5 × `HbSv8_128`, stage 2 at weight 0.4          |
 //!
 //! Derivations:
 //!
@@ -57,11 +57,15 @@
 //!   yield `8 × 5 = 40` bits but `8 × 10 = 80` samples — overshoots
 //!   the 40-sample sub-frame, ruled out. So mode 3 is uniquely
 //!   `5 × HbSv8_128`.
-//! * Mode 4 = 80 bits / sub-frame. Neither codebook shape yields a
-//!   bit-budget-AND-sample-count consistent split into the 40-sample
-//!   sub-frame from the staged inventory alone; the staged material
-//!   does not bind a mode-4 dispatch. Surfaced as
-//!   [`HbInnovationMapping::Undocumented`].
+//! * Mode 4 = 80 bits / sub-frame = **two stages** of the mode-3
+//!   geometry (2 × 5 × 8 bits) over the same five 8-sample slots, stage
+//!   2 added at weight 0.4 — pinned by
+//!   `docs/audio/speex/hb-innovation-binding.md` §1/§2 (bit-flip
+//!   staircase + codebook-prediction + the `‖d2‖/‖d1‖ = 0.4` stage
+//!   test). Within an 8-bit group the leading (MSB) bit is a sign and
+//!   the low 7 bits are the `sv8-128` index. See
+//!   [`decode_hb_subframe_mode4_f32`]. A residual on the absolute
+//!   per-frame gain/energy law remains (crate README).
 //!
 //! ## Sign bit (only `HbSv8_128`)
 //!
@@ -192,6 +196,56 @@ pub fn hb_innovation_sub_vector(
             table.get(idx).map(|row| row.as_slice())
         }
     }
+}
+
+/// Stage-2 refinement weight of the high-band **mode-4** two-stage
+/// innovation (`docs/audio/speex/hb-innovation-binding.md` §1 / §2.4:
+/// `‖d2‖/‖d1‖ = 0.4000`, `cos(d1,d2) = 1`). Mode 4 is mode 3 plus a
+/// 0.4-weighted second pass of the *same* `sv8-128` table over the same
+/// five 8-sample slots.
+pub const HB_MODE4_STAGE2_WEIGHT: f32 = 0.4;
+
+/// Decode the **mode-4** (80-bit, two-stage) high-band innovation
+/// sub-frame off the raw `excitation_vq_index` field, returning the raw
+/// codebook-domain shape as `[f32; 40]` (sign-applied, stage-2 added at
+/// [`HB_MODE4_STAGE2_WEIGHT`]) — *before* the shared
+/// `INNOVATION_CODEBOOK_SCALE` / gain scaling the caller applies.
+///
+/// Per `docs/audio/speex/hb-innovation-binding.md` §1/§2 the 80-bit
+/// field is **two stages × five 8-bit groups**, each group an
+/// `sv8-128` sub-vector (8 samples). Within an 8-bit group the leading
+/// (most-significant) bit is a **sign** and the low 7 bits are the
+/// 0..127 codebook index (the §2.2 pair-sum test: flipping `0x80`
+/// negates the sub-vector). Stage 1 is the first five groups; stage 2
+/// the next five, laid over the same five slots and added at weight
+/// 0.4:
+///
+/// ```text
+/// inn[40] = concat_k s1_k·cdbk8[i1_k] + 0.4·concat_k s2_k·cdbk8[i2_k]
+/// ```
+pub fn decode_hb_subframe_mode4_f32(excitation_vq_index: u128) -> [f32; HB_SUBFRAME_SAMPLES] {
+    // 10 groups of 8 bits, MSB-first: groups 0..4 = stage 1, 5..9 = stage 2.
+    let group = |j: u32| -> (u32, bool) {
+        let slot = ((excitation_vq_index >> ((9 - j) * 8)) & 0xFF) as u32;
+        let sign = (slot >> 7) & 1 == 1;
+        (slot & 0x7F, sign)
+    };
+    let table = hb_innovation_8_128();
+    let mut out = [0.0f32; HB_SUBFRAME_SAMPLES];
+    for k in 0..5u32 {
+        let (i1, s1) = group(k);
+        let (i2, s2) = group(k + 5);
+        let row1 = &table[i1 as usize];
+        let row2 = &table[i2 as usize];
+        let sgn1 = if s1 { -1.0f32 } else { 1.0 };
+        let sgn2 = if s2 { -1.0f32 } else { 1.0 };
+        let base = (k as usize) * 8;
+        for m in 0..8usize {
+            out[base + m] =
+                sgn1 * f32::from(row1[m]) + HB_MODE4_STAGE2_WEIGHT * sgn2 * f32::from(row2[m]);
+        }
+    }
+    out
 }
 
 /// Per-mode high-band innovation dispatch resolved from the staged

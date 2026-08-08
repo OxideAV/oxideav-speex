@@ -506,14 +506,16 @@ mod tests {
     }
 
     #[test]
-    fn wideband_high_band_mode4_reports_docs_gap() {
-        // HB mode 4's excitation codebook binding is a documented gap.
+    fn wideband_high_band_mode4_decodes() {
+        // HB mode 4 now decodes via the two-stage sv8-128 binding
+        // (docs/audio/speex/hb-innovation-binding.md).
         let pkt = wideband_packet(5, 4);
         let mut dec = WidebandDecoder::new();
-        match dec.decode_packet(&pkt) {
-            Err(WidebandDecodeError::HighBandUndocumented) => {}
-            other => panic!("expected HighBandUndocumented, got {other:?}"),
-        }
+        let frame = dec.decode_packet(&pkt).expect("mode 4 decodes");
+        assert!(
+            frame.high_band.iter().all(|v| v.is_finite()),
+            "mode-4 high band finite"
+        );
     }
 
     #[test]

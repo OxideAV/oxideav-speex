@@ -501,16 +501,16 @@ mod tests {
         assert!(out.iter().any(|&v| v != 0.0), "signal must be non-silent");
     }
 
-    /// Mode 4 surfaces the documented codebook-binding gap.
+    /// Mode 4 now synthesises via the two-stage `sv8-128` binding.
     #[test]
-    fn mode_4_returns_undocumented() {
+    fn mode_4_synthesises_non_silent() {
         let submode = WIDEBAND_HIGH_BAND_SUBMODES[4];
-        let body = mk_body(0, [(1, 0); 4]);
+        let vq: u128 = 0x05u128 << 72; // stage-1 group 0 = index 5
+        let body = mk_body(0x0123, [(8, vq), (10, vq), (12, vq), (6, vq)]);
         let mut f = HbSynthesisFilter::new();
-        assert_eq!(
-            synthesise_high_band_frame(&body, &submode, &mut f),
-            Err(HbInnovationError::Undocumented)
-        );
+        let out = synthesise_high_band_frame(&body, &submode, &mut f).unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
+        assert!(out.iter().any(|&v| v != 0.0), "mode 4 must be non-silent");
     }
 
     /// The filter history carries across frames: a second mode-2 frame

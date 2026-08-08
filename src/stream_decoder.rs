@@ -58,6 +58,12 @@ impl From<UwbDecodeError> for StreamDecodeError {
     }
 }
 
+/// One audio frame's decoded mono PCM paired with the code-9 stereo
+/// payload seen ahead of it (`None` if the stream carries no intensity
+/// message). Returned by
+/// [`SpeexStreamDecoder::decode_packet_frames_stereo`].
+pub type StereoFrame = (Vec<i16>, Option<u8>);
+
 /// The rate-class-specific decoder behind the dispatch.
 #[derive(Debug, Clone)]
 enum Inner {
@@ -126,6 +132,63 @@ impl SpeexStreamDecoder {
             Inner::NarrowOrWide(d) => Ok(d.decode_packet_pcm_i16(packet)?),
             Inner::Ultra(d) => Ok(d.decode_packet_pcm_i16(packet)?),
         }
+    }
+
+    /// Decode a packet to per-audio-frame `(mono PCM, code-9 stereo
+    /// payload)` pairs.
+    ///
+    /// The code-9 intensity-stereo message (Manual §5.5 / Table 5.1)
+    /// precedes each audio frame in a stereo stream; this method pairs
+    /// each audio frame's mono PCM with the most recent code-9 payload
+    /// seen ahead of it (`None` if the stream carries no stereo message).
+    /// The mono PCM is identical to what
+    /// [`Self::decode_packet_pcm_i16`] concatenates — the stereo law
+    /// (see [`crate::StereoDecoder`]) sits above this decode.
+    pub fn decode_packet_frames_stereo(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<Vec<StereoFrame>, StreamDecodeError> {
+        use crate::decoder::{ControlMessage, DecodedFrame};
+        use crate::uwb_decoder::UwbDecodedFrame;
+
+        const STEREO_CODE: u8 = 9;
+        let mut out = Vec::new();
+        let mut pending: Option<u8> = None;
+        match &mut self.inner {
+            Inner::NarrowOrWide(d) => {
+                for f in d.decode_packet(packet)? {
+                    match f {
+                        DecodedFrame::Control(ControlMessage::Inband { message, .. })
+                            if message.spec.code == STEREO_CODE =>
+                        {
+                            pending = Some(message.payload as u8);
+                        }
+                        DecodedFrame::Control(_) => {}
+                        audio => {
+                            if let Some(pcm) = audio.pcm_i16() {
+                                out.push((pcm, pending.take()));
+                            }
+                        }
+                    }
+                }
+            }
+            Inner::Ultra(d) => {
+                for f in d.decode_packet(packet)? {
+                    match f {
+                        UwbDecodedFrame::Control(ControlMessage::Inband { message, .. })
+                            if message.spec.code == STEREO_CODE =>
+                        {
+                            pending = Some(message.payload as u8);
+                        }
+                        UwbDecodedFrame::Control(_) => {}
+                        UwbDecodedFrame::Audio(a) => {
+                            out.push((a.uwb_pcm_i16().to_vec(), pending.take()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

@@ -1,0 +1,31 @@
+# Folded-band transmitted-envelope sweep - measured crossover invariance
+# For each forced high-band LSP setting (stage-1 index i1, stage-2 index 20) the
+# layer's own contribution is isolated exactly as  y(g=24) - y(g=0)  (every other
+# layer is bit-identical and the chain is linear in the folded gain), then the
+# log10 spectral ratio against the i1=0 setting is taken over the layer's band.
+#
+#   band_mean = log10(scale ratio)          (log|A| has zero mean over the band)
+#   edge_xover= log10 ratio at the QMF crossover edge (300 Hz average)
+#   edge_far  = log10 ratio at the far edge of the band
+#
+# Under scale = C*|A(pi)| (pi = internal Nyquist = the QMF crossover) edge_xover
+# must be 0 for every setting, whatever the envelope shape.
+#
+# Spectra are the mean of three log-spectra taken over 4-frame Hann windows at
+# frame offsets 2, 6 and 10.  Neither decode clips (verified).
+#
+# layer      i1   band_mean   edge_xover   edge_far
+  uwb-outer   0    +0.0000     +0.0000    +0.0000
+  uwb-outer   8    -0.5157     +0.0050    -0.4596
+  uwb-outer  20    -0.7292     +0.0214    -0.4407
+  uwb-outer  33    -1.1219     +0.0697    -0.5978
+  uwb-outer  49    -1.1084     +0.0675    -0.6456
+  uwb-outer  63    -1.3231     +0.1056    -0.7233
+  wb-inner    0    +0.0000     +0.0000    +0.0000
+  wb-inner    8    -0.5138     +0.0135    -0.4832
+  wb-inner   20    -0.7312     +0.0233    -0.4686
+  wb-inner   33    -1.1647     +0.0818    -0.6257
+  wb-inner   49    -1.1428     +0.0554    -0.6871
+  wb-inner   63    -1.3756     +0.0263    -0.8108
+# uwb-outer  rms: band_mean 1.0036   edge_xover 0.0649   edge_far 0.5836
+# wb-inner   rms: band_mean 1.0347   edge_xover 0.0473   edge_far 0.6283

@@ -8,6 +8,70 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Campaign B: **intensity stereo — true in-band decode and encode**
+  (`src/stereo.rs`, wired through `SpeexStreamDecoder` +
+  `SpeexFrameworkDecoder`/`Encoder`). Implements the clean-room law of
+  `docs/audio/speex/intensity-stereo.md`: the 8-bit code-9 payload
+  (`[sign][5-bal][2-e_ratio]`) reconstructs an `(gL,gR)` gain pair
+  (`b=exp(bal/8)`, `F=√(0.5/e_ratio)`, `e_ratio={0.25,0.315,0.397,0.5}`)
+  with the §4 intra-frame interpolation (`a=0.980`), producing
+  interleaved L/R from the single mono decode; the encoder emits the
+  `(L+R)/2` downmix with the per-frame code-9 message prefixed and
+  declares 2 channels. New gate `tests/intensity_stereo_fixture.rs` on
+  the staged `stereo-nb-ladder-q4` oracle shows the interleaved SNR
+  **tracks the mono decode within ~0.4 dB** (13.40 vs 13.83 dB) — the
+  L/R reconstruction adds no material error; the §4.1 sub-frame
+  block-phase offset is not reproduced (bounds byte-exactness).
+- Campaign B: **high-band mode 4 (WB/UWB quality 10) now decodes.**
+  Bound the 80-bit two-stage innovation per
+  `docs/audio/speex/hb-innovation-binding.md` (2 × 5 × 8-bit groups over
+  the same five `sv8-128` 8-sample slots, MSB sign bit, stage 2 at
+  weight 0.4; `hb_innovation::decode_hb_subframe_mode4_f32`). A q10
+  wideband stream that previously surfaced a docs-gap error now decodes;
+  new gate `tests/hb_mode4_fixture.rs` pins the low band reference-
+  tracking (0–4 kHz ≈ 2.2 dB) and the mode-4 high band as a documented
+  residual floor (4–8 kHz ≈ 13 dB, see below).
+- Campaign B: **folded-band scale-law validation** against the newly
+  staged `fold-envelope-sweep` material (`tests/fold_envelope_sweep.rs`).
+  A decode-free check that the crate's own `|Â(π)|` reproduces the
+  reference decoder's measured per-band scale ratios: it matches to
+  ~0.5 dB (≤0.031 log10) for the shallow/mid envelopes `i1∈{0,8,20}`,
+  confirming the kneeless `s=C·|Â(π)|` law of `hb-folded-gain.md`
+  §7.3/§7.5 where it is pinned, and diverging only at the near-
+  degenerate deep envelopes `i1∈{33,49,63}` (`|Â(π)|≲0.05`) the doc
+  itself flags.
+
+### Fixed / investigated
+
+- Campaign B **fold reconciliation (no net-positive decode change).**
+  Both newly-staged reconciliation laws were implemented behind switches
+  and measured against the staged oracles' `expected.pcm`: (a) the
+  kneeless linear inner law `C·|Â(π)|` (no ceiling) regresses the
+  `wb-mode1-folded` tone fixture (best 32.6 dB at C=0.15 vs 38.9 dB
+  flat); (b) the §7.4 synthesized-WB-HB-signal outer source with a
+  crossover-shaped scale regresses **both** the tone oracle (19→6 dB)
+  and the speech 8–16 kHz band-mean (7.06→7.9+ dB) at every C. The
+  `fold_envelope_sweep` validation shows *why* the two coexist: the
+  crate's `|Â(π)|` is the reference's normalising response only in the
+  shallow/mid range, so the kneeless law over-amplifies at the high
+  `|Â(π)|` the anchor tone fixtures operate at. The default decode path
+  is therefore unchanged (the ceiling law remains the best the crate
+  realises); the residual is the high-`|Â(π)|` crossover-response
+  normalisation + the unpinned outer image weighting — precise docs
+  gaps (README).
+- Campaign B **HB-innovation-mode residual (modes 2/3/4).** The mode-4
+  q10 fixture is the first reference validation of an HB *innovation*
+  mode: the two-stage shape decodes but the 4–8 kHz band tracks to
+  ~13 dB (doc-faithful magnitude) / ~8 dB (best constant magnitude fit).
+  A constant magnitude cannot close it, localising the residual to the
+  **absolute per-frame HB-innovation gain/energy law**, which the staged
+  evidence (codebook *shape* + the 0.4 stage weight, isolated via
+  sign-difference) does not pin. The WB/UWB stereo ladders confirm the
+  same: their mono decode is bounded by this same HB-innovation residual,
+  not the stereo law. Recorded as a precise docs gap. WB/UWB quality-10
+  *encoding* stays declined (decode works; encode search + the gain law
+  are unpinned).
+
 - Campaign A: **ultra-wideband 3-layer speech conformance gate**
   (`tests/uwb_speech_3layer_fixture.rs`) on the staged
   `docs/audio/speex/fixtures/uwb-speech-3layer/` oracle. Its

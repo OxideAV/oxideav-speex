@@ -33,5 +33,16 @@ nb_440hz_q8.spx: nb_440hz_q8.tmp.raw
 	$(SPEEXENC) --narrowband --rate 8000 --le --16bit --quality 8 $< $@
 	rm -f $<
 
+# Mirrored staged oracles (campaign B). These directory fixtures are
+# copies of the clean-room black-box material under
+# docs/audio/speex/fixtures/, committed here so the crate's CI does not
+# reach outside the crate tree. They are NOT regenerated locally; the
+# authoritative provenance (tool versions, SHA-256, method) lives in
+# docs/audio/speex/provenance/05 (intensity stereo) and /06 (HB mode 4 +
+# envelope sweep):
+#   hb-mode4-wb-q10/{input.spx,expected.pcm}      -> HB mode-4 decode gate
+#   stereo-nb-ladder-q4/{input.spx,expected*.pcm} -> intensity-stereo gate
+#   fold-envelope-sweep/sweep-measurements.txt    -> |Â(π)| scale-law gate
+
 clean:
 	rm -f nb_440hz_q8.spx nb_440hz_q8.tmp.raw

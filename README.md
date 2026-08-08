@@ -12,11 +12,13 @@ material staged at
 ## Status
 
 **Clean-room rebuild in progress — externally validated decoder,
-framework-integrated (r438).** The full decode path is not yet
-bit-exact; the framework codec entry points are **wired** (see the
-"Framework integration" bullet below), every Table 9.1 narrowband mode
-decodes and encodes, and the decoder is **externally validated against
-the reference decoder** across all three rate classes (all CI-gated,
+framework-integrated (r438), intensity-stereo + HB-mode-4 decode
+(campaign B).** The full decode path is not yet bit-exact; the framework
+codec entry points are **wired**, every Table 9.1 narrowband mode
+decodes and encodes, **intensity stereo** decodes and encodes (true
+in-band L/R, `src/stereo.rs`), **high-band mode 4 / quality 10**
+decodes, and the decoder is **externally validated against the
+reference decoder** across all three rate classes (all CI-gated,
 absolute — no fitted gain):
 
 * **Narrowband** (round r410, `tests/nb_conformance_fixture.rs`):
@@ -60,13 +62,21 @@ What is implemented and tested:
   frames; the framework encoder re-blocks S16 input into 20 ms frames,
   emits one self-contained packet per frame, honours a `quality`
   (0..=10) option, and carries the 80-byte stream header
-  (`SpeexHeader::write_bytes`) in its output parameters. **Stereo
-  posture:** the in-band intensity-stereo message is parsed and
-  surfaced (`InbandRequest::IntensityStereo`), but its 8-bit payload's
-  semantics and the L/R reconstruction law are not in the staged docs
-  (recorded gap), so a 2-channel stream decodes with both channels
-  carrying the transmitted signal and 2-channel encoder input is
-  downmixed `(L+R)/2` to a mono stream.
+  (`SpeexHeader::write_bytes`) in its output parameters.
+* **Intensity stereo — true in-band decode and encode** (campaign B,
+  `src/stereo.rs`, staged `intensity-stereo.md`). The 8-bit code-9
+  payload (`[sign][5-bal][2-e_ratio]`) reconstructs an `(gL,gR)` gain
+  pair (`b=exp(bal/8)`, `F=√(0.5/e_ratio)`,
+  `e_ratio={0.25,0.315,0.397,0.5}`) with the §4 intra-frame
+  interpolation (`a=0.980`), producing interleaved L/R from the single
+  mono decode; the encoder emits the `(L+R)/2` downmix with the
+  per-frame code-9 message prefixed and declares 2 channels. On the
+  staged `stereo-nb-ladder-q4` oracle the interleaved SNR **tracks the
+  mono decode within ~0.4 dB** (13.40 vs 13.83 dB) — the L/R law adds
+  no material error (`tests/intensity_stereo_fixture.rs`). The §4.1
+  sub-frame block-phase offset is a `speexdec`-pipeline detail this
+  decoder does not reproduce (bounds byte-exactness). The raw payload
+  also stays available via `InbandRequest::IntensityStereo`.
 * **All nine Table 9.1 narrowband modes decode and encode** (round
   r438, staged `nb-innovation-binding.md`): mode 1 (2.15 kbps vocoder,
   quality 0) carries no innovation codebook — its four 1-bit
@@ -77,8 +87,18 @@ What is implemented and tested:
   (24.6 kbps, quality 10) is two independent 48-bit innovation stages
   of eight 6-bit `sv5-64` lookups, summed by the decoder, stage 2
   searched on stage 1's residual by the encoder. Narrowband qualities
-  0..=10 and wideband/ultra-wideband qualities 0..=9 all encode;
-  WB/UWB quality 10 stays gated on the high-band mode-4 binding gap.
+  0..=10 and wideband/ultra-wideband qualities 0..=9 all encode; WB/UWB
+  quality 10 *decodes* (see next) but encoding it stays declined.
+* **High-band mode 4 (WB/UWB quality 10) decodes** (campaign B, staged
+  `hb-innovation-binding.md`). The 80-bit two-stage innovation — 2 × 5
+  × 8-bit groups over the same five `sv8-128` 8-sample slots, MSB sign
+  bit, stage 2 at weight 0.4 (`decode_hb_subframe_mode4_f32`) — now
+  decodes a q10 stream that previously surfaced a docs-gap error
+  (`tests/hb_mode4_fixture.rs`): the low band tracks the reference
+  (0–4 kHz ≈ 2.2 dB) and the mode-4 high band carries a **documented
+  residual** (4–8 kHz ≈ 13 dB — the unpinned absolute per-frame
+  HB-innovation gain law; see "Not yet supported"). Encoding q10 stays
+  declined (the encoder mode-4 search + the gain law are unpinned).
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
   / ultra-wideband mode cross-check (manual §7.3, RFC 5574 §3), plus
@@ -519,9 +539,37 @@ mode-1 fixture.
   mode). Packet-level entry points (`encode_packet` on both encoders,
   closing with the §5.5 mode-15 terminator) round-trip through the
   top-level `SpeexDecoder`, with packetisation pinned
-  decode-transparent. HB modes 0/1/2/3 supported; mode 4 stays the
-  recorded innovation-binding docs gap. Functional, not bit-exact —
-  same gain-normalisation posture as the narrowband encoder.
+  decode-transparent. HB modes 0/1/2/3 encode; mode 4 now **decodes**
+  (campaign B) but is not encoded (the mode-4 codebook search + the
+  absolute HB-innovation gain law are unpinned). Functional, not
+  bit-exact — same gain-normalisation posture as the narrowband encoder.
+* **Folded high-band reconciliation — measured, default unchanged**
+  (campaign B). The newly-staged `fold-envelope-sweep` material lets the
+  crate's own `|Â(π)|` be checked against the reference decoder's
+  measured per-band scale ratios (`tests/fold_envelope_sweep.rs`): it
+  matches to ~0.5 dB in the shallow/mid envelope range, confirming the
+  kneeless `s=C·|Â(π)|` law of `hb-folded-gain.md` §7.3/§7.5, and
+  diverges only at the near-degenerate deep envelopes the doc itself
+  flags. But adopting the kneeless law (removing the crate's ceiling)
+  **regresses** the `wb-mode1-folded` tone oracle (best 32.6 vs 38.9 dB
+  flat), and the §7.4 synthesized-WB-HB-signal outer source regresses
+  **both** the tone oracle (19→6 dB) and the speech 8–16 kHz band-mean —
+  because the crate's `|Â(π)|` is the reference's normalising response
+  only in the shallow/mid range, not at the high `|Â(π)|` the anchor
+  fixtures operate at. The default decode path is therefore unchanged
+  (the ceiling law is the best the crate realises). **Precise remaining
+  gaps:** the high-`|Â(π)|` crossover-response normalisation, and the
+  outer fold's exact image weighting (`hb-folded-gain.md` §7.5 residual
+  2).
+* **High-band innovation-mode gain law (modes 2/3/4)** — the mode-4 q10
+  fixture is the first reference validation of an HB *innovation* mode:
+  the two-stage shape decodes but the 4–8 kHz band tracks to ~13 dB
+  (doc-faithful) / ~8 dB (best constant magnitude). A constant magnitude
+  cannot close it, localising the residual to the **absolute per-frame
+  HB-innovation gain/energy law**, which the staged evidence (codebook
+  shape + the 0.4 stage weight, via sign-difference isolation) does not
+  pin. The WB/UWB intensity-stereo ladders' mono decode is bounded by
+  the same residual. A precise docs gap.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror
