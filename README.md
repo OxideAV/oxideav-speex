@@ -32,10 +32,12 @@ absolute — no fitted gain):
   `tests/wb_mode1_folded_fixture.rs` / `tests/wb_conformance_fixture.rs`):
   the tone fixture at 16.7 dB full-signal / **38.9 dB, corr 0.99994**
   on the folded high band; speech-like fixtures at qualities 4/6/8 at
-  **15.6 / 18.3 / 18.2 dB** full-signal — the first reference
+  **15.6 / 18.3 / 18.3 dB** full-signal — the first reference
   comparison of the high-band excitation-VQ sub-modes 2/3, and the
   fixture set that arbitrated the r410 **crossover-shaped folded
-  high-band law** (see `hb_fold`).
+  high-band law** (see `hb_fold`). Round r440 fixed the mode-3
+  sign/index wire order to the measured binding (`[sign][7-bit index]`,
+  leading sign bit — `hb-innovation-binding.md` §1/§2.2).
 * **Ultra-wideband** (round r403, `tests/uwb_fold_geometry_fixture.rs`):
   the 3-layer tone fixture at 19.1 dB / 0.994 full-signal 32 kHz,
   embedded wideband layers 21.7 dB / 0.997, folded second layer
@@ -89,16 +91,25 @@ What is implemented and tested:
   searched on stage 1's residual by the encoder. Narrowband qualities
   0..=10 and wideband/ultra-wideband qualities 0..=9 all encode; WB/UWB
   quality 10 *decodes* (see next) but encoding it stays declined.
-* **High-band mode 4 (WB/UWB quality 10) decodes** (campaign B, staged
-  `hb-innovation-binding.md`). The 80-bit two-stage innovation — 2 × 5
-  × 8-bit groups over the same five `sv8-128` 8-sample slots, MSB sign
-  bit, stage 2 at weight 0.4 (`decode_hb_subframe_mode4_f32`) — now
-  decodes a q10 stream that previously surfaced a docs-gap error
-  (`tests/hb_mode4_fixture.rs`): the low band tracks the reference
-  (0–4 kHz ≈ 2.2 dB) and the mode-4 high band carries a **documented
-  residual** (4–8 kHz ≈ 13 dB — the unpinned absolute per-frame
-  HB-innovation gain law; see "Not yet supported"). Encoding q10 stays
-  declined (the encoder mode-4 search + the gain law are unpinned).
+* **High-band mode 4 (WB/UWB quality 10) decodes — state-derived gain
+  base + pinned polarity** (campaign B + r440, staged
+  `hb-innovation-binding.md` + `provenance/08`). The 80-bit two-stage
+  innovation — 2 × 5 × 8-bit groups over the same five `sv8-128`
+  8-sample slots, leading sign bit, stage 2 at weight 0.4
+  (`decode_hb_subframe_mode4_f32`) — decodes with the r440 absolute
+  gain `g = HB_GC_STATE_SCALE·(gc_recon·lb_frame_rms)²`: provenance/08
+  measures that the transmitted 4-bit correction alone explains
+  essentially nothing (R² = 0.005) and that the base tracks the **same
+  frame's reconstructed low band**; the exponents take the doc's
+  nearly-free fixed-2 reading and the scale is fixture-calibrated
+  (documented fitted — the exact law is the recorded docs gap). The
+  innovation **polarity** through this crate's QMF conventions is
+  pinned (`HB_INNOVATION_POLARITY = −1`, the binding doc §4's one-bit
+  trial against `expected.pcm`). Measured on the staged q10 oracle
+  (`tests/hb_mode4_fixture.rs`): 4–8 kHz band mean |err| **13.1 →
+  6.1 dB**, isolated high sub-band correlation **≈0 → +0.44**, energy
+  ratio 0.086 → 0.74; low band 0–4 kHz ≈ 2.2 dB throughout. Encoding
+  q10 stays declined (the encoder mode-4 search is unpinned).
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
   / ultra-wideband mode cross-check (manual §7.3, RFC 5574 §3), plus
@@ -223,6 +234,28 @@ What is implemented and tested:
   out on zero excitation. `decode_frame` / `decode_frame_i16` emit the
   full 160-sample frame with the live pitch path — earlier rounds fed the
   synthesis filter the innovation alone because the feedback was unwired.
+* **QMF analysis bank pinned as the provenance/08 instrument** (round
+  r440, `tests/qmf_band_isolation.rs`). Provenance/08 validates the
+  staged 64-tap prototype as a measurement instrument (its 88–95 dB
+  sub-band isolation is what makes fixture sub-bands recoverable from
+  decoded PCM without an oracle); the crate's `QmfAnalysis` reproduces
+  all six documented tone-isolation figures **to their 0.1 dB print
+  precision** (−95.10 / −95.61 / −87.94 / +87.94 / +95.61 / +95.10 dB),
+  gated at ±0.5 dB plus mirror-pair symmetry. The mode-4 fixture gains
+  a QMF-route sub-band conformance gate built on it (true 8 kHz
+  sub-band scoring + a pin on the ≈142-sample decoder delay against
+  the source-length-trimmed reference).
+* **§7.6 crossover-response parity closed form** (round r440,
+  `hb-folded-gain.md` §7.6): `hb_crossover_response_from_lsp` is the
+  pinned odd-parity product `|Â(π)| = Π 4·cos²(ωᵢ/2)` over the
+  odd-indexed LSP class, verified equal to the direct polynomial
+  evaluation on every swept envelope (≤0.008 log10);
+  `hb_crossover_response_bwexp` + `HB_FOLD_ENVELOPE_COMPRESSION_GAMMA
+  = 0.944` surface §7.6's compression model (inferred, not wired into
+  the default fold scale). `tests/fold_envelope_sweep.rs` cross-checks
+  the whole chain against the staged
+  `hb-fold-envelope-vs-transmitted.csv` columns — reproduced to
+  ≤0.007 log10 on all six settings.
 * **QMF synthesis filterbank** (`QmfSynthesis`, round r365) — the final
   wideband recombination of the two reconstructed 8 kHz half-band signals
   (low band 0–4 kHz + high band 4–8 kHz folded) into a single 16 kHz
@@ -510,10 +543,13 @@ mode-1 fixture.
   Table 9.1 writer, `parse(write(body)) == body`). An
   `encoder_nb_roundtrip` integration test drives encode → wire → parse →
   `NarrowbandDecoder` and confirms finite PCM + input-energy tracking.
-  **Functional, not bit-exact**: the reference gain normalisation (the
-  mapping between residual magnitude and the `exp(qe/3.5)` OL-gain domain)
-  is part of the documented gain-Q-format gap, so this encoder chooses
-  gains by direct magnitude matching. All nine Table 9.1 modes are
+  **Functional, not bit-exact**: the OL-gain *quantiser law* itself is
+  now exact (r440, `quantise_frame_ol_exc_gain_exact` — the staged
+  `qe = floor(0.5 + 3.5·ln g)` float-build expression from
+  provenance/02), but the reference's normalisation (which residual
+  magnitude feeds that law — the analysis window / energy definition)
+  remains undocumented, so this encoder chooses its gain target by
+  direct magnitude matching and refines closed-loop. All nine Table 9.1 modes are
   supported (r438: mode 1 via the forced-pitch vocoder path, mode 7 via
   the two-stage innovation search). Still missing for a
   *reference-equivalent* encoder: the exact perceptual-domain joint
@@ -561,15 +597,22 @@ mode-1 fixture.
   gaps:** the high-`|Â(π)|` crossover-response normalisation, and the
   outer fold's exact image weighting (`hb-folded-gain.md` §7.5 residual
   2).
-* **High-band innovation-mode gain law (modes 2/3/4)** — the mode-4 q10
-  fixture is the first reference validation of an HB *innovation* mode:
-  the two-stage shape decodes but the 4–8 kHz band tracks to ~13 dB
-  (doc-faithful) / ~8 dB (best constant magnitude). A constant magnitude
-  cannot close it, localising the residual to the **absolute per-frame
-  HB-innovation gain/energy law**, which the staged evidence (codebook
-  shape + the 0.4 stage weight, via sign-difference isolation) does not
-  pin. The WB/UWB intensity-stereo ladders' mono decode is bounded by
-  the same residual. A precise docs gap.
+* **High-band innovation-mode gain law (modes 2/3/4)** — provenance/08
+  measured the mode-4 base as state-derived from the same frame's low
+  band, and the r440 fixture-calibrated squared law drops the 4–8 kHz
+  band error to ~6.1 dB (from ~13 dB doc-faithful) with the isolated
+  sub-band correlating at +0.44. What remains open: the **exact** gain
+  law (provenance/08 deliberately asserts none — R² = 0.80 at 8.7 dB
+  rms is a direction, not a formula; its ask is a fixture pair
+  separating the low-band-level and high-band-content drivers, or a
+  second LSP setting, or the `hb-mode4-uwb-q10` trace re-emitted in
+  the WB format), and the **modes 2/3 base**: the mode-4-calibrated
+  law measurably regresses the staged `wb_q6` oracle when applied to
+  mode 2 (it is level-inhomogeneous and single-fixture-scaled), so
+  modes 2/3 keep the correction-only gain until a sub-band
+  measurement covers them — a precise docs ask. The WB/UWB
+  intensity-stereo ladders' mono decode is bounded by the same
+  residual.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
   **lands** (`QmfSynthesis`, round r365): the two half-bands recombine
   into 16 kHz wideband PCM via the textbook two-band quadrature-mirror
@@ -610,28 +653,14 @@ mode-1 fixture.
   rate (Table 10.1's VQ budgets are stated for the 8 kHz half-band),
   which the decoder surfaces as `UwbLayerUndocumented` rather than
   guessing.
-* Innovation binding for **high-band mode 4** (the last gapped
-  sub-mode — narrowband modes 1 and 7 were bound in r438 by the staged
-  `nb-innovation-binding.md`). Mode 4 = 80 bits / 40-sample sub-frame:
-  neither staged high-band codebook shape — `HbSv8_128` (8 samples,
-  8-bit composite) nor `HbSv10_32` (10 samples, 5-bit) — yields a
-  split matching both the 80-bit budget *and* the 40-sample count.
-  **Campaign A confirmed no staged fixture carries mode-4 material to
-  probe:** all three staged high-band fixtures (`wb-mode1-folded`,
-  `uwb-fold-geometry`, `uwb-speech-3layer`) are **all mode-1** in every
-  frame, and the docs give only mode 4's bit *budget* (Table 10.1: 80
-  VQ bits) not its codebook geometry — so the binding cannot be
-  observer-probed and stays a recorded docs gap. It gates wideband /
-  ultra-wideband quality 10 (44 kbit/s) encoding.
-* **Intensity-stereo reconstruction.** The staged material pins the
-  in-band stereo message's existence and 8-bit size (Table 5.1 code 9)
-  and RFC 5574 declares its own payload format mono-only, but neither
-  states the payload's field layout (balance / energy-ratio split) nor
-  the L/R reconstruction law, nor how a stereo input is folded to the
-  transmitted mono signal. Recorded docs gap; until it closes,
-  2-channel streams decode with both channels carrying the transmitted
-  signal (framework surface) and the raw code-9 payload is surfaced
-  via `InbandRequest::IntensityStereo`.
+* **Wideband / ultra-wideband quality-10 (44 kbit/s) encoding.** The
+  mode-4 *decode* binding is pinned (staged `hb-innovation-binding.md`,
+  re-confirmed from staged bytes by provenance/08) and the r440
+  state-derived gain base decodes it to ~6 dB band error — but the
+  encoder side stays declined: the reference's mode-4 codebook search
+  and the exact absolute gain law (needed to *choose* conformant gain
+  corrections) are unpinned. Gated on the same provenance/08
+  discriminating-fixture ask as the decode law.
 * **Mode-1 comfort-noise excitation.** The binding doc pins that mode 1
   transmits no innovation and that its excitation is set by the
   frame-level fields, but the decoder-side noise-generation rule the
