@@ -69,19 +69,28 @@
 //!
 //! ## Sign bit (only `HbSv8_128`)
 //!
-//! Per the staged `tables/README.md`, the `hb-innovation-cdbk-sv8-128`
-//! shape is **7-bit + sign**: the wire field per sub-vector is
-//! `7-bit codebook row index` + `1-bit polarity sign` (in that order,
-//! MSB-first within the sub-vector slot). When the sign bit is `1`
-//! the resolved 8-sample sub-vector is negated element-wise (each
-//! `i16` sample multiplied by `-1`). The 5-bit `HbSv10_32` shape has
-//! no sign bit.
+//! Per the staged `docs/audio/speex/hb-innovation-binding.md` §1, each
+//! 8-bit `HbSv8_128` group is, in wire order, a **leading 1-bit
+//! polarity sign followed by the 7-bit codebook row index**:
 //!
-//! The sign-bit position (after the 7-bit index, MSB-first within the
-//! sub-vector slot) is the only ordering consistent with (a) the
-//! `tables/README.md` "7-bit + sign" notation reading left-to-right
-//! and (b) the parser's MSB-first packing convention for every other
-//! Speex field documented in §9.3.
+//! ```text
+//!  bit 0    : sign   (the codeword or its negation)
+//!  bits 1-7 : index into hb-innovation-cdbk-sv8-128  (0 .. 127)
+//! ```
+//!
+//! The §2.2 pair-sum measurement pins the order: `out(V) + out(V ^
+//! 0x80)` is the same signal for every group value `V` (to ≤ 1 output
+//! LSB), i.e. flipping the group's **most-significant** bit negates the
+//! contribution — the MSB is the sign, for **both** modes 3 and 4
+//! ("Both modes 3 and 4 give the same result"). When the sign bit is
+//! `1` the resolved 8-sample sub-vector is negated element-wise. The
+//! 5-bit `HbSv10_32` shape has no sign bit.
+//!
+//! (Rounds ≤ r438 read mode 3's group as `[7-bit index][sign]` from the
+//! staged `tables/README.md` "7-bit + sign" shorthand; the binding
+//! doc's measured staircase supersedes that reading, and provenance/08
+//! re-confirms the §1 layout from staged bytes alone at median
+//! |ρ| ≈ 0.90 against the recovered high-band excitation.)
 //!
 //! ## What this module does NOT do
 //!
@@ -262,10 +271,10 @@ pub enum HbInnovationMapping {
     /// slots off the `excitation_vq_index` field in
     /// most-significant-bit-first order (the same order the parser
     /// [`crate::WidebandHighBandBody::parse`] read them into the
-    /// `u128`). When `codebook.has_sign_bit()` is `true`, the 1-bit
-    /// sign field follows the 7-bit index within each slot (MSB-first
-    /// within the slot), and a sign of `1` negates the looked-up
-    /// sub-vector element-wise.
+    /// `u128`). When `codebook.has_sign_bit()` is `true`, each slot is
+    /// a leading 1-bit sign followed by the 7-bit index
+    /// (`hb-innovation-binding.md` §1), and a sign of `1` negates the
+    /// looked-up sub-vector element-wise.
     Documented {
         /// Which of the two codebook shapes is used.
         codebook: HbInnovationCodebook,
@@ -348,9 +357,10 @@ impl std::error::Error for HbInnovationError {}
 /// Walks `count` successive `slot_bits`-wide chunks off the top of
 /// the packed `excitation_vq_index` (MSB-first — the same order the
 /// parser read them into the `u128`), splits each slot into its
-/// `index_bits` prefix + optional 1-bit sign suffix, looks up each
-/// index against `codebook`, applies the sign, and concatenates the
-/// resulting sub-vectors into a single 40-element vector.
+/// optional leading 1-bit sign + `index_bits` index
+/// (`hb-innovation-binding.md` §1), looks up each index against
+/// `codebook`, applies the sign, and concatenates the resulting
+/// sub-vectors into a single 40-element vector.
 ///
 /// Returns [`HbInnovationError::Undocumented`] for sub-modes whose
 /// dispatcher is not bound (see [`HbInnovationMapping::Undocumented`]);
@@ -400,11 +410,13 @@ pub fn decode_hb_subframe(
                 let shift = u32::from(count - 1 - sv) * slot_bits;
                 let slot = (excitation_vq_index >> shift) & slot_mask;
                 let (idx, sign) = if has_sign {
-                    // 7-bit index in the high `index_bits` of the slot,
-                    // 1-bit sign in the LSB. MSB-first within the slot
-                    // matches the documented "7-bit + sign" notation.
-                    let i = (slot >> 1) & index_mask;
-                    let s = (slot & 1) != 0;
+                    // Leading (most-significant) bit of the slot is the
+                    // sign; the low `index_bits` are the codebook index —
+                    // `hb-innovation-binding.md` §1 (§2.2's `V ^ 0x80`
+                    // pair-sum pins the MSB as the sign for modes 3 and 4
+                    // alike).
+                    let i = slot & index_mask;
+                    let s = (slot >> index_bits) & 1 != 0;
                     (i as u32, s)
                 } else {
                     ((slot & index_mask) as u32, false)
@@ -655,10 +667,10 @@ mod tests {
         // in a 40-bit field (5 × 8 = 40 bits per sub-frame).
         let s = WidebandHighBandSubmode::for_id(3).unwrap();
         let indices: [u32; 5] = [0, 1, 2, 5, 127];
-        // Each slot is (index << 1) | 0  — sign bit cleared.
+        // Each slot is [sign=0][7-bit index] (binding §1) — sign cleared.
         let mut packed: u128 = 0;
         for &idx in &indices {
-            let slot = u128::from(idx) << 1;
+            let slot = u128::from(idx);
             packed = (packed << 8) | slot;
         }
         let v = decode_hb_subframe(&s, packed).unwrap();
@@ -677,8 +689,8 @@ mod tests {
         let indices: [u32; 5] = [1, 2, 3, 4, 5];
         let mut packed: u128 = 0;
         for &idx in &indices {
-            // (index << 1) | 1 → sign bit set.
-            let slot = (u128::from(idx) << 1) | 1;
+            // [sign=1][7-bit index] → leading sign bit set (0x80).
+            let slot = 0x80u128 | u128::from(idx);
             packed = (packed << 8) | slot;
         }
         let v = decode_hb_subframe(&s, packed).unwrap();
@@ -702,7 +714,7 @@ mod tests {
         let signs: [u32; 5] = [0, 1, 0, 1, 0];
         let mut packed: u128 = 0;
         for k in 0..5 {
-            let slot = (u128::from(indices[k]) << 1) | u128::from(signs[k]);
+            let slot = (u128::from(signs[k]) << 7) | u128::from(indices[k]);
             packed = (packed << 8) | slot;
         }
         let v = decode_hb_subframe(&s, packed).unwrap();
@@ -727,7 +739,7 @@ mod tests {
         let s = WidebandHighBandSubmode::for_id(3).unwrap();
         let mut packed: u128 = 0;
         for _ in 0..5 {
-            let slot = (127u128 << 1) | 1;
+            let slot = 0x80u128 | 127u128;
             packed = (packed << 8) | slot;
         }
         let v = decode_hb_subframe(&s, packed).unwrap();
@@ -739,14 +751,75 @@ mod tests {
         }
     }
 
+    /// The binding doc's §2.2 pair-sum measurement, restated on the
+    /// crate: for any 8-bit group value `V`, the contributions of `V`
+    /// and `V ^ 0x80` are exact negations (flipping the **leading** bit
+    /// of the group flips only the polarity), for mode 3 and for both
+    /// mode-4 stages — the group layout is `[sign][7-bit index]`.
+    #[test]
+    fn group_msb_flip_negates_contribution_modes_3_and_4() {
+        let s3 = WidebandHighBandSubmode::for_id(3).unwrap();
+        for v in [0u128, 7, 33, 90, 127, 0x85, 0xFF] {
+            // Mode 3: place the group in sub-vector 0, rest zero.
+            let a = decode_hb_subframe(&s3, v << 32).unwrap();
+            let b = decode_hb_subframe(&s3, (v ^ 0x80) << 32).unwrap();
+            for k in 0..8 {
+                assert_eq!(a[k], b[k].wrapping_neg(), "mode 3 V={v:#x} k={k}");
+            }
+            // Mode 4 stage 1 (top group) and stage 2 (sixth group).
+            // Park the *other* stage's slot-0 group on index 43 — the
+            // unique all-zero row — so the probed group's contribution
+            // is isolated within samples 0..8.
+            let zero = 43u128;
+            let a1 = decode_hb_subframe_mode4_f32((v << 72) | (zero << 32));
+            let b1 = decode_hb_subframe_mode4_f32(((v ^ 0x80) << 72) | (zero << 32));
+            let a2 = decode_hb_subframe_mode4_f32((zero << 72) | (v << 32));
+            let b2 = decode_hb_subframe_mode4_f32((zero << 72) | ((v ^ 0x80) << 32));
+            for k in 0..8 {
+                assert_eq!(a1[k], -b1[k], "mode 4 stage 1 V={v:#x} k={k}");
+                assert_eq!(a2[k], -b2[k], "mode 4 stage 2 V={v:#x} k={k}");
+            }
+        }
+    }
+
+    /// Mode 3's group split equals mode 4's stage-1 group split — the
+    /// same `[sign][index]` reading serves both, per binding §2.2
+    /// ("Both modes 3 and 4 give the same result").
+    #[test]
+    fn mode_3_group_split_matches_mode_4_stage_1() {
+        let s3 = WidebandHighBandSubmode::for_id(3).unwrap();
+        for v in [1u128, 0x2A, 0x80, 0xAB, 0x7F, 0xFF] {
+            let m3 = decode_hb_subframe(&s3, v << 32).unwrap();
+            // Mode 4 with stage-1 group 0 = V and stage-2 group 0 parked
+            // on the zero row (43): the first 8 samples are the pure
+            // stage-1 group contribution.
+            let m4 = decode_hb_subframe_mode4_f32((v << 72) | (43u128 << 32));
+            for k in 0..8 {
+                assert_eq!(f32::from(m3[k]), m4[k], "V={v:#x} k={k}");
+            }
+        }
+    }
+
+    /// Codebook index 43 is the unique all-zero `sv8-128` row — the
+    /// "no excitation here" symbol (provenance/08; a mis-indexed
+    /// codebook would emit noise where the reference emits silence).
+    #[test]
+    fn sv8_128_row_43_is_the_only_zero_row() {
+        let table = hb_innovation_8_128();
+        for (i, row) in table.iter().enumerate() {
+            let all_zero = row.iter().all(|&v| v == 0);
+            assert_eq!(all_zero, i == 43, "row {i}");
+        }
+    }
+
     #[test]
     fn decode_hb_subframe_mode_3_index_extraction_is_msb_first() {
         // Single non-zero sub-vector at slot 0 should land at samples
         // 0..8 only; remaining slots are index 0 with sign cleared.
         let s = WidebandHighBandSubmode::for_id(3).unwrap();
         let idx_sv0 = 42u128;
-        // Sub-vector 0 occupies bits 39..32; place (42 << 1) | 0 there.
-        let packed = (idx_sv0 << 1) << (4 * 8);
+        // Sub-vector 0 occupies bits 39..32; place [sign=0][42] there.
+        let packed = idx_sv0 << (4 * 8);
         let v = decode_hb_subframe(&s, packed).unwrap();
         let row42 = &hb_innovation_8_128()[42];
         let row0 = &hb_innovation_8_128()[0];

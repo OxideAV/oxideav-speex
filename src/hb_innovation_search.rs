@@ -13,8 +13,9 @@
 //! structure as the narrowband [`crate::innovation_search`], plus the
 //! `HbSv8_128` codebook's **1-bit polarity sign**: each candidate row is
 //! scored in both polarities and the winning `(index, sign)` pair packs
-//! as `index << 1 | sign` within its 8-bit slot (MSB-first), exactly the
-//! layout the decoder splits.
+//! as `sign << 7 | index` within its 8-bit slot (leading sign bit,
+//! `docs/audio/speex/hb-innovation-binding.md` §1), exactly the layout
+//! the decoder splits.
 //!
 //! ## Scope / fidelity
 //!
@@ -40,8 +41,8 @@ pub struct HbInnovationChoice {
     pub signs: Vec<bool>,
     /// The packed on-wire `excitation_vq_index` field (sub-vector 0 in
     /// the most-significant slot bits; for a signed codebook each slot is
-    /// `index << 1 | sign`), matching the layout
-    /// [`crate::hb_innovation::decode_hb_subframe`] parses.
+    /// `sign << 7 | index` — leading sign bit, binding doc §1), matching
+    /// the layout [`crate::hb_innovation::decode_hb_subframe`] parses.
     pub packed: u128,
     /// The summed squared error of the chosen quantisation against the
     /// residual (in the residual-excitation domain).
@@ -117,10 +118,10 @@ pub fn search_hb_innovation(
         signs.push(best_sign);
         total_error += best_err;
         // Sub-vector 0 occupies the most-significant slot bits; a signed
-        // codebook's slot is `index << 1 | sign` (MSB-first within the
-        // slot), matching the decoder's split.
+        // codebook's slot is `sign << 7 | index` (leading sign bit,
+        // binding doc §1), matching the decoder's split.
         let slot = if has_sign {
-            (u128::from(best_idx) << 1) | u128::from(best_sign)
+            (u128::from(best_sign) << u128::from(codebook.index_bits())) | u128::from(best_idx)
         } else {
             u128::from(best_idx)
         };

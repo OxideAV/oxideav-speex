@@ -6,6 +6,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **High-band mode-3 sign/index wire order** now matches the staged
+  binding (`docs/audio/speex/hb-innovation-binding.md` §1): each 8-bit
+  `sv8-128` group is a **leading 1-bit polarity sign followed by the
+  7-bit codebook index**, for mode 3 exactly as for mode 4 (the §2.2
+  `V ^ 0x80` pair-sum measurement pins the group MSB as the sign for
+  both modes; provenance/08 re-confirms the layout from staged bytes
+  alone). Rounds ≤ r438 read mode 3's group as `[7-bit index][sign]`
+  from the tables/README shorthand — encoder and decoder agreed with
+  each other, so round-trips passed, but reference mode-3 streams
+  decoded with the index and sign fields crossed. `decode_hb_subframe`
+  and `search_hb_innovation` both now use the measured `[sign][index]`
+  split; new unit gates pin the §2.2 pair-sum negation, the
+  mode-3-equals-mode-4-stage-1 group split, and row 43 as the unique
+  all-zero `sv8-128` sub-vector (the "no excitation" symbol).
+  Measured on the staged `wb_q8` speech fixture (HB submode 3 in every
+  frame): full-signal 18.22 → 18.31 dB.
+
 ### Added
 
 - Campaign B: **intensity stereo — true in-band decode and encode**
