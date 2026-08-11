@@ -103,6 +103,78 @@ use crate::hb_excitation_gain::HbExcitationGainIndex;
 use crate::hb_innovation::{decode_hb_subframe, HbInnovationError, HB_SUBFRAME_SAMPLES};
 use crate::wideband::{WidebandHighBandBody, WidebandHighBandSubmode};
 
+/// Exponent of the transmitted 4-bit gain-correction term in the
+/// **state-derived** high-band innovation gain (modes 2/3/4) — see
+/// [`hb_gc_state_gain`].
+pub const HB_GC_STATE_EXP_GC: i32 = 2;
+
+/// Exponent of the same-frame low-band level term in the state-derived
+/// high-band innovation gain — see [`hb_gc_state_gain`].
+pub const HB_GC_STATE_EXP_LB: i32 = 2;
+
+/// Absolute scale of the state-derived high-band innovation gain,
+/// **fixture-calibrated** (r440) on the staged `hb-mode4-wb-q10` oracle
+/// through the full decode path — an adopted reading, not a staged
+/// constant (same posture as the r393 fold constants). The measured
+/// window: the 4–8 kHz band-mean error bottoms at `0.8…1.0 × 10⁻⁴`
+/// (6.1 dB) and the sub-band energy ratio crosses unity at
+/// `≈ 1.2 × 10⁻⁴`; the adopted value takes the error minimum.
+pub const HB_GC_STATE_SCALE: f64 = 1.0e-4;
+
+/// Polarity of the high-band **mode-4** innovation excitation through
+/// *this crate's* synthesis conventions, pinned r440.
+///
+/// `docs/audio/speex/hb-innovation-binding.md` §4 records the innovation
+/// sign polarity as a one-bit residual "entangled with the QMF/synthesis
+/// polarity convention", to be settled by "a one-bit trial against
+/// `fixtures/hb-mode4-wb-q10/expected.pcm`". That trial (r440, the
+/// QMF-split sub-band gate in `tests/hb_mode4_fixture.rs`): with the
+/// direct reading the isolated 4–8 kHz sub-band correlates
+/// **negatively** against the reference (−0.27…−0.47, strengthening
+/// monotonically as the gain scale rises), and with the global flip it
+/// correlates positively at the same magnitude. Like the r393 fold sign
+/// ([`crate::hb_fold`] — pinned "jointly with this crate's QMF synthesis
+/// modulation convention"), this constant is one bit of a *pair*: it is
+/// the polarity that makes the composed chain
+/// innovation → HB synthesis → QMF match the reference decoder's PCM
+/// given this crate's `g1[n] = −2·(−1)ⁿ·h0[n]` synthesis highpass.
+///
+/// Scoped to **mode 4** alongside the state-derived gain base: no
+/// staged sub-band measurement covers modes 2/3 yet, and the wideband
+/// encoder emits only modes 0..=3, so the encode path is unaffected.
+pub const HB_INNOVATION_POLARITY: f32 = -1.0;
+
+/// The **state-derived** absolute high-band innovation gain for the
+/// gain-correction sub-modes (Table 10.1 modes 2/3/4), r440.
+///
+/// `docs/audio/speex/provenance/08-qmf-recovered-hb-excitation.md` (and
+/// `hb-innovation-binding.md` §5.3) measure, from staged bytes alone,
+/// that the transmitted 4-bit gain correction **alone explains
+/// essentially nothing** of the per-sub-frame high-band excitation gain
+/// (`R² = 0.005`, wrong by tens of dB) — Table 10.1 carries no
+/// frame-level high-band gain, so the base is *derived from decoder
+/// state*, and the measured state is the **low band of the same frame**
+/// (`R² = 0.80` at 8.7 dB rms with the correction added; free-fit
+/// exponents ≈ 1.9 / 2.2 on the two terms, with both-fixed-at-2 nearly
+/// free and both-at-1 costing 4 dB). The staged material deliberately
+/// asserts **no closed-form law**; this function is therefore the
+/// measured *direction* with the exponents fixed at the doc's
+/// nearly-free reading and the absolute scale calibrated on the staged
+/// fixture — documented as fixture-fitted, revisited when a
+/// discriminating fixture pair lands (the doc's precise remaining ask):
+///
+/// ```text
+///   g_hb = HB_GC_STATE_SCALE · (gc_recon · lb_frame_rms)²
+///   gc_recon = 0.87360 · gc_quant_bound[q]     (staged table)
+///   lb_frame_rms = RMS of the same frame's reconstructed low band
+/// ```
+#[inline]
+pub fn hb_gc_state_gain(gc_recon: f32, lb_frame_rms: f64) -> f64 {
+    HB_GC_STATE_SCALE
+        * f64::from(gc_recon).powi(HB_GC_STATE_EXP_GC)
+        * lb_frame_rms.powi(HB_GC_STATE_EXP_LB)
+}
+
 /// Number of gain-scaled high-band excitation samples per CELP
 /// sub-frame. Restates [`HB_SUBFRAME_SAMPLES`] = `40` at the
 /// gain-scaling layer so the public API names the dimension where the
@@ -175,9 +247,46 @@ pub fn gain_scaled_hb_innovation_from_body(
     submode: &WidebandHighBandSubmode,
     sub_idx: usize,
 ) -> Result<[f32; GAIN_SCALED_HB_INNOVATION_SAMPLES], HbInnovationError> {
-    let gain = HbExcitationGainIndex::from_body(body, submode, sub_idx)
-        .map(reconstruct_hb_exc_gain)
-        .unwrap_or(0.0);
+    gain_scaled_hb_innovation_from_body_leveled(body, submode, sub_idx, None)
+}
+
+/// [`gain_scaled_hb_innovation_from_body`] with the r440
+/// **state-derived gain base** wired (provenance/08).
+///
+/// `lb_frame_rms` is the RMS of the **same frame's** reconstructed
+/// low-band (embedded narrowband) signal — the decoder state the staged
+/// measurement identifies as the high-band gain base. When `Some`, the
+/// gain-correction sub-modes (Table 10.1 modes 2/3/4, 4-bit field)
+/// scale their innovation by [`hb_gc_state_gain`] instead of the bare
+/// reconstructed correction (which provenance/08 measures as *not* the
+/// gain, `R² = 0.005`). When `None`, the legacy correction-only scaling
+/// is preserved (the stateless single-frame entries keep their
+/// historical behaviour). The 5-bit mode-1 folded gain is untouched
+/// either way — its absolute law is the externally-arbitrated fold path
+/// ([`crate::hb_fold`]), not this one.
+pub fn gain_scaled_hb_innovation_from_body_leveled(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    sub_idx: usize,
+    lb_frame_rms: Option<f64>,
+) -> Result<[f32; GAIN_SCALED_HB_INNOVATION_SAMPLES], HbInnovationError> {
+    let gain_index = HbExcitationGainIndex::from_body(body, submode, sub_idx);
+    let gc_recon = gain_index.map(reconstruct_hb_exc_gain).unwrap_or(0.0);
+    // State-derived base + polarity (r440): scoped to **mode 4** (the
+    // 80-bit sub-mode), the one mode the provenance/08 measurement
+    // covers. Provenance/08's structural claim (the 4-bit field is a
+    // correction on a state-derived base) reads as common to modes
+    // 2/3/4, but adopting the mode-4-calibrated squared law for modes
+    // 2/3 was measured to *regress* the staged `wb_q6` speech oracle by
+    // >20 dB (the law is level-inhomogeneous and its scale is pinned on
+    // one fixture), so modes 2/3 keep the legacy correction-only gain
+    // until a fixture pins their base. Recorded docs ask.
+    let mode4 = submode.excitation_vq_bits == 80;
+    let gain = match (lb_frame_rms, mode4) {
+        (Some(lb_rms), true) => HB_INNOVATION_POLARITY * hb_gc_state_gain(gc_recon, lb_rms) as f32,
+        (None, true) => HB_INNOVATION_POLARITY * gc_recon,
+        _ => gc_recon,
+    };
     // Mode 4 (80-bit two-stage): float codebook shape (sign + 0.4 stage 2),
     // then the shared gain / codebook-scale (docs hb-innovation-binding.md).
     if submode.excitation_vq_bits == 80 {
@@ -348,7 +457,8 @@ mod tests {
 
         let got = gain_scaled_hb_innovation_from_body(&body, &submode, 0).unwrap();
 
-        // Explicit reference composition.
+        // Explicit reference composition (mode 2 keeps the legacy law —
+        // the r440 polarity/state-base is scoped to mode 4).
         let c_raw = decode_hb_subframe(&submode, vq).unwrap();
         let gain =
             reconstruct_hb_exc_gain(HbExcitationGainIndex::from_body(&body, &submode, 0).unwrap());

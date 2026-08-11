@@ -54,7 +54,7 @@ use crate::narrowband_decoder::{
 };
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame_folded_exc, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{synthesise_high_band_frame_leveled, HB_FRAME_SAMPLES};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -293,13 +293,18 @@ impl WidebandDecoder {
         // fixture-arbitrated law — see `crate::hb_fold`); the fold
         // source is the low-band decoder's just-composed excitation.
         let lb_excitation = *self.low_band.last_frame_excitation();
+        // The modes-2/3/4 absolute innovation-gain base is state-derived
+        // from the same frame's reconstructed low-band level (r440,
+        // provenance/08 — see `hb_gc_state_gain`).
+        let lb_rms = (low_band.iter().map(|&v| v * v).sum::<f64>() / low_band.len() as f64).sqrt();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
-        let high_band = synthesise_high_band_frame_folded_exc(
+        let high_band = synthesise_high_band_frame_leveled(
             hb_body,
             hb_submode,
             &mut self.high_band_filter,
             &mut self.prev_hb_lsp_delta_q10,
             &lb_excitation,
+            Some(lb_rms),
             &mut hb_excitation,
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;

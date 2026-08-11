@@ -472,6 +472,9 @@ fn hb_quantise_gain_and_search(
     count: u8,
 ) -> (u8, u128) {
     let levels = 1u32 << gain_bits;
+    // (The r440 `HB_INNOVATION_POLARITY` is scoped to decode-side mode 4
+    // and does not enter this search: the encoder emits only modes
+    // 0..=3, whose decode keeps the legacy law.)
     let mut best: Option<(f64, u8, u128)> = None;
     for raw in 0..levels {
         let Some(idx) =

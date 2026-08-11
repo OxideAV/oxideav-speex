@@ -252,6 +252,36 @@ pub fn synthesise_high_band_frame_folded_exc(
     lb_excitation: &[f32; HB_FRAME_SAMPLES],
     exc_out: &mut [f32; HB_FRAME_SAMPLES],
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    synthesise_high_band_frame_leveled(
+        body,
+        submode,
+        filter,
+        prev_hb_lsp_delta_q10,
+        lb_excitation,
+        None,
+        exc_out,
+    )
+}
+
+/// [`synthesise_high_band_frame_folded_exc`] with the same frame's
+/// reconstructed **low-band signal level** threaded (r440).
+///
+/// `lb_frame_rms` is the RMS of the embedded narrowband frame's
+/// 160-sample reconstructed output — the decoder state provenance/08
+/// measures as the base of the modes-2/3/4 absolute innovation gain
+/// (see [`crate::gain_scaled_hb_innovation::hb_gc_state_gain`]). Pass
+/// `None` to keep the legacy correction-only gain (the stateless
+/// single-frame entries do). The mode-1 folded path is unaffected.
+#[allow(clippy::too_many_arguments)]
+pub fn synthesise_high_band_frame_leveled(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    filter: &mut HbSynthesisFilter,
+    prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
+    lb_excitation: &[f32; HB_FRAME_SAMPLES],
+    lb_frame_rms: Option<f64>,
+    exc_out: &mut [f32; HB_FRAME_SAMPLES],
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
     // (Q10, pre-base). Silence mode 0 transmits no LSP field → None.
     let curr_lsp = body.reconstructed_lsp_q10(submode);
@@ -297,9 +327,13 @@ pub fn synthesise_high_band_frame_folded_exc(
             // r410 crossover-shaped folded law (crate::hb_fold docs).
             crate::hb_fold::folded_hb_excitation_subframe_shaped(&lb, gain, &lpc)
         } else {
-            let e_hb = crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body(
-                body, submode, sf,
-            )?;
+            let e_hb =
+                crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body_leveled(
+                    body,
+                    submode,
+                    sf,
+                    lb_frame_rms,
+                )?;
             // Promote the f32 excitation to f64 for the synthesis
             // recurrence.
             let mut tmp = [0.0f64; HB_SUBFRAME_SAMPLES];

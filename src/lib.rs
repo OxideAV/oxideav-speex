@@ -544,8 +544,10 @@ pub use gain_scaled_excitation::{
 // internal: gain-scaled high-band innovation plumbing, exposed for tests only
 #[doc(hidden)]
 pub use gain_scaled_hb_innovation::{
-    gain_scaled_hb_innovation_from_body, gain_scaled_hb_innovation_sample,
-    gain_scaled_hb_innovation_subframe, GAIN_SCALED_HB_INNOVATION_SAMPLES,
+    gain_scaled_hb_innovation_from_body, gain_scaled_hb_innovation_from_body_leveled,
+    gain_scaled_hb_innovation_sample, gain_scaled_hb_innovation_subframe, hb_gc_state_gain,
+    GAIN_SCALED_HB_INNOVATION_SAMPLES, HB_GC_STATE_EXP_GC, HB_GC_STATE_EXP_LB, HB_GC_STATE_SCALE,
+    HB_INNOVATION_POLARITY,
 };
 // internal: gain-scaled innovation plumbing, exposed for tests only
 #[doc(hidden)]
@@ -731,8 +733,8 @@ pub use wb_synthesis::HB_FRAME_SAMPLES;
 #[doc(hidden)]
 pub use wb_synthesis::{
     synthesise_high_band_frame, synthesise_high_band_frame_folded,
-    synthesise_high_band_frame_folded_exc, synthesise_high_band_frame_interp, SubBandLayer,
-    UwbFrameLayout, HB_SUBFRAMES_PER_FRAME,
+    synthesise_high_band_frame_folded_exc, synthesise_high_band_frame_interp,
+    synthesise_high_band_frame_leveled, SubBandLayer, UwbFrameLayout, HB_SUBFRAMES_PER_FRAME,
 };
 // internal: perceptual-weighting filter plumbing, exposed for tests only
 #[doc(hidden)]

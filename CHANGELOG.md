@@ -6,6 +6,52 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **QMF band-isolation exactness gate** (`tests/qmf_band_isolation.rs`,
+  r440). `provenance/08-qmf-recovered-hb-excitation.md` validates the
+  staged 64-tap prototype as a measurement instrument (88–95 dB
+  sub-band isolation on six probe tones); the crate's `QmfAnalysis`
+  reproduces all six documented figures **to their 0.1 dB print
+  precision** (−95.10 / −95.61 / −87.94 / +87.94 / +95.61 / +95.10 dB),
+  and the gate pins the match at ±0.5 dB plus mirror-pair symmetry —
+  the crate's analysis bank *is* the provenance instrument, tap for tap
+  and sign for sign.
+- **QMF-route sub-band conformance gate** for the mode-4 q10 oracle
+  (`tests/hb_mode4_fixture.rs::mode4_q10_qmf_subband_gate`): splits
+  reference and crate decode into their true 8 kHz sub-bands with the
+  staged prototype and scores each absolutely; also measures + pins the
+  decoder's alignment against the source-length-trimmed `expected.pcm`
+  (≈142 full-rate samples of codec look-ahead the toolchain trimmed).
+- **High-band mode-4 absolute gain — state-derived base**
+  (provenance/08, r440). The gc-only reading (gain =
+  `0.87360·gc_bound[q]`) is measured by the staged material as *not*
+  the gain (`R² = 0.005`); the base tracks the same frame's
+  reconstructed **low-band level**. Mode 4 now decodes with
+  `g = HB_GC_STATE_SCALE · (gc_recon · lb_frame_rms)²` — the doc's
+  nearly-free fixed-exponent reading with the absolute scale
+  fixture-calibrated (documented fitted; the exact law remains the
+  recorded docs gap). Threaded as
+  `synthesise_high_band_frame_leveled` / 
+  `gain_scaled_hb_innovation_from_body_leveled` (legacy entries keep
+  the old behaviour); scoped to mode 4 — adopting the
+  mode-4-calibrated law for modes 2/3 measurably regresses the staged
+  `wb_q6` oracle, so those await their own fixture.
+- **High-band mode-4 innovation polarity pinned**
+  (`HB_INNOVATION_POLARITY = −1` through this crate's QMF conventions)
+  — the one-bit trial `hb-innovation-binding.md` §4 prescribes, run
+  against `expected.pcm`: the direct reading correlates the isolated
+  4–8 kHz sub-band **negatively** (−0.27…−0.47, strengthening with
+  gain scale), the flip positively at the same magnitude. Paired with
+  the crate's `g1[n] = −2·(−1)ⁿ·h0[n]` synthesis convention, like the
+  r393 fold sign.
+- **Measured mode-4 delta** (staged `hb-mode4-wb-q10`): 4–8 kHz band
+  mean |err| **13.11 → 6.11 dB**, isolated high sub-band correlation
+  **≈0 → +0.44**, energy ratio 0.086 → 0.74; low band unchanged
+  (0–4 kHz 2.2 dB). All prior anchors unchanged (wb-q4/q6/q8 15.59 /
+  18.30 / 18.31 dB, mode-1 fold 38.87 dB / 0.99994, UWB 19.15 dB,
+  stereo ladder).
+
 ### Fixed
 
 - **High-band mode-3 sign/index wire order** now matches the staged
