@@ -530,8 +530,8 @@ pub use framework::{
 pub use gain_reconstruction::{
     hb_folded_gain_levels, hb_gain_correction_levels, hb_gc_quant_bound, nb_ol_exc_gain_levels,
     nb_subframe_gain_bound_1bit, nb_subframe_gain_bounds_3bit, nb_subframe_gain_levels_1bit,
-    nb_subframe_gain_levels_3bit, quantise_frame_ol_exc_gain, quantise_hb_exc_gain,
-    quantise_subframe_gain_correction, reconstruct_fixed_codebook_gain,
+    nb_subframe_gain_levels_3bit, quantise_frame_ol_exc_gain, quantise_frame_ol_exc_gain_exact,
+    quantise_hb_exc_gain, quantise_subframe_gain_correction, reconstruct_fixed_codebook_gain,
     reconstruct_frame_ol_exc_gain, reconstruct_hb_exc_gain, reconstruct_subframe_gain_correction,
     HB_FOLDED_GAIN_LEVELS, HB_GAIN_CORRECTION_LEVELS, NB_OL_EXC_GAIN_LEVELS,
     NB_SUBFRAME_GAIN_LEVELS_1BIT, NB_SUBFRAME_GAIN_LEVELS_3BIT,

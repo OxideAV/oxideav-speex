@@ -61,8 +61,8 @@
 use crate::adaptive_codebook::{resolve_lookback, TAP_PITCH_OFFSETS};
 use crate::frame::FrameError;
 use crate::gain_reconstruction::{
-    quantise_frame_ol_exc_gain, quantise_subframe_gain_correction, reconstruct_frame_ol_exc_gain,
-    reconstruct_subframe_gain_correction,
+    quantise_frame_ol_exc_gain_exact, quantise_subframe_gain_correction,
+    reconstruct_frame_ol_exc_gain, reconstruct_subframe_gain_correction,
 };
 use crate::innovation::{sub_vector, InnovationCodebook, InnovationMapping, SUBFRAME_SAMPLES};
 use crate::innovation_search::search_innovation;
@@ -256,7 +256,11 @@ impl NarrowbandEncoder {
         // then refined closed-loop over the estimate's neighbourhood
         // (round r389 — see `refine_frame_gain`).
         let frame_gain_target = self.frame_gain_estimate(&input, &lpc_sets, submode);
-        let frame_gain_est = quantise_frame_ol_exc_gain(frame_gain_target as f32);
+        // r440: the exact staged float-build quantiser law
+        // (qe = floor(0.5 + 3.5*ln g), provenance/02) replaces the
+        // Q15 threshold walk for the first estimate; the closed-loop
+        // refinement below is unchanged.
+        let frame_gain_est = quantise_frame_ol_exc_gain_exact(frame_gain_target as f32);
 
         // --- Excitation: per sub-frame pitch + innovation. ---
         let mapping = InnovationMapping::for_mode(submode);
@@ -1073,7 +1077,7 @@ mod tests {
             let prev = probe.prev_lsp_q10.unwrap_or(active);
             let sub_lsp = NbSubFrameLsp::new(&prev, &active);
             let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
-            let est = quantise_frame_ol_exc_gain(
+            let est = quantise_frame_ol_exc_gain_exact(
                 probe.frame_gain_estimate(&input, &lpc_sets, &submode) as f32,
             );
 

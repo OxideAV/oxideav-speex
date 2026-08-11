@@ -418,6 +418,34 @@ pub fn quantise_frame_ol_exc_gain(gain: f32) -> FrameInnovationGainIndex {
     FrameInnovationGainIndex::Indexed(idx)
 }
 
+/// Quantise a normalised NB frame-level OL excitation gain with the
+/// **exact staged float-build law** (r440, `provenance/02`):
+///
+/// ```text
+///   qe = floor(0.5 + 3.5·ln(gain / SIG_SCALING)),   clamped to [0, 31]
+/// ```
+///
+/// with `SIG_SCALING = 1.0` in the float build and the reconstruction
+/// level `exp(qe/3.5)`. This is **round-to-nearest in the log-gain
+/// domain** — the exact quantiser expression the staged provenance
+/// records for the float encoder — whereas [`quantise_frame_ol_exc_gain`]
+/// realises the fixed-point build's `scal_quant32` threshold walk over
+/// the staged Q15 level table (which resolves boundary cases upward
+/// rather than to the nearest log-domain level). The two agree except
+/// for gains in the upper half of each ≈1.086 dB quantiser cell; the
+/// narrowband encoder uses this exact law.
+///
+/// A non-finite or non-positive `gain` quantises to
+/// [`FrameInnovationGainIndex::Silence`], as in the threshold path.
+pub fn quantise_frame_ol_exc_gain_exact(gain: f32) -> FrameInnovationGainIndex {
+    if !gain.is_finite() || gain <= 0.0 {
+        return FrameInnovationGainIndex::Silence;
+    }
+    let qe = (0.5 + 3.5 * f64::from(gain).ln()).floor();
+    let qe = qe.clamp(0.0, 31.0) as u8;
+    FrameInnovationGainIndex::Indexed(qe)
+}
+
 /// Quantise a narrowband per-sub-frame innovation-gain **correction**
 /// multiplier `g_subf` for the given bit budget (0, 1, or 3) into a typed
 /// [`SubFrameInnovationGainCorrection`].
@@ -768,6 +796,77 @@ mod tests {
             quantise_frame_ol_exc_gain(levels[0] * 0.5),
             FrameInnovationGainIndex::Indexed(0)
         );
+    }
+
+    /// The exact staged float-build law (`qe = floor(0.5 + 3.5·ln g)`,
+    /// provenance/02) inverts the reconstruction at every level, rounds
+    /// to the **nearest** level in the log-gain domain at cell
+    /// midpoints, and clamps to [0, 31].
+    #[test]
+    fn exact_ol_gain_law_round_trips_and_rounds_in_log_domain() {
+        for qe in 0u8..32 {
+            let level = (f32::from(qe) / 3.5).exp();
+            assert_eq!(
+                quantise_frame_ol_exc_gain_exact(level),
+                FrameInnovationGainIndex::Indexed(qe),
+                "level of qe={qe} must quantise back to qe"
+            );
+            // Just below the upper log-midpoint stays at qe; just above
+            // moves to qe+1 (until the clamp).
+            let upper_mid = ((f64::from(qe) + 0.5) / 3.5).exp();
+            assert_eq!(
+                quantise_frame_ol_exc_gain_exact((upper_mid * 0.999) as f32),
+                FrameInnovationGainIndex::Indexed(qe),
+                "below midpoint of qe={qe}"
+            );
+            let next = qe.min(30) + 1;
+            assert_eq!(
+                quantise_frame_ol_exc_gain_exact((upper_mid * 1.001) as f32),
+                FrameInnovationGainIndex::Indexed(if qe >= 31 { 31 } else { next }),
+                "above midpoint of qe={qe}"
+            );
+        }
+        // Clamps + silence conventions match the threshold path.
+        assert_eq!(
+            quantise_frame_ol_exc_gain_exact(1e-9),
+            FrameInnovationGainIndex::Indexed(0)
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain_exact(1e9),
+            FrameInnovationGainIndex::Indexed(31)
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain_exact(0.0),
+            FrameInnovationGainIndex::Silence
+        );
+        assert_eq!(
+            quantise_frame_ol_exc_gain_exact(f32::NAN),
+            FrameInnovationGainIndex::Silence
+        );
+    }
+
+    /// The exact log-domain law and the Q15 threshold walk never differ
+    /// by more than one quantiser step (the threshold walk resolves
+    /// in-cell gains upward against the *staged Q15* levels, which sit
+    /// within one Q15 LSB of `exp(qe/3.5)`; the exact law rounds to
+    /// nearest in the log domain).
+    #[test]
+    fn exact_and_threshold_ol_gain_laws_within_one_step() {
+        for i in 0..200 {
+            let g = 0.5f32 * 1.06f32.powi(i - 20);
+            let exact = match quantise_frame_ol_exc_gain_exact(g) {
+                FrameInnovationGainIndex::Indexed(q) => i32::from(q),
+                _ => continue,
+            };
+            let threshold = match quantise_frame_ol_exc_gain(g) {
+                FrameInnovationGainIndex::Indexed(q) => i32::from(q),
+                _ => continue,
+            };
+            assert!(
+                (exact - threshold).abs() <= 1,
+                "g={g}: exact {exact} vs threshold {threshold}"
+            );
+        }
     }
 
     /// NB sub-frame correction quantiser: each level round-trips; values

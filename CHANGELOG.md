@@ -68,6 +68,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `dlog10_Api_odd_bwexp_0p944` columns — reproduced to ≤0.007 log10 on
   all six settings (skip-if-absent on standalone checkouts).
 
+- **Exact float-build OL-gain quantiser law**
+  (`quantise_frame_ol_exc_gain_exact`, r440). The staged provenance/02
+  records the float encoder's exact expression —
+  `qe = floor(0.5 + 3.5·ln(gain))`, clamped `[0, 31]`, level
+  `exp(qe/3.5)` — i.e. round-to-nearest in the log-gain domain. The
+  narrowband encoder's first frame-gain estimate now uses that exact
+  law instead of the Q15 `scal_quant32` threshold walk (which resolves
+  in-cell gains upward); the closed-loop refinement is unchanged and
+  every encoder round-trip / conformance gate holds. Unit gates pin
+  the level round-trip, log-domain midpoint rounding, clamps, and
+  ≤1-step agreement with the threshold path.
+
 ### Fixed
 
 - **High-band mode-3 sign/index wire order** now matches the staged
