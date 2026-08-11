@@ -167,6 +167,74 @@ pub fn hb_crossover_response(lpc: &[f64; HB_LPC_ORDER]) -> f64 {
     acc.abs()
 }
 
+/// Closed-form `|Â(π)|` from the high-band **LSP angles** directly —
+/// the §7.6 parity product (r440).
+///
+/// `docs/audio/speex/hb-folded-gain.md` §7.6 pins the parity that
+/// defines the crossover response: because the LSP pair polynomial
+/// carrying the `(1 + z⁻¹)` factor vanishes at `z = −1`, the analysis
+/// filter's response at the internal Nyquist is a product over **one
+/// parity class only** — the odd-indexed LSPs (second, fourth, sixth,
+/// eighth of the sorted set):
+///
+/// ```text
+///   |Â(π)| = Π 4·cos²(ω_i / 2)      over the odd-indexed class
+/// ```
+///
+/// Taking the even class instead "misstates the swing by 3–10 dB and
+/// gets the sign of the residual wrong on every setting" (ten
+/// independent staged measurements). `tests/fold_envelope_sweep.rs`
+/// cross-checks this product against both the crate's direct
+/// polynomial evaluation ([`hb_crossover_response`] via LSP→LPC) and
+/// the staged `tables/hb-fold-envelope-vs-transmitted.csv` columns.
+///
+/// `lsp` is the order-8 high-band LSP set in **radians**, sorted
+/// ascending (the reconstruction convention of `crate::hb_lsp`).
+#[inline]
+pub fn hb_crossover_response_from_lsp(lsp: &[f64; HB_LPC_ORDER]) -> f64 {
+    lsp.iter()
+        .skip(1)
+        .step_by(2)
+        .map(|&w| 4.0 * (w / 2.0).cos().powi(2))
+        .product()
+}
+
+/// `|Â_γ(π)|` — the crossover response of the **bandwidth-expanded**
+/// high-band LPC (`aᵢ → aᵢ·γ^{i+1}` before evaluating at `z = −1`),
+/// §7.6's one-parameter compression model (r440).
+///
+/// With `γ =` [`HB_FOLD_ENVELOPE_COMPRESSION_GAMMA`] this reproduces
+/// the staged `dlog10_Api_odd_bwexp_0p944` column. **Recorded as
+/// inferred, not adopted**: §7.6 fits the single γ to ten points and
+/// explicitly declines to promote it to a law, and the crate's default
+/// fold scale is unchanged (see `HB_FOLD_CROSSOVER_CEILING` — at the
+/// anchor fixtures' deep transmitted envelopes even the γ-compressed
+/// kneeless law sits above the flat constant both real-stream anchors
+/// pin, so the ceiling remains the best the crate realises).
+#[inline]
+pub fn hb_crossover_response_bwexp(lpc: &[f64; HB_LPC_ORDER], gamma: f64) -> f64 {
+    let mut acc = 1.0f64;
+    let mut g = gamma;
+    for (i, &a) in lpc.iter().enumerate() {
+        let ag = a * g;
+        if i % 2 == 0 {
+            acc += ag;
+        } else {
+            acc -= ag;
+        }
+        g *= gamma;
+    }
+    acc.abs()
+}
+
+/// §7.6's single bandwidth-expansion factor: applying it before
+/// evaluating `|Â(π)|` cuts the deep-envelope fold residual from
+/// 3.6 dB rms to 0.89 dB over both fold layers — **inferred from a
+/// one-parameter fit to ten staged points, not established**, and not
+/// wired into the default decode path (constant surfaced for
+/// measurement code and future arbitration only).
+pub const HB_FOLD_ENVELOPE_COMPRESSION_GAMMA: f64 = 0.944;
+
 /// The effective per-sub-frame fold scale of the crossover-shaped law:
 /// `k = min(C·|A_hb(π)|, K) · g` ([`HB_FOLD_CROSSOVER_SLOPE`] /
 /// [`HB_FOLD_CROSSOVER_CEILING`]), where `lpc` is the sub-frame's

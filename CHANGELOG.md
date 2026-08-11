@@ -52,6 +52,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   18.30 / 18.31 dB, mode-1 fold 38.87 dB / 0.99994, UWB 19.15 dB,
   stereo ladder).
 
+- **§7.6 crossover-response parity + compression model surfaced**
+  (r440, `hb-folded-gain.md` §7.6 + the newly staged
+  `tables/hb-fold-envelope-vs-transmitted.csv`).
+  `hb_crossover_response_from_lsp` is the pinned odd-parity closed form
+  `|Â(π)| = Π 4·cos²(ωᵢ/2)` over the odd-indexed LSP class, verified
+  equal to the crate's direct polynomial evaluation on every swept
+  envelope (≤0.008 log10); `hb_crossover_response_bwexp` +
+  `HB_FOLD_ENVELOPE_COMPRESSION_GAMMA = 0.944` realise §7.6's
+  bandwidth-expansion compression model (surfaced as *inferred*, per
+  the doc — not wired into the default fold scale, whose ceiling law
+  remains the best the crate realises against the anchor oracles).
+  `tests/fold_envelope_sweep.rs` now cross-checks the crate's chain
+  against the staged CSV's `dlog10_Api_odd_parity` and
+  `dlog10_Api_odd_bwexp_0p944` columns — reproduced to ≤0.007 log10 on
+  all six settings (skip-if-absent on standalone checkouts).
+
 ### Fixed
 
 - **High-band mode-3 sign/index wire order** now matches the staged
