@@ -74,6 +74,41 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     exactly what provenance/07/08 decline to do. The refined
     discriminating ask is recorded in the README.
 
+- **Mode-4 gain-base discrimination — the provenance/08 fixture pair,
+  generated and gated** (r446, `tests/hb_mode4_gain_probe_fixture.rs`
+  + `tests/fixtures/hb-mode4-gain-probes/`, black-box per the r410
+  conformance-fixture precedent). Provenance/08 names "a fixture pair
+  differing only in the low-band content at fixed high-band bits, or
+  vice versa" as what would close #329 residual 1; this round
+  generated exactly that pair (one deterministic source, five
+  ×{0.05…1.9} amplitude segments applied to one band at a time,
+  `speexenc -w --quality 10`, all-mode-4 streams) and ran the
+  QMF-recovered measurement over it. **The drivers are settled:**
+  - `lbvar`: across a **31.6 dB** low-band sweep at fixed high-band
+    content, the recovered per-sub-frame gain moves ≈ **2 dB** — the
+    reference's gain base is **not** the same frame's low-band level
+    (a causal `lb²` base would swing ≈ 63 dB); provenance/08's
+    low-band R² was natural-speech co-variation.
+  - `hbvar`: across an 18 dB high-band sweep at fixed low band, the
+    recovered gain tracks the level while the transmitted 4-bit
+    correction stays **parked at the grid bottom** (median index 0–2
+    per segment) — the base is **backward-adaptive decoder state**
+    (recent high-band excitation memory, ≈ 1–2-frame settling at
+    segment steps), not the transmitted field.
+  - A third stream (envelope sweep at fixed levels, not committed —
+    NOTES.md) shows only a weak non-monotonic envelope effect: the
+    LSP envelope is not the driver either.
+  The exact predictor **update rule** (time constant, domain,
+  cold-start, correction feedback) is not recoverable from
+  steady-state black-box probing — a backward-adaptive loop with
+  wrong constants accumulates multiplicative drift — so the decode
+  law is **unchanged** and the update rule is the recorded docs ask.
+  The gate additionally pins the r440 fitted law's off-manifold
+  behaviour as a **known divergence** (4–8 kHz per-segment mean band
+  error 5.9–23 dB with per-segment ceilings; low band unaffected,
+  ≤ 2.2 dB): when the update rule lands, this gate is the immediate
+  validation target.
+
 - **Ultra-wideband quality-10 (stacked mode-4) conformance gate**
   (r446, `tests/hb_mode4_uwb_fixture.rs` on the staged
   `docs/audio/speex/fixtures/hb-mode4-uwb-q10/` oracle, mirrored per

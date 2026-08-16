@@ -641,17 +641,31 @@ mode-1 fixture.
   `tests/hb_mode4_uwb_recovered_excitation.rs`), and a decoder-state
   term — the **previous sub-frame's excitation RMS** — beats the
   same-frame low-band level on both fixtures (free-fit R² 0.900 vs
-  0.815 UWB, 0.875 vs 0.796 WB). So the true base combines low-band
-  level, transmitted envelope, and/or per-sub-frame gain memory — but
-  the free-fit exponents are **not stable across the two fixtures**
-  (gc 0.21↔0.92, state 0.66↔0.82), so no closed form is credible yet
-  and none is adopted (the provenance/07/08 standard). **Refined docs
-  ask:** a behavioural trace of the reference decoder's mode-4 gain
-  *computation* for a handful of sub-frames (base value, correction
-  application, any AR memory update), or a fixture pair at fixed
-  envelope + fixed low-band level differing only in transmitted gc —
-  either discriminates the three candidate state sources where more
-  regression cannot. Also still open: the **modes 2/3 base** (the
+  0.815 UWB, 0.875 vs 0.796 WB). **r446 then settled the drivers
+  outright** by generating the doc's asked-for discriminating fixture
+  pair black-box (r410 precedent;
+  `tests/fixtures/hb-mode4-gain-probes/` + its NOTES.md,
+  `tests/hb_mode4_gain_probe_fixture.rs`): across a **31.6 dB
+  low-band sweep at fixed high-band content the recovered gain moves
+  only ≈ 2 dB** — the base is **not** the low band (the R² 0.70 was
+  speech co-variation) — while across a high-band sweep at fixed low
+  band the gain adapts 18 dB **with the transmitted correction parked
+  at the grid bottom**: the base is **backward-adaptive decoder
+  state** (recent high-band excitation memory, ≈ 1–2-frame settling
+  at level steps), and an envelope sweep at fixed levels shows the
+  LSP envelope is not the driver either. What steady-state black-box
+  probing cannot recover is the predictor's **update rule** (time
+  constant, log- vs energy-domain averaging, cold-start value,
+  correction feedback) — a backward-adaptive loop with wrong
+  constants accumulates multiplicative drift, so the fitted
+  `(gc·lb_rms)²` law stays the default: it rides the natural-speech
+  co-variation to ≈ 5.5–6 dB on the staged q10 oracles, and its
+  off-manifold failure is gate-pinned as a known divergence (4–8 kHz
+  up to ≈ 23 dB on the probes). **The docs ask, now exact:** the
+  reference decoder's mode-4 gain *computation* for a handful of
+  consecutive sub-frames — base value, correction application, and
+  the memory update between sub-frames. Also still open: the **modes
+  2/3 base** (the
   mode-4-calibrated law measurably regresses the staged `wb_q6` oracle
   when applied to mode 2), so modes 2/3 keep the correction-only gain
   until a sub-band measurement covers them. The WB/UWB
