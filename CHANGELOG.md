@@ -44,6 +44,36 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   (existing oracle-mirroring precedent); the mode-4 shape decoder and
   stage-2 weight are re-exported as `#[doc(hidden)]` test plumbing.
 
+- **QMF-recovered mode-4 excitation on the SECOND fixture — the
+  replication provenance/08 asked for** (r446,
+  `tests/hb_mode4_uwb_recovered_excitation.rs`). Provenance/08 names
+  "the `hb-mode4-uwb-q10` trace re-emitted in the WB format" as one of
+  the three asks that would close residual 1, blocked only on its own
+  trace reader; the staged trace parses fine under this crate's
+  reader, so the second replication runs now. The 4–8 kHz sub-band is
+  recovered through a **two-stage** crate-`QmfAnalysis` split
+  (32 kHz → 16 kHz low half → 8 kHz sub-bands) with a **per-frame**
+  order-8 LPC fit (this fixture's transmitted envelope varies, so the
+  doc's global fit is not legitimate here). Results, all gated:
+  - **binding replication #2, oracle-free**: 298 sub-frames, mean |ρ|
+    **0.9316** (above the WB fixture's 0.86–0.88), positive on
+    99.7 %, alignment peak **uniquely at the same −40** with a 3.8×
+    margin — the §1 binding now rests on two independent fixtures,
+    one with a varying LSP envelope, through two analysis stages;
+  - the r440 fixed-2 gain reading stays serviceable on rows it was
+    never fitted to (R² 0.746);
+  - **new docs-gap evidence, pinned**: the fixed-2 residual is
+    **56 % explained by which LSP envelope the frame transmits**
+    (17 classes) — an envelope term the constant-LSP WB fixture could
+    not show — and a decoder-**state** term (previous sub-frame's
+    recovered excitation RMS) beats the same-frame low-band level
+    (free-fit R² 0.900 vs 0.815; the same ordering holds on the WB
+    fixture's rows, 0.875 vs 0.796). **No law is adopted**: the
+    free-fit exponents are not stable across the two fixtures
+    (gc 0.21↔0.92, state 0.66↔0.82), and fitting a loose formula is
+    exactly what provenance/07/08 decline to do. The refined
+    discriminating ask is recorded in the README.
+
 - **Ultra-wideband quality-10 (stacked mode-4) conformance gate**
   (r446, `tests/hb_mode4_uwb_fixture.rs` on the staged
   `docs/audio/speex/fixtures/hb-mode4-uwb-q10/` oracle, mirrored per
