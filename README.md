@@ -110,6 +110,38 @@ What is implemented and tested:
   6.1 dB**, isolated high sub-band correlation **≈0 → +0.44**, energy
   ratio 0.086 → 0.74; low band 0–4 kHz ≈ 2.2 dB throughout. Encoding
   q10 stays declined (the encoder mode-4 search is unpinned).
+* **The provenance/08 measurement replicates through crate machinery —
+  on BOTH mode-4 fixtures** (round r446). Two oracle-free gates re-run
+  the doc's whole QMF-recovered-excitation route with the crate's own
+  `QmfAnalysis` / `decode_hb_subframe_mode4_f32` /
+  `reconstruct_hb_exc_gain` chain:
+  - `tests/hb_mode4_recovered_gain_table.rs` (WB fixture) reproduces
+    the staged 299-row `tables/hb-mode4-recovered-gain.csv` **row for
+    row** — the filter-free `lb_frame_rms` column to < 3 × 10⁻⁵ log
+    (the crate's bank *is* the staged instrument, window convention
+    included), mean |ρ| **0.8839** at the uniquely-peaked −40
+    alignment, and the doc's gain-direction regression **exactly**
+    (fixed-2 R² 0.791 / rms 8.89 dB, correction-only 0.005).
+  - `tests/hb_mode4_uwb_recovered_excitation.rs` (UWB q10 fixture —
+    the replication provenance/08 itself asks for) recovers the inner
+    4–8 kHz band through a **two-stage** split with a per-frame LPC
+    fit and confirms the binding on a stream whose transmitted LSP
+    pair **varies**: 298 sub-frames, mean |ρ| **0.9316**, positive on
+    99.7 %, same −40 peak at a 3.8× margin.
+  Local black-box check: an independent reference-decoder build
+  re-decodes both mirrored fixtures to within ±1 / ±2 LSB of the
+  staged `expected.pcm` (the notes' stated cross-platform bound).
+* **UWB quality-10 (stacked mode-4) decodes and is gated** (round
+  r446, `tests/hb_mode4_uwb_fixture.rs` on the staged
+  `hb-mode4-uwb-q10` oracle): **bit-exact framing across all 76
+  frames** against the reference's own trace — including the packed
+  80-bit mode-4 excitation fields verbatim, the first framing
+  validation of submode 4 inside the embedded UWB recursion — and
+  per-band tracking floors 0–4 kHz **1.29 dB** / 4–8 kHz **5.55 dB** /
+  8–16 kHz **7.98 dB** (decoder delay pinned, 351 samples at 32 kHz).
+  The 4–8 kHz figure replicates the r440 law's wideband result on a
+  second, LSP-varying stream; the 8–16 kHz figure is the documented
+  campaign-A outer-fold residual.
 * **Ogg/Speex stream-header parse** (`SpeexHeader`) — the `Speex   `
   magic plus all 13 little-endian fields and the narrowband / wideband
   / ultra-wideband mode cross-check (manual §7.3, RFC 5574 §3), plus
@@ -601,16 +633,28 @@ mode-1 fixture.
   measured the mode-4 base as state-derived from the same frame's low
   band, and the r440 fixture-calibrated squared law drops the 4–8 kHz
   band error to ~6.1 dB (from ~13 dB doc-faithful) with the isolated
-  sub-band correlating at +0.44. What remains open: the **exact** gain
-  law (provenance/08 deliberately asserts none — R² = 0.80 at 8.7 dB
-  rms is a direction, not a formula; its ask is a fixture pair
-  separating the low-band-level and high-band-content drivers, or a
-  second LSP setting, or the `hb-mode4-uwb-q10` trace re-emitted in
-  the WB format), and the **modes 2/3 base**: the mode-4-calibrated
-  law measurably regresses the staged `wb_q6` oracle when applied to
-  mode 2 (it is level-inhomogeneous and single-fixture-scaled), so
-  modes 2/3 keep the correction-only gain until a sub-band
-  measurement covers them — a precise docs ask. The WB/UWB
+  sub-band correlating at +0.44. **r446 sharpened the gap** by running
+  the doc's own next step (the `hb-mode4-uwb-q10` replication — its
+  trace parses fine under this crate's reader): with the transmitted
+  LSP envelope finally *varying*, the fixed-2 law's residual is **56 %
+  explained by which envelope the frame transmits** (17 classes,
+  `tests/hb_mode4_uwb_recovered_excitation.rs`), and a decoder-state
+  term — the **previous sub-frame's excitation RMS** — beats the
+  same-frame low-band level on both fixtures (free-fit R² 0.900 vs
+  0.815 UWB, 0.875 vs 0.796 WB). So the true base combines low-band
+  level, transmitted envelope, and/or per-sub-frame gain memory — but
+  the free-fit exponents are **not stable across the two fixtures**
+  (gc 0.21↔0.92, state 0.66↔0.82), so no closed form is credible yet
+  and none is adopted (the provenance/07/08 standard). **Refined docs
+  ask:** a behavioural trace of the reference decoder's mode-4 gain
+  *computation* for a handful of sub-frames (base value, correction
+  application, any AR memory update), or a fixture pair at fixed
+  envelope + fixed low-band level differing only in transmitted gc —
+  either discriminates the three candidate state sources where more
+  regression cannot. Also still open: the **modes 2/3 base** (the
+  mode-4-calibrated law measurably regresses the staged `wb_q6` oracle
+  when applied to mode 2), so modes 2/3 keep the correction-only gain
+  until a sub-band measurement covers them. The WB/UWB
   intensity-stereo ladders' mono decode is bounded by the same
   residual.
 * **Bit-exact QMF delay convention** — the QMF synthesis filterbank now
