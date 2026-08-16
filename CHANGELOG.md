@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **QMF-recovered high-band excitation — full crate-machinery
+  replication of provenance/08** (r446,
+  `tests/hb_mode4_recovered_gain_table.rs`). Docs round 8 recovered the
+  isolated 4–8 kHz sub-band of the `hb-mode4-wb-q10` oracle from staged
+  bytes alone and staged the result as
+  `tables/hb-mode4-recovered-gain.csv` (299 sub-frame rows); this round
+  re-runs the whole measurement through the crate's own machinery —
+  `QmfAnalysis` as the instrument, `decode_hb_subframe_mode4_f32` as
+  the innovation rebuild (80-bit group packing + leading sign bit +
+  exact 0.4 stage-2 weight all exercised), `reconstruct_hb_exc_gain`
+  for the correction column — and gates:
+  - the **binding confirmation, oracle-free**: 299 rows, mean |ρ|
+    **0.8839** (doc: 0.8617), median 0.9042, 93.3 % above 0.8, sign
+    positive on 97.0 %, with the alignment sweep peaking **uniquely at
+    the staged −40** (3.2× margin over every other delay in
+    −260…+59);
+  - the **per-row staged-table cross-check** (docs checkout,
+    skip-if-absent): the filter-free `lb_frame_rms` column reproduces
+    to < 3 × 10⁻⁵ log — the crate's analysis bank *is* the staged
+    table's instrument, including its window convention (all windows
+    at the −40 offset, zero-padded, /160-normalised, real extent
+    `(pcm_len + 63)/2`) — and the LPC-derived ρ / RMS / projection
+    columns agree to mean |Δρ| 0.026 with a small tail on sparse
+    `gc = 0` sub-frames below the doc's own |ρ| > 0.6 regression cut;
+  - the **gain-law direction**: on the staged rows the crate's
+    fixed-exponent reading (`HB_GC_STATE_EXP_GC = HB_GC_STATE_EXP_LB
+    = 2`) lands the doc's regression **exactly** — R² 0.791 /
+    rms 8.89 dB, the transmitted correction alone R² 0.005, both-at-1
+    12.86 dB — with the absolute intercept left free (provenance/08
+    deliberately asserts no closed-form law; the exact law remains the
+    recorded docs gap).
+
+  `frame-trace.txt` is mirrored into `tests/fixtures/hb-mode4-wb-q10/`
+  (existing oracle-mirroring precedent); the mode-4 shape decoder and
+  stage-2 weight are re-exported as `#[doc(hidden)]` test plumbing.
+
 - **QMF band-isolation exactness gate** (`tests/qmf_band_isolation.rs`,
   r440). `provenance/08-qmf-recovered-hb-excitation.md` validates the
   staged 64-tap prototype as a measurement instrument (88–95 dB

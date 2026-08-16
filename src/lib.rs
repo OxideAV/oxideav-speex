@@ -585,7 +585,8 @@ pub use hb_innovation::{HbInnovationError, HB_SUBFRAME_SAMPLES};
 // internal: high-band innovation codebook plumbing, exposed for tests only
 #[doc(hidden)]
 pub use hb_innovation::{
-    decode_hb_subframe, hb_innovation_sub_vector, HbInnovationCodebook, HbInnovationMapping,
+    decode_hb_subframe, decode_hb_subframe_mode4_f32, hb_innovation_sub_vector,
+    HbInnovationCodebook, HbInnovationMapping, HB_MODE4_STAGE2_WEIGHT,
 };
 // internal: high-band innovation search plumbing, exposed for tests only
 #[doc(hidden)]
