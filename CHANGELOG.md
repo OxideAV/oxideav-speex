@@ -44,6 +44,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   (existing oracle-mirroring precedent); the mode-4 shape decoder and
   stage-2 weight are re-exported as `#[doc(hidden)]` test plumbing.
 
+- **Ultra-wideband quality-10 (stacked mode-4) conformance gate**
+  (r446, `tests/hb_mode4_uwb_fixture.rs` on the staged
+  `docs/audio/speex/fixtures/hb-mode4-uwb-q10/` oracle, mirrored per
+  precedent). The 32 kHz quality-10 default is the stacked case no
+  prior gate covered: inner (4–8 kHz) high-band layer in **submode 4**
+  (352-bit layer), outer (8–16 kHz) layer in folded submode 1, so the
+  outer fold's source is an innovation-coded high band for the first
+  time. The gate pins:
+  - **bit-exact framing across all 76 frames** — NB submode 7, the
+    inner layer's LSP MSVQ pair, per-sub-frame 4-bit gain correction
+    and the packed **80-bit mode-4 excitation field verbatim**, and
+    the outer layer's LSP pair + four 5-bit folded gains, all against
+    the reference decoder's own `frame-trace.txt` (the first framing
+    validation of submode 4 inside the embedded UWB recursion);
+  - **the stream decodes** (a q10 UWB stream was undecodable before
+    campaign B, and no gate had ever decoded one) — decoder delay
+    pinned at 351 samples / 32 kHz against the source-length-trimmed
+    reference;
+  - **per-band tracking**: 0–4 kHz **1.29 dB** mean |err|
+    (reference-tracking), 4–8 kHz **5.55 dB** — the r440
+    state-derived mode-4 gain base replicating its wideband-fixture
+    figure (≈6.1 dB) on a second stream whose high-band LSP pair
+    **varies frame to frame** (the WB oracle holds it constant), so
+    the level-tracking law is not a one-fixture artifact — and
+    8–16 kHz **7.98 dB**, the same documented campaign-A outer-fold
+    residual as `uwb-speech-3layer` (`hb-folded-gain.md` §7.4 docs
+    gap).
+
 - **QMF band-isolation exactness gate** (`tests/qmf_band_isolation.rs`,
   r440). `provenance/08-qmf-recovered-hb-excitation.md` validates the
   staged 64-tap prototype as a measurement instrument (88–95 dB
