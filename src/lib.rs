@@ -558,8 +558,8 @@ pub use gain_scaled_innovation::{
 // internal: gain-scaled pitch contribution plumbing, exposed for tests only
 #[doc(hidden)]
 pub use gain_scaled_pitch::{
-    gain_scaled_pitch_sample, gain_scaled_pitch_subframe, GAIN_SCALED_PITCH_SAMPLES,
-    PITCH_GAIN_SCALING,
+    gain_scaled_pitch_sample, gain_scaled_pitch_subframe, gain_scaled_pitch_subframe_forced,
+    gain_scaled_pitch_subframe_repeat, GAIN_SCALED_PITCH_SAMPLES, PITCH_GAIN_SCALING,
 };
 // internal: high-band frame-writer plumbing behind [`WidebandEncoder`], exposed for tests only
 #[doc(hidden)]

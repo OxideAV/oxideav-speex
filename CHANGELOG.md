@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Narrowband pitch: the exact short-lag rules and the measured
+  output high-pass land** (r450 crafted-bitstream probes). Three
+  measured supersessions of r393/r410 fitted readings:
+  - the 3-tap VQ adaptive codebook applies the §9.2 substitution
+    **once** (common-`T` folding of the history read; a
+    twice-substituted tail position, reachable only for `T < 21`,
+    contributes zero) — crafted probe grids at `T = 22/33/57/61`
+    recover the staged tables' taps **exactly** under this rule
+    (`gain_scaled_pitch_subframe_repeat`), where the r410 in-sub-frame
+    recursion misfits by 16–60 %;
+  - the forced OL-pitch modes 1/8 run a true **unbounded centre-tap
+    recursion** over the pitch partial with exact **float**
+    coefficients `0.066667·quant` **capped at 0.99** for index 15
+    (`T = 50` grid: fitted taps 0.2666…0.9333 and 0.9900, resid
+    ≤ 0.04 %) — `gain_scaled_pitch_subframe_forced`; the r410
+    recursion's 0.9 bound and the Q6 tap rounding are gone from this
+    path;
+  - the reference's default output high-pass is **measured** by
+    cross-spectral transfer over the probe streams (the innovation path
+    being reference-exact to 0.1 % isolates it): 8 kHz — bilinear
+    biquad `fc ≈ 80.7 Hz, Q ≈ 0.87`; 16/32 kHz — third-order
+    (biquad `fc ≈ 41.75 Hz, Q ≈ 1.38` × first-order ≈ 33 Hz), the
+    32 kHz response matching the 16 kHz filter in absolute Hz.
+    `OutputHighpass` now ships the measured transfers (still opt-in);
+    the r393 30 Hz-Butterworth reading is superseded.
+- Conformance deltas: the NB matrix **through the measured high-pass**
+  jumps from 13.1–19.5 dB to **25.6–33.3 dB at corr 0.9986–0.9998**
+  (tones 32–33.3 dB, speech 25.6–27.3 dB); raw rows hold or improve
+  (speech-q2 10.5→11.6 dB) with energy ratios landing 0.98–0.99; the
+  `hb-mode4-wb-q10` low band (NB mode 7) reaches **25.6 dB / corr
+  0.9986**; the stereo fixture's mono decode lifts 13.8→20.7 dB (the
+  §4.1 stereo block-phase approximation is now the visible term of the
+  interleaved gate — recorded follow-up).
+
+### Changed
+
 - **Mode-1 folded high band — exact crossover-anchored law, and the
   fold source is the innovation-only excitation** (r450
   crafted-bitstream probes, `tests/fixtures/hb-gain-probes/NOTES.md`).

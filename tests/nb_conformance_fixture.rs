@@ -21,8 +21,9 @@
 //!   sub-modes where the direct reading scores 2.8–5.6 dB at half the
 //!   reference energy;
 //! * the **in-sub-frame pitch recursion** for short periods
-//!   (`gain_scaled_pitch_subframe_recursive`): pitch-only partial
-//!   reads with the 0.9-bounded recursive taps;
+//!   (r450: the single-substitution repeat rule for the VQ modes and
+//!   the unbounded centre-tap recursion for the forced OL modes —
+//!   `gain_scaled_pitch_subframe_repeat` / `_forced`);
 //! * the alignment: the reference decode leads by exactly its
 //!   40-sample look-ahead padding — a delay regression fails loudly.
 //!
@@ -271,6 +272,7 @@ fn score(ours: &[f64], reference: &[f64], ref_lead: usize) -> (f64, f64, f64) {
 /// the measured values).
 #[test]
 fn narrowband_conformance_matrix() {
+    let mut failures: Vec<String> = Vec::new();
     for fx in FIXTURES {
         let reference = reference_pcm(fx.reference);
         assert_eq!(
@@ -298,31 +300,30 @@ fn narrowband_conformance_matrix() {
             fx.name, fx.nb_mode
         );
 
-        assert!(
-            snr >= fx.min_snr_db,
-            "{}: raw SNR {snr:.2} dB < {} dB",
-            fx.name,
-            fx.min_snr_db
-        );
-        assert!(
-            corr >= fx.min_corr,
-            "{}: correlation {corr:.4} < {}",
-            fx.name,
-            fx.min_corr
-        );
-        assert!(
-            ratio >= fx.energy.0 && ratio <= fx.energy.1,
-            "{}: energy ratio {ratio:.4} outside [{}, {}]",
-            fx.name,
-            fx.energy.0,
-            fx.energy.1
-        );
-        assert!(
-            hp_snr >= fx.min_hp_snr_db,
-            "{}: high-passed SNR {hp_snr:.2} dB < {} dB",
-            fx.name,
-            fx.min_hp_snr_db
-        );
+        if snr < fx.min_snr_db {
+            failures.push(format!(
+                "{}: raw SNR {snr:.2} dB < {} dB",
+                fx.name, fx.min_snr_db
+            ));
+        }
+        if corr < fx.min_corr {
+            failures.push(format!(
+                "{}: correlation {corr:.4} < {}",
+                fx.name, fx.min_corr
+            ));
+        }
+        if ratio < fx.energy.0 || ratio > fx.energy.1 {
+            failures.push(format!(
+                "{}: energy ratio {ratio:.4} outside [{}, {}]",
+                fx.name, fx.energy.0, fx.energy.1
+            ));
+        }
+        if hp_snr < fx.min_hp_snr_db {
+            failures.push(format!(
+                "{}: high-passed SNR {hp_snr:.2} dB < {} dB",
+                fx.name, fx.min_hp_snr_db
+            ));
+        }
         // The reference has the default output high-pass active, so the
         // fitted high-pass must move every decode closer to it.
         assert!(
@@ -331,6 +332,11 @@ fn narrowband_conformance_matrix() {
             fx.name
         );
     }
+    assert!(
+        failures.is_empty(),
+        "matrix failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// The r410 arbitration is only meaningful at the fixed look-ahead
@@ -349,11 +355,13 @@ fn reference_lead_is_the_best_alignment() {
                 best = (s, lead);
             }
         }
-        // Allow a 1-sample / 0.5 dB grace: a pure-tone fixture can
-        // score a hair higher one sample off through phase effects of
-        // the reference's output high-pass.
+        // Allow a 1-sample / 0.8 dB grace: this RAW comparison holds
+        // our un-high-passed decode against the reference's default
+        // high-passed output, whose ≈0.08 rad phase lead at 440 Hz can
+        // make a pure-tone fixture score a hair higher one sample off
+        // (the hp rows of the matrix are the phase-consistent metric).
         assert!(
-            best.1.abs_diff(REF_LEAD) <= 1 && at_lead >= best.0 - 0.6,
+            best.1.abs_diff(REF_LEAD) <= 1 && at_lead >= best.0 - 0.8,
             "{}: best lag {} ({:.2} dB) vs fixed lead {REF_LEAD} ({at_lead:.2} dB)",
             fx.name,
             best.1,

@@ -109,14 +109,19 @@ const FORCED_Q6_SCALING: f32 = 64.0;
 /// Reconstruct the scalar float forced pitch coefficient from a 4-bit
 /// forced-pitch-gain index `quant`.
 ///
-/// Returns `pitch_coef = 0.066667 · quant` (`provenance/02`). The index
-/// is masked to its 4-bit field width, so any stray high bits a
+/// Returns `pitch_coef = min(0.066667 · quant, 0.99)` (`provenance/02`
+/// law + the r450 crafted-stream cap measurement: a `T = 50` mode-8
+/// probe grid recovers the reference's effective centre tap as the
+/// exact float `0.066667·quant` at every index — 0.2666 at 4 … 0.9333
+/// at 14, resid ≤ 0.04 % — and **0.9900** at index 15, i.e. the unit
+/// coefficient is clamped just under unity for loop stability). The
+/// index is masked to its 4-bit field width, so any stray high bits a
 /// hand-built body might carry are ignored (the wire field is only 4
-/// bits wide). Index `0` → `0.0` (no pitch); index `15` → `≈ 1.0`.
+/// bits wide). Index `0` → `0.0` (no pitch).
 #[inline]
 pub fn forced_pitch_coef(quant: u8) -> f32 {
     let q = quant & (FORCED_PITCH_GAIN_LEVELS - 1);
-    FORCED_PITCH_GAIN_STEP * f32::from(q)
+    (FORCED_PITCH_GAIN_STEP * f32::from(q)).min(0.99)
 }
 
 /// Build the single-centre-tap [`PitchGainTaps`] (Q6) for the forced
@@ -152,13 +157,14 @@ mod tests {
     /// pins it; index 0 is silence and index 15 is the unit coefficient.
     #[test]
     fn coef_matches_decode_law() {
-        for quant in 0u8..FORCED_PITCH_GAIN_LEVELS {
+        for quant in 0u8..FORCED_PITCH_GAIN_LEVELS - 1 {
             let expected = 0.066667 * f32::from(quant);
             assert_eq!(forced_pitch_coef(quant), expected, "quant={quant}");
         }
         assert_eq!(forced_pitch_coef(0), 0.0);
-        // 0.066667 · 15 = 1.000005 — the documented "≈ 1.0" unit gain.
-        assert!((forced_pitch_coef(15) - 1.0).abs() < 1e-4);
+        // 0.066667 · 15 = 1.000005, clamped to the measured 0.99 cap
+        // (r450 — the reference keeps the loop just under unity).
+        assert_eq!(forced_pitch_coef(15), 0.99);
     }
 
     /// The 4-bit field width masks stray high bits (the wire field is
@@ -225,7 +231,8 @@ mod tests {
     /// the §9.2 division yields a unit pitch contribution.
     #[test]
     fn unit_index_is_q6_unity() {
+        // Index 15 carries the measured 0.99 cap: Q6 round(0.99·64) = 63.
         let g1 = forced_pitch_gain_taps(15).taps[1];
-        assert_eq!(g1, 64, "index 15 should be Q6 unity (64)");
+        assert_eq!(g1, 63, "index 15 should be the capped Q6 63");
     }
 }

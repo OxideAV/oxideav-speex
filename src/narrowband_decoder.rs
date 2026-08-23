@@ -67,7 +67,7 @@
 use crate::adaptive_codebook::ExcitationBuffer;
 use crate::fixed_codebook_gain::FixedCodebookGainIndices;
 use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
-use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_recursive;
+use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_repeat;
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::lsp_to_lpc::{subframe_lpc_set_with_base, LPC_ORDER};
 use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MIN};
@@ -347,13 +347,34 @@ impl NarrowbandDecoder {
                 gain_indices,
             );
 
-            // Pitch (adaptive-codebook) contribution p[n], with the
-            // r410 fixture-arbitrated in-sub-frame recursion for short
-            // pitch periods (see `gain_scaled_pitch_subframe_recursive`).
-            let taps = Self::pitch_taps(body, submode, sf_idx);
+            // Pitch (adaptive-codebook) contribution p[n], short pitch
+            // via the r450 single-substitution repeat rule (see
+            // `gain_scaled_pitch_subframe_repeat`): crafted-stream
+            // probes recover the staged table's taps exactly under the
+            // §9.2 substitution applied once, with a twice-substituted
+            // tail position contributing zero — where the r410
+            // in-sub-frame recursion (whose arbitration predates the
+            // r450 innovation/parity fixes) misfits by 16–60 %.
+            // The forced OL-pitch modes (1 / 8) run a float centre-tap
+            // recursion instead (r450 shoot-out: the forced path feeds
+            // back where the VQ path repeats — see
+            // `gain_scaled_pitch_subframe_forced`).
+            let forced = submode.pitch_gain == crate::submode::PitchGainQuant::None
+                && submode.ol_pitch_gain_bits != 0;
             let p = match Self::pitch_period(body, submode, sf_idx) {
+                Some(period) if forced => {
+                    let coef =
+                        crate::forced_pitch_gain::forced_pitch_coef(body.ol_pitch_gain_index);
+                    crate::gain_scaled_pitch::gain_scaled_pitch_subframe_forced(
+                        period,
+                        coef,
+                        &self.excitation,
+                    )
+                    .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?
+                }
                 Some(period) => {
-                    gain_scaled_pitch_subframe_recursive(period, taps, &self.excitation)
+                    let taps = Self::pitch_taps(body, submode, sf_idx);
+                    gain_scaled_pitch_subframe_repeat(period, taps, &self.excitation)
                         .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?
                 }
                 None => [0.0f32; SUBFRAME_SAMPLES],
@@ -753,8 +774,9 @@ mod tests {
             );
             for sf in 0..SUBFRAMES_PER_FRAME {
                 let taps = NarrowbandDecoder::pitch_taps(&body, &submode, sf).taps;
-                // Single-centre-tap forced gain: g0 = g2 = 0, g1 = Q6 64.
-                assert_eq!(taps, [0, 64, 0], "mode {mode} sf {sf}");
+                // Single-centre-tap forced gain: g0 = g2 = 0, g1 = the
+                // Q6 round of the capped coefficient (0.99·64 → 63).
+                assert_eq!(taps, [0, 63, 0], "mode {mode} sf {sf}");
             }
         }
     }

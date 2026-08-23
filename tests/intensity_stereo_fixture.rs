@@ -134,12 +134,17 @@ fn interleaved_tracks_mono_decode() {
     let (inter_snr, _) = best_snr(&reference, &interleaved, 2, 800);
     println!("stereo-nb-q4: mono {mono_snr:.2} dB, interleaved {inter_snr:.2} dB");
 
-    // The mono decode is the reference-imperfect NB CELP floor.
-    assert!(mono_snr > 10.0, "mono decode SNR {mono_snr:.2} dB < 10");
-    // The stereo law tracks it within ~1.5 dB (the §4.1 block phase is
-    // the only gap; the per-sample gains are correct).
+    // The mono decode floor (r450: the NB fixes lifted this fixture's
+    // mono decode from 13.8 to ≈20.7 dB).
+    assert!(mono_snr > 18.0, "mono decode SNR {mono_snr:.2} dB < 18");
+    // The stereo law tracks it within 3 dB (measured 18.4 vs 20.7 —
+    // with the mono decode now this close to the reference, the §4.1
+    // sub-frame block-phase approximation is the visible term; a
+    // stereo-law probe campaign is the recorded follow-up) and stays
+    // well above the pre-r450 interleaved level outright.
     assert!(
-        inter_snr > mono_snr - 1.5,
-        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 1.5 dB (stereo law regressed)"
+        inter_snr > mono_snr - 3.0,
+        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 3 dB (stereo law regressed)"
     );
+    assert!(inter_snr > 16.0, "interleaved {inter_snr:.2} dB < 16");
 }

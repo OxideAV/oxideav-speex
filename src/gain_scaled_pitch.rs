@@ -159,63 +159,36 @@ pub fn gain_scaled_pitch_subframe(
     Ok(out)
 }
 
-/// Q6 bound on the tap sum used for the **in-sub-frame recursive**
-/// reads of [`gain_scaled_pitch_subframe_recursive`]: `0.9 · 64 =
-/// 57.6`.
-///
-/// When a short pitch (`T <` sub-frame length) makes the §9.2
-/// long-term predictor read positions inside the current sub-frame,
-/// the recursion re-applies the tap gains once per period. A tap sum
-/// above unity would then grow geometrically inside the sub-frame.
-/// The staged provenance records a `0.9` pitch-coefficient damping /
-/// bounding constant family (`provenance/02` "Pitch-gain damping" and
-/// the `pitch_coef` clamp rows); black-box arbitration against the
-/// staged narrowband reference decodes
-/// (`tests/fixtures/nb-conformance/`) pins the *placement*: bounding
-/// only the **recursive** reads (history reads keep the transmitted
-/// gains) scores best across every sub-mode — clamping the history
-/// reads too collapses the fine-pitch modes' energy to ≈ 0.5, and no
-/// bound at all overshoots the OL-pitch modes by ≈ +23 % energy.
-pub const RECURSIVE_TAP_SUM_BOUND_Q6: f32 = 0.9 * PITCH_GAIN_SCALING;
-
 /// Compute the float-domain adaptive-codebook (pitch) contribution
-/// `p[n]` for one 40-sample sub-frame with the **in-sub-frame
-/// recursion** the reference decode exhibits for short pitch periods
-/// (`T < 40`), arbitrated in round r410 against the staged narrowband
-/// reference decodes.
+/// with the **single-substitution repeat rule** the r450
+/// crafted-stream probes measure for short pitch periods.
 ///
-/// For each output position `n`, the three Eq. 9.1 reads at `k = n − T
-/// + {−1, 0, +1}` resolve as:
+/// For each output position `n`, each Eq. 9.1 read at
+/// `k = n − T + {−1, 0, +1}`:
 ///
-/// * `k < 0` — a **history** read from `buffer` (the previous
-///   sub-frames' composed excitation `e[·]`), weighted by the
-///   transmitted tap gains unmodified;
-/// * `k ≥ 0` — a **recursive** read of the *pitch-only partial*
-///   `p[k]` already produced inside this sub-frame (not the composed
-///   `e[k]`, which does not exist yet at this point of the recurrence),
-///   weighted by the tap gains bounded to a `0.9` total
-///   ([`RECURSIVE_TAP_SUM_BOUND_Q6`]).
+/// * `k < 0` — a history read from `buffer`, at the transmitted tap
+///   gain;
+/// * `k ≥ 0` — the §9.2 substitution is applied **once**
+///   (`k ← k − T`); if the substituted index is a history position the
+///   read proceeds normally, and if it is *still* inside the current
+///   sub-frame (`n − 2T + off ≥ 0`, reachable only for `T < 21`) the
+///   tap contributes **zero**.
 ///
-/// The candidate semantics were fixture-arbitrated black-box
-/// (`tests/nb_conformance_fixture.rs`):
-///
-/// * the manual's §9.2 repeat rule (`n−T+1 ≥ 0 → n−2T+1`, reading the
-///   previous period's composed excitation) scores 6.8 dB / 9.3 dB on
-///   the OL-pitch sub-modes 8/2 where this recursion scores
-///   12.7–13.4 dB;
-/// * recursing over the **composed** partial (`p[k] + c[k]`) inverts
-///   the energy error (2.8× overshoot on sub-mode 8);
-/// * the pitch-only recursion with the 0.9 recursive bound is the
-///   best-scoring reading on all ten staged fixtures simultaneously.
-///
-/// For `T ≥ 40` no `k ≥ 0` read occurs and this function reduces
-/// exactly to the plain history dot product.
+/// Provenance (r450, `tests/fixtures/hb-gain-probes/NOTES.md`):
+/// crafted constant-field narrowband streams at `T = 22/33/57/61`
+/// fit the period-repeat model at 1.3–4.7 % residual with the staged
+/// table's taps recovered exactly (common-`T` folding), while the
+/// r410 in-sub-frame recursion leaves 16–60 % residual there and its
+/// fixture arbitration predates the r450 innovation/parity fixes. At
+/// `T = 18` — where the twice-substituted tail positions exist — a
+/// four-way decode shoot-out scores this rule best (7.1 dB vs −5.8 dB
+/// iterated folding, 1.1 dB bounded recursion, −1.9 dB composed
+/// recursion on the strongest-resonance probe).
 ///
 /// # Errors
 ///
-/// [`AdaptiveContributionError::PitchOutOfRange`] outside `[17, 144]`,
-/// as the raw layer.
-pub fn gain_scaled_pitch_subframe_recursive(
+/// [`AdaptiveContributionError::PitchOutOfRange`] outside `[17, 144]`.
+pub fn gain_scaled_pitch_subframe_repeat(
     pitch_period: u16,
     taps: PitchGainTaps,
     buffer: &ExcitationBuffer,
@@ -226,37 +199,27 @@ pub fn gain_scaled_pitch_subframe_recursive(
             period: pitch_period,
         });
     }
-
-    // Transmitted tap gains for the history reads.
-    let hist_taps = [
+    let g = [
         f32::from(taps.taps[0]),
         f32::from(taps.taps[1]),
         f32::from(taps.taps[2]),
     ];
-    // Bounded tap gains for the recursive reads (module docs).
-    let mut rec_taps = hist_taps;
-    let sum: f32 = hist_taps.iter().sum();
-    if sum > RECURSIVE_TAP_SUM_BOUND_Q6 {
-        for t in rec_taps.iter_mut() {
-            *t *= RECURSIVE_TAP_SUM_BOUND_Q6 / sum;
-        }
-    }
-
     let period = i32::from(pitch_period);
     let mut p = [0.0f32; GAIN_SCALED_PITCH_SAMPLES];
-    for n in 0..GAIN_SCALED_PITCH_SAMPLES {
+    for (n, slot) in p.iter_mut().enumerate() {
         let mut acc = 0.0f32;
         for (tap, off) in [-1i32, 0, 1].iter().enumerate() {
-            let k = n as i32 - period + off;
+            let mut k = n as i32 - period + off;
             if k >= 0 {
-                acc += rec_taps[tap] * p[k as usize];
-            } else {
+                k -= period;
+            }
+            if k < 0 {
                 // In-range by construction: |k| ≤ T + 1 ≤ 145.
                 let sample = buffer.lookup(k)?;
-                acc += hist_taps[tap] * f32::from(sample);
+                acc += g[tap] * f32::from(sample);
             }
         }
-        p[n] = acc / PITCH_GAIN_SCALING;
+        *slot = acc / PITCH_GAIN_SCALING;
     }
     Ok(p)
 }
@@ -279,6 +242,47 @@ pub fn gain_scaled_pitch_sample(
 ) -> Result<f32, AdaptiveContributionError> {
     let raw = adaptive_contribution_sample(n, pitch_period, taps, buffer)?;
     Ok(raw as f32 / PITCH_GAIN_SCALING)
+}
+
+/// Float-domain **forced** (open-loop) pitch contribution for the
+/// vocoder modes 1 / 8 — a single centre tap at lag `T`, run as a
+/// true recursion over the pitch partial (r450 crafted-stream
+/// shoot-out: on mode-8 streams the recursive reading scores
+/// 12–14.3 dB against the reference where the repeat rule reads
+/// 4–10.5 dB and a 0.9 bound loses ≈ 1 dB at the top of the gain
+/// grid — the forced path, unlike the 3-tap VQ path, feeds back):
+///
+/// ```text
+///   p[n] = coef · (n − T < 0  ?  e_hist[n − T]  :  p[n − T])
+/// ```
+///
+/// `coef` is the float [`crate::forced_pitch_coef`] law (the r450
+/// probes measure the reference's forced taps as exact float
+/// `0.066667·quant` values — 0.2666/0.4002/0.5332/0.6665/0.7999/
+/// 0.9333 across the grid at `T = 50`, resid ≤ 0.04 % — **not**
+/// Q6-quantised, and capped at **0.99** for `quant = 15`).
+pub fn gain_scaled_pitch_subframe_forced(
+    pitch_period: u16,
+    coef: f32,
+    buffer: &ExcitationBuffer,
+) -> Result<[f32; GAIN_SCALED_PITCH_SAMPLES], AdaptiveContributionError> {
+    use crate::narrowband_body::{PITCH_PERIOD_MAX, PITCH_PERIOD_MIN};
+    if !(PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX).contains(&pitch_period) {
+        return Err(AdaptiveContributionError::PitchOutOfRange {
+            period: pitch_period,
+        });
+    }
+    let period = i32::from(pitch_period);
+    let mut p = [0.0f32; GAIN_SCALED_PITCH_SAMPLES];
+    for n in 0..GAIN_SCALED_PITCH_SAMPLES {
+        let k = n as i32 - period;
+        p[n] = if k >= 0 {
+            coef * p[k as usize]
+        } else {
+            coef * f32::from(buffer.lookup(k)?)
+        };
+    }
+    Ok(p)
 }
 
 #[cfg(test)]

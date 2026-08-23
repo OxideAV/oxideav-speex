@@ -1,6 +1,6 @@
-//! **Decoder output high-pass** (opt-in, round r393) — the
-//! low-frequency rolloff the reference decoder applies to its output by
-//! default.
+//! **Decoder output high-pass** (opt-in) — the low-frequency rolloff
+//! the reference decoder applies to its output by default, with the
+//! transfer **measured exactly** in round r450.
 //!
 //! ## What the staged manual pins
 //!
@@ -8,29 +8,31 @@
 //! filter that is **on by default** on both coder directions
 //! (`SPEEX_SET_HIGHPASS` — *"Set the high-pass filter on (1) or off
 //! (0) … default is on"*). The manual does **not** print the filter's
-//! transfer function; the exact coefficients are a recorded docs gap.
+//! transfer function.
 //!
-//! ## What the fixture measures (behavioural trace)
+//! ## The r450 measurement
 //!
-//! The staged `wb-mode1-folded` reference decode (produced with the
-//! default high-pass active — only the perceptual enhancer was
-//! disabled) shows, relative to this crate's raw decode, exactly the
-//! signature of a low-cutoff high-pass: a phase lead decaying ≈ `1/f`
-//! (`0.077 rad` at 440 Hz, `0.013 rad` at 2 kHz), unity magnitude
-//! through the band, and real attenuation only below ≈ 50 Hz (×0.48 at
-//! 30 Hz). Grid-fitting simple filters against the fixture:
+//! With the narrowband innovation path verified reference-exact to
+//! 0.1 % (crafted pure-innovation streams,
+//! `tests/fixtures/hb-gain-probes/NOTES.md`), the reference-vs-crate
+//! cross-spectral transfer isolates the output high-pass directly.
+//! Welch estimates over five crafted 8 kHz streams and two 16 kHz
+//! streams, complex-LS-fitted to a biquad with a double zero at DC:
 //!
-//! * no filter — 16.7 dB full-signal SNR (the r393 gate baseline);
-//! * 1st-order, best ≈ 35 Hz — 18.1 dB;
-//! * 2nd-order (this module), 30 Hz Butterworth — 18.3 dB, with a
-//!   **flat optimum**: anything in ≈ 28–45 Hz / Q 0.7–1.2 lands within
-//!   0.2 dB, so the data does not identify the reference's exact shape.
+//! * **8 kHz**: `fc ≈ 80.7 Hz, Q ≈ 0.870` (bilinear 2nd-order
+//!   high-pass; poles r = 0.9642 at ±66 Hz; ≈ 5.7 % peaking around
+//!   150 Hz; fit residual < 0.01 across 27 Hz–1.5 kHz);
+//! * **16 kHz**: `fc ≈ 41.5 Hz, Q ≈ 1.118` (peaking ≈ 23 % around
+//!   55 Hz);
+//! * **32 kHz**: the measured response matches the 16 kHz filter's
+//!   absolute-Hz response (half-power ≈ 30 Hz, peak ≈ 1.26 at 55 Hz),
+//!   so the 16 kHz design carries over unchanged in Hz.
 //!
-//! This module therefore ships the interpretable reading — a
-//! **2nd-order Butterworth high-pass at 30 Hz** — as an explicitly
-//! *fitted, not reference-pinned* approximation. It is **opt-in**: no
-//! decoder applies it implicitly, so existing decode outputs are
-//! unchanged; apply it to match the reference pipeline's default.
+//! The r393 30 Hz-Butterworth reading (a behavioural fit against one
+//! fixture with a flat optimum) is superseded by these direct
+//! measurements. The filter stays **opt-in**: no decoder applies it
+//! implicitly, so existing decode outputs are unchanged; apply it to
+//! match the reference pipeline's default.
 //!
 //! ```rust
 //! use oxideav_speex::OutputHighpass;
@@ -39,16 +41,25 @@
 //! hp.process_slice(&mut pcm);
 //! ```
 
-use core::f64::consts::{FRAC_1_SQRT_2, PI};
+use core::f64::consts::PI;
 
-/// The fitted cutoff frequency in Hz (module docs: flat optimum around
-/// 28–45 Hz on the staged fixture; 30 Hz is the adopted reading).
-pub const OUTPUT_HIGHPASS_CUTOFF_HZ: f64 = 30.0;
+/// Measured cutoff of the 8 kHz (narrowband) output high-pass
+/// (module docs — r450 cross-spectral measurement).
+pub const OUTPUT_HIGHPASS_CUTOFF_HZ_8K: f64 = 80.7;
+/// Measured resonance of the 8 kHz output high-pass.
+pub const OUTPUT_HIGHPASS_Q_8K: f64 = 0.870;
+/// Measured cutoff of the 16/32 kHz output high-pass biquad section.
+pub const OUTPUT_HIGHPASS_CUTOFF_HZ: f64 = 41.75;
+/// Measured resonance of the 16/32 kHz output high-pass biquad section.
+pub const OUTPUT_HIGHPASS_Q: f64 = 1.38;
+/// Measured cutoff of the extra first-order section the 16/32 kHz
+/// response carries (the wide-band output rolls off at third order —
+/// log-magnitude fit residual 1.2 % vs 3.1 % for a bare biquad).
+pub const OUTPUT_HIGHPASS_FIRST_ORDER_HZ: f64 = 33.0;
 
-/// Opt-in decoder output high-pass: a 2nd-order Butterworth high-pass
-/// biquad at [`OUTPUT_HIGHPASS_CUTOFF_HZ`], fitted against the staged
-/// reference-decode fixture (module docs — the reference's exact
-/// transfer is a recorded docs gap).
+/// Opt-in decoder output high-pass: the r450-measured bilinear
+/// 2nd-order high-pass biquad (per-rate cutoff/Q constants above;
+/// module docs).
 #[derive(Debug, Clone)]
 pub struct OutputHighpass {
     b0: f64,
@@ -60,6 +71,9 @@ pub struct OutputHighpass {
     x2: f64,
     y1: f64,
     y2: f64,
+    /// Optional first-order section (16/32 kHz — see
+    /// [`OUTPUT_HIGHPASS_FIRST_ORDER_HZ`]): `(g, a, x_prev, y_prev)`.
+    fo: Option<(f64, f64, f64, f64)>,
 }
 
 impl OutputHighpass {
@@ -71,11 +85,23 @@ impl OutputHighpass {
     /// so the absolute-cutoff convention is documented rather than
     /// assumed exact.
     pub fn for_sample_rate(rate_hz: u32) -> Self {
-        let w = 2.0 * PI * OUTPUT_HIGHPASS_CUTOFF_HZ / f64::from(rate_hz.max(1));
+        let (fc, q, first_order) = if rate_hz <= 8_000 {
+            (OUTPUT_HIGHPASS_CUTOFF_HZ_8K, OUTPUT_HIGHPASS_Q_8K, None)
+        } else {
+            (
+                OUTPUT_HIGHPASS_CUTOFF_HZ,
+                OUTPUT_HIGHPASS_Q,
+                Some(OUTPUT_HIGHPASS_FIRST_ORDER_HZ),
+            )
+        };
+        let w = 2.0 * PI * fc / f64::from(rate_hz.max(1));
         let c = 1.0 / (w / 2.0).tan();
-        let q = FRAC_1_SQRT_2; // Butterworth
         let norm = c * c + c / q + 1.0;
         let b0 = c * c / norm;
+        let fo = first_order.map(|f1| {
+            let k = (PI * f1 / f64::from(rate_hz.max(1))).tan();
+            ((1.0 / (1.0 + k)), (1.0 - k) / (1.0 + k), 0.0, 0.0)
+        });
         Self {
             b0,
             b1: -2.0 * b0,
@@ -86,6 +112,7 @@ impl OutputHighpass {
             x2: 0.0,
             y1: 0.0,
             y2: 0.0,
+            fo,
         }
     }
 
@@ -99,7 +126,15 @@ impl OutputHighpass {
         self.x1 = x;
         self.y2 = self.y1;
         self.y1 = y;
-        y
+        match self.fo.as_mut() {
+            Some((g, a, xp, yp)) => {
+                let y1 = *g * (y - *xp) + *a * *yp;
+                *xp = y;
+                *yp = y1;
+                y1
+            }
+            None => y,
+        }
     }
 
     /// Filter a block in place (state carries across calls, so
@@ -156,17 +191,21 @@ mod tests {
         }
     }
 
-    /// Attenuation grows monotonically below the cutoff, with the
-    /// half-power point near the design cutoff.
+    /// The measured response points pin the per-rate designs: 8 kHz
+    /// half-power near 59 Hz with ≈ 5.7 % peaking near 150 Hz; 16 kHz
+    /// half-power near 30 Hz with ≈ 23 % peaking near 55 Hz.
     #[test]
-    fn stopband_attenuates_monotonically() {
-        let g30 = measured_gain(16_000, OUTPUT_HIGHPASS_CUTOFF_HZ);
+    fn measured_response_points() {
+        let g59 = measured_gain(8_000, 59.0);
+        assert!((g59 - 0.53).abs() < 0.08, "8k 59 Hz {g59}");
+        let g150 = measured_gain(8_000, 150.0);
+        assert!((g150 - 1.057).abs() < 0.02, "8k 150 Hz peak {g150}");
+        let g30 = measured_gain(16_000, 30.0);
+        assert!((g30 - 0.47).abs() < 0.08, "16k 30 Hz {g30}");
+        let g55 = measured_gain(16_000, 55.0);
+        assert!((g55 - 1.23).abs() < 0.05, "16k 55 Hz peak {g55}");
         let g10 = measured_gain(16_000, 10.0);
-        let g100 = measured_gain(16_000, 100.0);
-        assert!(g10 < g30 && g30 < g100, "{g10} {g30} {g100}");
-        // Butterworth: −3 dB at the cutoff.
-        assert!((g30 - FRAC_1_SQRT_2).abs() < 0.05, "half-power {g30}");
-        assert!(g10 < 0.15, "10 Hz should be strongly attenuated: {g10}");
+        assert!(g10 < 0.15, "10 Hz strongly attenuated: {g10}");
     }
 
     /// Block processing equals sample-by-sample processing (state
