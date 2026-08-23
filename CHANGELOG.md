@@ -6,6 +6,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-speex/compare/v0.0.9...v0.0.10) - 2026-08-23
+
+### Other
+
+- reword two pre-round module comments to cite the staged sidecars
+- nb mode 1: comfort noise at the measured level
+- measured sec-4.1 block phase + steady-law confirmation
+- uwb layer 2: VQ modes measured as reference-rejected — gap closed negative
+- the r450 crafted-bitstream probe round — measured laws everywhere
+- quality-10 lands — mode-4 two-stage search + base-aware gain selection
+- uwb layer 2: exact outer crossover fold law over the zero-stuffed source
+- nb pitch: exact short-lag rules + measured output high-pass
+- hb mode 1: exact crossover-anchored fold law over the innovation-only source
+- hb 2/3/4 crossover-anchored gain law + nb mode-7 stage weight — crafted-bitstream probe round
+- mode-4 gain-base discrimination — the provenance/08 fixture pair, generated and gated
+- r446 QMF-recovered replication arc — both fixtures, UWB q10 gates, sharpened gain-law ask
+- second QMF-recovered mode-4 replication (UWB fixture) + envelope/state gain evidence
+- UWB quality-10 stacked mode-4 conformance gate on the staged hb-mode4-uwb-q10 oracle
+- replicate the provenance/08 QMF-recovered mode-4 excitation measurement with crate machinery
+- r440 QMF-route arc — mode-4 state gain + polarity, QMF instrument gate, §7.6 parity, exact OL-gain law
+- exact float-build OL-gain quantiser law (provenance/02)
+- §7.6 odd-parity crossover closed form + staged-CSV cross-check + γ compression model
+- hb mode 4: state-derived absolute gain base + pinned innovation polarity (provenance/08)
+- band-isolation exactness gate — the crate's analysis bank is the provenance/08 instrument
+- mode-3 sign/index wire order — leading sign bit per binding §1/§2.2
+- campaign B — intensity stereo, HB mode-4 decode, folded-band scale-law validation
+- differential-debug the 3-layer speech divergence — bit-exact framing gate + scoped fold docs gap
+
 ### Added
 
 - **Mode-1 comfort noise at the measured level** (r450 probes). The
