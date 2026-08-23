@@ -65,6 +65,37 @@ that limited every earlier black-box round.
    stage-2 weight re-measures as exactly the staged **0.4** (stage-2-only
    crafted streams fit at 1.0006 of stage-1-only through the
    0.4-weighted decode).
-5. **Clipping guard.** Strong-resonance probes must keep reference
+5. **Mode-1 fold law** (gain grid over all 32 staged levels, high-band
+   envelope sweep, low-band envelope and level variants, and a
+   two-source fit on a pitch-plus-random-innovation stream):
+   `s = 0.8518 · fold_quant_bound[g5] · |A_hb(π)|/|A_lb(π)|`, linear
+   over the whole table (0.2 %), and the fold **source is the
+   innovation-only excitation** — the two-source fit reads innovation
+   weight = the law exactly and pitch weight −0.0001. See
+   `oxideav_speex::hb_fold::HB_FOLD_CROSSOVER_SCALE`.
+6. **UWB second-layer fold law** (crafted 3-layer streams; first high
+   band mode 3 with random innovation): the source is the first high
+   band's excitation **zero-stuffed** to the 16 kHz half-band rate
+   (fit 0.98–0.997 vs 0.61–0.67 linear-interp), the law
+   `0.664 · fold_quant_bound[g5] · |A_l2(π)|/|A_hb1(0)|` — spectral
+   continuity at the 8 kHz join. See
+   `oxideav_speex::hb_fold::UWB_FOLD_CROSSOVER_SCALE`.
+7. **Short-lag pitch conventions** (tap-fit grids at
+   `T = 18/22/33/50/57/61` + five-way decode shoot-outs): the VQ 3-tap
+   path applies the §9.2 substitution **once** (common-`T` folding;
+   twice-substituted tail positions contribute zero); the forced OL
+   modes 1/8 run an **unbounded centre-tap recursion** with exact
+   float coefficients `0.066667·quant` capped at **0.99** for
+   index 15. Fitted taps reproduce the staged tables exactly under
+   these rules.
+8. **Output high-pass** (cross-spectral transfer, reference vs the
+   crate's now-innovation-exact decode): 8 kHz — bilinear biquad
+   `fc ≈ 80.7 Hz, Q ≈ 0.870`; 16 kHz — third-order (biquad
+   `fc ≈ 41.75 Hz, Q ≈ 1.38` × first-order ≈ 33 Hz); 32 kHz matches
+   the 16 kHz response in absolute Hz. See
+   `oxideav_speex::OutputHighpass`.
+9. **Clipping guard.** Strong-resonance probes must keep reference
    peaks well inside i16 — saturated reference output masquerades as a
    unity-pole pitch loop (first tap-probe battery discarded for this).
+   Conversely, near-silent probes sink into the reference's i16
+   output quantisation — probe levels want ≈ 55–75 dB below clipping.
