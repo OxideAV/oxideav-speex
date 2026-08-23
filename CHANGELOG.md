@@ -6,6 +6,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Wideband / ultra-wideband quality-10 (44 kbit/s) encoding lands**
+  (r450). With the mode-4 binding, its exactly-0.4 stage-2 weight and
+  the crossover-anchored absolute gain law all pinned, the encoder's
+  high-band search now covers mode 4: stage 1 greedy over the five
+  `sv8-128` slots at the reconstructed gain, stage 2 over the residual
+  at weight 0.4, joint with the 4-bit gain grid — and the whole
+  gain-correction family (modes 2/3/4) searches at the decode law's
+  per-sub-frame base `|A_hb(π)|·rms(e_lb)/|A_lb(π)|` (the previous
+  search scored without the base, mismatching the decoder).
+  `HbInnovationMapping` gains the `DocumentedTwoStage` mode-4 variant
+  (`decode_hb_subframe` rounds the exact f32 shape on its i16
+  surface); `encode_packet_quality(10)` packs to the staged Table-10.2
+  budget on both the wideband and ultra-wideband ladders.
+
 ### Changed
 
 - **Ultra-wideband second-layer fold — exact outer crossover law, and

@@ -19,9 +19,10 @@
 //! crate's public API surface over the in-tree codebook tables.
 
 use oxideav_speex::{
-    decode_hb_subframe, hb_innovation_sub_vector, BitReader, BitWriter, HbInnovationCodebook,
-    HbInnovationError, HbInnovationMapping, WidebandHighBandBody, WidebandHighBandSubmode,
-    HB_SUBFRAME_SAMPLES, HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+    decode_hb_subframe, decode_hb_subframe_mode4_f32, hb_innovation_sub_vector, BitReader,
+    BitWriter, HbInnovationCodebook, HbInnovationMapping, WidebandHighBandBody,
+    WidebandHighBandSubmode, HB_SUBFRAME_SAMPLES, HIGH_BAND_SUBFRAMES_PER_FRAME,
+    WIDEBAND_HIGH_BAND_SUBMODES,
 };
 
 /// Build a synthetic mode-2 high-band body whose four sub-frames carry
@@ -169,10 +170,12 @@ fn silence_modes_return_all_zero_sub_vector() {
 }
 
 #[test]
-fn mode_4_dispatcher_is_undocumented_with_full_excitation_vq_field() {
+fn mode_4_dispatcher_decodes_the_two_stage_binding() {
     // Mode 4: 80 bits per sub-frame; build a conforming body and
-    // confirm the dispatcher reports Undocumented (and reports it
-    // consistently across all four sub-frames).
+    // confirm the dispatcher decodes it (r450 — the two-stage binding
+    // is pinned; an all-zero field decodes to twice codebook row 0 at
+    // stage weight 0.4, rounded on this i16 surface) consistently
+    // across all four sub-frames.
     let submode = WIDEBAND_HIGH_BAND_SUBMODES[4];
     let mut w = BitWriter::new();
     w.write(0, u32::from(submode.lsp_bits)).unwrap();
@@ -188,8 +191,13 @@ fn mode_4_dispatcher_is_undocumented_with_full_excitation_vq_field() {
     let mut reader = BitReader::new(&bytes);
     let body = WidebandHighBandBody::parse(&mut reader, &submode).unwrap();
     for sf in 0..HIGH_BAND_SUBFRAMES_PER_FRAME as usize {
-        let r = body.hb_innovation_sub_vector(&submode, sf);
-        assert_eq!(r, Err(HbInnovationError::Undocumented));
+        let v = body
+            .hb_innovation_sub_vector(&submode, sf)
+            .expect("mode 4 decodes (r450)");
+        let f = decode_hb_subframe_mode4_f32(0);
+        for (n, (&iv, &fv)) in v.iter().zip(f.iter()).enumerate() {
+            assert_eq!(i32::from(iv), f64::from(fv).round() as i32, "sf {sf} n {n}");
+        }
     }
 }
 

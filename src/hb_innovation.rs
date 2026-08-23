@@ -283,6 +283,15 @@ pub enum HbInnovationMapping {
         /// `codebook.sub_vector_len() * count == HB_SUBFRAME_SAMPLES`).
         count: u8,
     },
+    /// Two-stage binding (mode 4): each sub-frame is two `count`-slot
+    /// passes of `codebook` over the same 40 samples, stage 2 added at
+    /// [`HB_MODE4_STAGE2_WEIGHT`] ([`decode_hb_subframe_mode4_f32`]).
+    DocumentedTwoStage {
+        /// The codebook both stages share.
+        codebook: HbInnovationCodebook,
+        /// Sub-vectors per stage.
+        count: u8,
+    },
     /// The per-mode codebook binding is not uniquely pinned by the
     /// staged material — the bit budget plus the
     /// 40-sample-per-sub-frame constraint plus the two available
@@ -313,6 +322,15 @@ impl HbInnovationMapping {
                 count: 4,
             },
             40 => HbInnovationMapping::Documented {
+                codebook: HbInnovationCodebook::HbSv8_128,
+                count: 5,
+            },
+            // Mode 4 (80 bits): two stages of the same five sv8-128
+            // slots, stage 2 at HB_MODE4_STAGE2_WEIGHT
+            // (hb-innovation-binding.md §1/§2; stage weight
+            // re-measured exactly 0.4 by the r450 stage-isolation
+            // probes).
+            80 => HbInnovationMapping::DocumentedTwoStage {
                 codebook: HbInnovationCodebook::HbSv8_128,
                 count: 5,
             },
@@ -379,6 +397,16 @@ pub fn decode_hb_subframe(
     match mapping {
         HbInnovationMapping::Silence => Ok([0i16; HB_SUBFRAME_SAMPLES]),
         HbInnovationMapping::Undocumented => Err(HbInnovationError::Undocumented),
+        HbInnovationMapping::DocumentedTwoStage { .. } => {
+            // Mode 4's exact shape is f32 (0.4-weighted stage 2) —
+            // round-to-nearest on this integer surface.
+            let shape = decode_hb_subframe_mode4_f32(excitation_vq_index);
+            let mut out = [0i16; HB_SUBFRAME_SAMPLES];
+            for (o, &v) in out.iter_mut().zip(shape.iter()) {
+                *o = f64::from(v).round().clamp(-32768.0, 32767.0) as i16;
+            }
+            Ok(out)
+        }
         HbInnovationMapping::Documented { codebook, count } => {
             let sv_len = codebook.sub_vector_len();
             let slot_bits = u32::from(codebook.slot_bits());
@@ -551,11 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn mapping_undocumented_for_mode_4() {
+    fn mapping_two_stage_for_mode_4() {
         let s = WidebandHighBandSubmode::for_id(4).unwrap();
         assert_eq!(
             HbInnovationMapping::for_mode(&s),
-            HbInnovationMapping::Undocumented
+            HbInnovationMapping::DocumentedTwoStage {
+                codebook: HbInnovationCodebook::HbSv8_128,
+                count: 5,
+            }
         );
     }
 
@@ -608,10 +639,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_hb_subframe_mode_4_returns_undocumented() {
+    fn decode_hb_subframe_mode_4_rounds_the_f32_shape() {
+        // The integer surface for mode 4 is the rounded f32 shape (two
+        // 0.4-weighted stages).
         let s = WidebandHighBandSubmode::for_id(4).unwrap();
-        let r = decode_hb_subframe(&s, 0);
-        assert_eq!(r, Err(HbInnovationError::Undocumented));
+        let packed: u128 = 0x14_33_51_5A_6C_2B_2B_2B_2B_2Bu128;
+        let v = decode_hb_subframe(&s, packed).unwrap();
+        let f = decode_hb_subframe_mode4_f32(packed);
+        for (n, (&iv, &fv)) in v.iter().zip(f.iter()).enumerate() {
+            assert_eq!(i32::from(iv), f64::from(fv).round() as i32, "sample {n}");
+        }
     }
 
     #[test]

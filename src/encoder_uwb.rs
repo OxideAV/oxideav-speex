@@ -225,10 +225,10 @@ impl UltraWidebandEncoder {
     /// Encode a packet at a §2.1 quality setting, using the
     /// [`crate::quality`] ladders for all three layers.
     ///
-    /// Qualities 0..=9 encode (r438 — narrowband modes 1 and 7 are now
-    /// bound). Quality 10 selects first-high-band mode 4, whose
+    /// All qualities 0..=10 encode (r450 — narrowband modes 1 and 7 are
+    /// bound). Quality 10 selects first-high-band mode 4, which (r450)
     /// innovation-codebook binding is the remaining recorded docs gap,
-    /// and is rejected by the embedded wideband encoder.
+    /// the embedded wideband encoder searches two-stage.
     pub fn encode_packet_quality(
         &mut self,
         frames: &[[i16; UWB_FRAME_SAMPLES]],
@@ -544,7 +544,7 @@ mod tests {
         // quality's staged bits-per-frame total — the wire-budget tie
         // between the quality module and the packers.
         use crate::quality::{uwb_bitrate_bps, FRAMES_PER_SECOND};
-        for q in 0..=9u8 {
+        for q in 0..=10u8 {
             let mut enc = UltraWidebandEncoder::new();
             let frames = [uwb_frame(5000.0)];
             let bytes = enc

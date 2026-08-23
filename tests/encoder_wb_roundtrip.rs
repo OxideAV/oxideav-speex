@@ -9,7 +9,7 @@
 //! that the high band actually carries energy when the input has 4–8 kHz
 //! content.
 
-use oxideav_speex::{WbEncodeError, WidebandDecoder, WidebandEncoder, QMF_WIDEBAND_FRAME};
+use oxideav_speex::{WidebandDecoder, WidebandEncoder, QMF_WIDEBAND_FRAME};
 
 /// A 16 kHz frame with energy in both bands: a voiced-ish 300 Hz
 /// fundamental plus a 6 kHz high-band tone.
@@ -167,11 +167,21 @@ fn hb_mode_1_gain_only_stream_decodes() {
 }
 
 #[test]
-fn undocumented_hb_mode_4_is_a_typed_error() {
+fn hb_mode_4_round_trips_with_live_high_band() {
+    // r450: mode 4 encodes (two-stage sv8-128 search + the
+    // crossover-anchored gain law) and its decode reconstructs a
+    // non-silent high band from a dual-band source.
     let mut enc = WidebandEncoder::new();
-    let frame = dual_band_frame(4000.0, 0);
-    assert_eq!(
-        enc.encode_frame(&frame, 3, 4),
-        Err(WbEncodeError::UndocumentedHbInnovation(4))
+    let mut dec = WidebandDecoder::new();
+    let mut hb_energy = 0.0f64;
+    for k in 0..6usize {
+        let frame = dual_band_frame(4000.0, k);
+        let bytes = enc.encode_frame(&frame, 3, 4).expect("mode 4 encodes");
+        let out = dec.decode_packet(&bytes).expect("mode 4 decodes");
+        hb_energy += energy(&out.high_band);
+    }
+    assert!(
+        hb_energy.is_finite() && hb_energy > 0.0,
+        "mode-4 high band must be live"
     );
 }
