@@ -270,7 +270,7 @@ fn decode_tracks_reference() {
     }
     let snr = 10.0 * (er / (err + 1e-12)).log10();
     println!("uwb-speech full: {snr:.2} dB");
-    assert!(snr >= 15.0, "full-signal SNR {snr:.2} dB < 15 dB");
+    assert!(snr >= 15.5, "full-signal SNR {snr:.2} dB < 15.5 dB");
 
     // Per-frame per-band mean |error| over the non-silent frames.
     let mut sum = [0.0f64; 3];
@@ -300,20 +300,20 @@ fn decode_tracks_reference() {
         m[0], m[1], m[2]
     );
 
-    // Narrowband band is reference-accurate (r450 measured 0.96 dB).
-    assert!(m[0] < 1.5, "0-4 kHz mean |err| {:.2} dB ≥ 1.5", m[0]);
+    // Narrowband band is reference-accurate (r450 measured 0.85 dB).
+    assert!(m[0] < 1.3, "0-4 kHz mean |err| {:.2} dB ≥ 1.3", m[0]);
     // High-band fold layers under the r450 crossover-anchored,
     // innovation-only-source fold law (measured 0.92 / 3.17 dB; was
     // 4.77 / 7.06 dB at campaign A). The 8–16 kHz tail is the outer
     // (second-layer) fold, still on the r403 excitation-source law.
     assert!(
-        m[1] < 1.8,
-        "4-8 kHz mean |err| {:.2} dB ≥ 1.8 (regression)",
+        m[1] < 1.3,
+        "4-8 kHz mean |err| {:.2} dB ≥ 1.3 (regression, was 0.84)",
         m[1]
     );
     assert!(
-        m[2] < 4.5,
-        "8-16 kHz mean |err| {:.2} dB ≥ 4.5 (regression)",
+        m[2] < 1.7,
+        "8-16 kHz mean |err| {:.2} dB ≥ 1.7 (regression, was 1.12)",
         m[2]
     );
 

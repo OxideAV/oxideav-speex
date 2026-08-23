@@ -318,8 +318,8 @@ fn decode_tracks_reference() {
         "decoder delay vs the trimmed reference moved (got {best_delay}, was ≈351)"
     );
     assert!(
-        best_corr > 0.40,
-        "full-signal alignment correlation {best_corr:.4} ≤ 0.40 (was 0.456)"
+        best_corr > 0.98,
+        "full-signal alignment correlation {best_corr:.4} ≤ 0.98 (was 0.9967, r450)"
     );
 
     let ours = &ours[best_delay..];
@@ -375,23 +375,22 @@ fn decode_tracks_reference() {
     //   source normalisation is the recorded `hb-folded-gain.md` §7.4
     //   docs gap.
     //
-    // The full-signal figure is band-error-dominated on this source
-    // (deliberate strong high-band formants, fixture notes): it is a
-    // tracking pin, not a quality claim.
-    assert!(snr > -1.5, "full-signal SNR {snr:.2} dB < -1.5 (was 0.03)");
+    // r450 (crossover-anchored laws through all three layers):
+    // measured full 20.16 dB, bands 0.10 / 0.49 / 0.70 dB.
+    assert!(snr > 17.0, "full-signal SNR {snr:.2} dB < 17 (was 20.16)");
     assert!(
-        m[0] < 2.5,
-        "0-4 kHz mean |err| {:.2} dB ≥ 2.5 (was 1.29)",
+        m[0] < 0.5,
+        "0-4 kHz mean |err| {:.2} dB ≥ 0.5 (was 0.10)",
         m[0]
     );
     assert!(
-        m[1] < 7.0,
-        "4-8 kHz mean |err| {:.2} dB ≥ 7 (was 5.55)",
+        m[1] < 1.2,
+        "4-8 kHz mean |err| {:.2} dB ≥ 1.2 (was 0.49)",
         m[1]
     );
     assert!(
-        m[2] < 9.5,
-        "8-16 kHz mean |err| {:.2} dB ≥ 9.5 (was 7.98)",
+        m[2] < 1.5,
+        "8-16 kHz mean |err| {:.2} dB ≥ 1.5 (was 0.70)",
         m[2]
     );
     if m[1] < 3.0 {

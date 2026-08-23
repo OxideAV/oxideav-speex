@@ -54,7 +54,7 @@ use crate::narrowband_decoder::{
 };
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame_leveled, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{synthesise_high_band_frame_leveled_env, HB_FRAME_SAMPLES};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -183,6 +183,9 @@ pub struct WidebandDecoder {
     /// innovation for the VQ sub-modes) — retained for the
     /// ultra-wideband second-layer fold (see [`crate::uwb_decoder`]).
     last_hb_excitation: [f32; HB_FRAME_SAMPLES],
+    /// Per-sub-frame high-band envelope band-edge responses (see
+    /// [`Self::last_hb_env`]).
+    last_hb_env: [(f64, f64); 4],
 }
 
 impl Default for WidebandDecoder {
@@ -201,6 +204,7 @@ impl WidebandDecoder {
             prev_hb_lsp_delta_q10: None,
             qmf: QmfSynthesis::new(),
             last_hb_excitation: [0.0; HB_FRAME_SAMPLES],
+            last_hb_env: [(1.0, 1.0); 4],
         }
     }
 
@@ -212,6 +216,15 @@ impl WidebandDecoder {
     /// low band's [`NarrowbandDecoder::last_frame_excitation`].
     pub fn last_hb_excitation(&self) -> &[f32; HB_FRAME_SAMPLES] {
         &self.last_hb_excitation
+    }
+
+    /// Per-sub-frame `(|A_hb(π)|, |A_hb(0)|)` of the most recently
+    /// decoded frame's interpolated high-band envelope — the band-edge
+    /// responses the crossover-anchored gain laws consume (the
+    /// ultra-wideband second layer divides by `|A_hb(0)|`, the high
+    /// band's response at the 8 kHz join).
+    pub fn last_hb_env(&self) -> &[(f64, f64); 4] {
+        &self.last_hb_env
     }
 
     /// Decode one wideband packet into its two reconstructed half-band
@@ -312,7 +325,8 @@ impl WidebandDecoder {
         }
         let lb_innovation = *self.low_band.last_frame_innovation();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
-        let high_band = synthesise_high_band_frame_leveled(
+        let mut hb_env = [(1.0f64, 1.0f64); 4];
+        let high_band = synthesise_high_band_frame_leveled_env(
             hb_body,
             hb_submode,
             &mut self.high_band_filter,
@@ -320,9 +334,11 @@ impl WidebandDecoder {
             &lb_excitation,
             Some((&hb_gain_base, &lb_innovation)),
             &mut hb_excitation,
+            Some(&mut hb_env),
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
         self.last_hb_excitation = hb_excitation;
+        self.last_hb_env = hb_env;
 
         // --- QMF synthesis: recombine the two half-bands → 16 kHz PCM ---
         let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);

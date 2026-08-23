@@ -442,6 +442,69 @@ pub fn folded_uwb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) 
     }
 }
 
+/// Scale of the r450 ultra-wideband **outer** (second-layer) fold law,
+/// measured by crafted 3-layer streams
+/// (`tests/fixtures/hb-gain-probes/NOTES.md`): with the first high
+/// band carrying known random innovation and the second layer's 5-bit
+/// gain / envelope and the first band's envelope swept one at a time,
+/// the reference's 8–16 kHz band is
+///
+/// ```text
+///   e_l2[n] = UWB_FOLD_CROSSOVER_SCALE · fold_quant_bound[g5]
+///             · |A_l2(π)| / |A_hb1(0)| · (−1)ⁿ · zerostuff(e_hb1)[n]
+/// ```
+///
+/// — the fold **source** is the first high band's excitation
+/// **zero-stuffed** to the 16 kHz half-band rate (both spectral
+/// images kept: per-sub-frame fit score 0.98–0.997, vs 0.61–0.67 for
+/// the r403 linear-interpolated source, which is superseded), the law
+/// is linear over the whole staged gain table (flat to 0.3 %),
+/// proportional to the second layer's own crossover response
+/// `|A_l2(π)|` and inversely proportional to the first band's
+/// response at its **zero edge** `|A_hb1(0)|` (constant to 2.5 % over
+/// a 10× sweep). Read as spectral continuity at the **8 kHz join**:
+/// after the two QMF folds, the second layer's `π` edge and the first
+/// band's `0` edge both land at 8 kHz, so the transmitted gain codes
+/// the amplitude ratio of the two layers there — the same
+/// architecture as the 4 kHz laws
+/// ([`HB_FOLD_CROSSOVER_SCALE`],
+/// [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]).
+/// The r403 `UWB_FOLD_RECONSTRUCTION_MULT = 1/16` flat constant is
+/// superseded.
+pub const UWB_FOLD_CROSSOVER_SCALE: f64 = 0.664;
+
+/// Reconstruct one ultra-wideband second-layer sub-frame's excitation
+/// under the r450 outer crossover-anchored fold law (see
+/// [`UWB_FOLD_CROSSOVER_SCALE`]).
+///
+/// `exc_hb1` is the embedded wideband layer's high-band excitation for
+/// the matching 40-sample sub-frame; `gain` the staged 32-level folded
+/// gain; `l2_lpc` the second layer's interpolated LPC set for this
+/// sub-frame; `hb1_a0` the first band's `|A_hb1(0)|` for the same
+/// sub-frame ([`crate::WidebandDecoder::last_hb_env`]). Output is the
+/// 80-sample 16 kHz half-band excitation (zero-stuffed source, `(−1)ⁿ`
+/// fold).
+pub fn folded_uwb_excitation_subframe_crossover(
+    exc_hb1: &[f32],
+    gain: f32,
+    l2_lpc: &[f64; HB_LPC_ORDER],
+    hb1_a0: f64,
+) -> Vec<f64> {
+    let mut l2_api = 1.0f64;
+    for (j, &aj) in l2_lpc.iter().enumerate() {
+        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+        l2_api -= aj * sgn;
+    }
+    let k = UWB_FOLD_CROSSOVER_SCALE * f64::from(gain) * l2_api.abs() / hb1_a0.max(1e-9);
+    let mut out = vec![0.0f64; exc_hb1.len() * 2];
+    for (i, &v) in exc_hb1.iter().enumerate() {
+        // zero-stuff: (v, 0) — then the (−1)ⁿ fold; stuffed zeros stay
+        // zero either way, so only the even positions carry signal.
+        out[2 * i] = k * f64::from(v);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

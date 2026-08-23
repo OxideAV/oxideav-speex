@@ -295,6 +295,34 @@ pub fn synthesise_high_band_frame_leveled(
     hb_gain_base: Option<HbGainBaseCtx<'_>>,
     exc_out: &mut [f32; HB_FRAME_SAMPLES],
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    synthesise_high_band_frame_leveled_env(
+        body,
+        submode,
+        filter,
+        prev_hb_lsp_delta_q10,
+        lb_excitation,
+        hb_gain_base,
+        exc_out,
+        None,
+    )
+}
+
+/// [`synthesise_high_band_frame_leveled`] additionally reporting each
+/// sub-frame's high-band envelope responses `(|A_hb(π)|, |A_hb(0)|)` —
+/// the two band-edge quantities the crossover-anchored gain laws
+/// consume (the ultra-wideband second layer anchors on `|A_hb(0)|`,
+/// the high band's response at the 8 kHz join).
+#[allow(clippy::too_many_arguments)]
+pub fn synthesise_high_band_frame_leveled_env(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    filter: &mut HbSynthesisFilter,
+    prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
+    lb_excitation: &[f32; HB_FRAME_SAMPLES],
+    hb_gain_base: Option<HbGainBaseCtx<'_>>,
+    exc_out: &mut [f32; HB_FRAME_SAMPLES],
+    mut hb_env_out: Option<&mut [(f64, f64); HB_SUBFRAMES_PER_FRAME]>,
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
     // (Q10, pre-base). Silence mode 0 transmits no LSP field → None.
     let curr_lsp = body.reconstructed_lsp_q10(submode);
@@ -327,6 +355,15 @@ pub fn synthesise_high_band_frame_leveled(
     let mut out = [0.0f64; HB_FRAME_SAMPLES];
     for sf in 0..HB_SUBFRAMES_PER_FRAME {
         let lpc = lpc_sets[sf];
+        if let Some(env) = hb_env_out.as_deref_mut() {
+            let (mut a_pi, mut a_0) = (1.0f64, 1.0f64);
+            for (j, &aj) in lpc.iter().enumerate() {
+                let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+                a_pi -= aj * sgn;
+                a_0 -= aj;
+            }
+            env[sf] = (a_pi.abs(), a_0.abs());
+        }
         let e64: [f64; HB_SUBFRAME_SAMPLES] = if folded_mode {
             // Folded law: e_hb[n] = K·g·(−1)ⁿ·e_lb[n] (crate::hb_fold).
             let gain =

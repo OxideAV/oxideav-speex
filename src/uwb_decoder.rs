@@ -101,14 +101,13 @@ use crate::decoder::ControlMessage;
 use crate::frame::{NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
-use crate::hb_fold::{folded_uwb_excitation_slice, upsample_hb_excitation_linear};
+use crate::hb_fold::folded_uwb_excitation_subframe_crossover;
 use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::hb_synthesis::HbSynthesisFilter;
 use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
 use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
 use crate::signalling::{CustomInbandMessage, InbandMessage};
 use crate::submode::Submode;
-use crate::wb_synthesis::HB_FRAME_SAMPLES;
 use crate::wideband::{
     WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
     HIGH_BAND_SUBFRAMES_PER_FRAME,
@@ -365,23 +364,15 @@ impl UltraWidebandDecoder {
             }
         }
 
-        // --- Second-layer fold source (externally pinned by the staged
-        // 3-layer fixture, round r403): the embedded wideband layer's
-        // **first-high-band excitation** (4–8 kHz,
-        // `WidebandDecoder::last_hb_excitation`), linear-interpolated to
-        // the 16 kHz second-layer geometry, then re-folded into 8–16 kHz
-        // by the same `(−1)ⁿ` law scaled by the outer
-        // `UWB_FOLD_RECONSTRUCTION_MULT`. Against the fixture this source
-        // scores high-band correlation 0.93 and full-signal 19 dB /
-        // 0.994, versus the earlier QMF-recombined-excitation
-        // generalisation's ≈0 high-band correlation and 25× energy
-        // overshoot (see `crate::hb_fold` + module docs). ---
-        let mut exc_hb64 = [0.0f64; HB_FRAME_SAMPLES];
-        for (o, &e) in exc_hb64.iter_mut().zip(self.wideband.last_hb_excitation()) {
-            *o = f64::from(e);
-        }
-        let mut exc16 = [0.0f64; QMF_WIDEBAND_FRAME];
-        upsample_hb_excitation_linear(&exc_hb64, &mut exc16);
+        // --- Second-layer fold (r450 crafted-stream law, see
+        // `crate::hb_fold::UWB_FOLD_CROSSOVER_SCALE`): the fold source
+        // is the embedded first high band's excitation **zero-stuffed**
+        // to the 16 kHz half-band rate, scaled per sub-frame by
+        // `0.664·fold[g5]·|A_l2(π)|/|A_hb1(0)|` — spectral continuity
+        // at the 8 kHz join. Supersedes the r403 linear-interpolated
+        // source and its 1/16 flat constant. ---
+        let exc_hb1 = *self.wideband.last_hb_excitation();
+        let hb1_env = *self.wideband.last_hb_env();
 
         // --- Second-layer synthesis: per-sub-frame interpolated LPC +
         // folded excitation through the order-8 half-band filter. ---
@@ -402,10 +393,16 @@ impl UltraWidebandDecoder {
         let mut uwb_high_band = Box::new([0.0f64; UWB_HALF_BAND_FRAME]);
         for sf in 0..UWB_HB_SUBFRAMES {
             let range = sf * subframe_len..(sf + 1) * subframe_len;
-            let mut e = vec![0.0f64; subframe_len];
-            if submode.excitation_gain_bits > 0 {
-                folded_uwb_excitation_slice(&exc16[range.clone()], uwb_gains[sf], &mut e);
-            }
+            let e = if submode.excitation_gain_bits > 0 {
+                folded_uwb_excitation_subframe_crossover(
+                    &exc_hb1[sf * (subframe_len / 2)..(sf + 1) * (subframe_len / 2)],
+                    uwb_gains[sf],
+                    &lpc_sets[sf],
+                    hb1_env[sf].1,
+                )
+            } else {
+                vec![0.0f64; subframe_len]
+            };
             self.layer2_filter
                 .process(&lpc_sets[sf], &e, &mut uwb_high_band[range]);
         }

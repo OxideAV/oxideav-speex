@@ -149,8 +149,10 @@ fn uwb_three_layer_decode_matches_reference() {
     // corr 0.994; floors leave margin for platform float variance). ---
     let (snr, corr) = score(&ours, &reference, REF_LEAD_FULL);
     println!("UWB full: {snr:.2} dB corr {corr:.5}");
-    assert!(snr >= 16.0, "full-signal absolute SNR {snr:.2} dB < 16 dB");
-    assert!(corr >= 0.985, "full-signal correlation {corr:.4} < 0.985");
+    // r450 outer crossover-anchored fold law: measured 22.63 dB /
+    // 0.99728 (was 19.1 / 0.994 under the r403 flat law).
+    assert!(snr >= 20.0, "full-signal absolute SNR {snr:.2} dB < 20 dB");
+    assert!(corr >= 0.995, "full-signal correlation {corr:.4} < 0.995");
 
     // --- Absolute energy calibration (no scale freedom): the 25×
     // overshoot of the pre-r403 fold source fails here immediately. ---
@@ -182,8 +184,18 @@ fn uwb_three_layer_decode_matches_reference() {
     // Second folded layer (8–16 kHz) — the r403 fold-source gate proper.
     let (hsnr, hcorr) = score(&our_high, &ref_high, REF_LEAD_HALF);
     println!("UWB high(8-16k fold): {hsnr:.2} dB corr {hcorr:.5}");
-    assert!(hsnr >= 6.0, "second-layer (folded) SNR {hsnr:.2} dB < 6 dB");
-    assert!(hcorr >= 0.88, "second-layer correlation {hcorr:.4} < 0.88");
+    // r450: measured 46.8 dB / corr 1.00000 — the fixture's
+    // "independent" outer tones are the zero-stuffed source's spectral
+    // images, which the r403 linear-interp source suppressed (the
+    // "structurally cannot reproduce" reading is superseded).
+    assert!(
+        hsnr >= 40.0,
+        "second-layer (folded) SNR {hsnr:.2} dB < 40 dB"
+    );
+    assert!(
+        hcorr >= 0.999,
+        "second-layer correlation {hcorr:.4} < 0.999"
+    );
     let he_ours: f64 = our_high.iter().map(|v| v * v).sum();
     let he_ref: f64 = ref_high.iter().map(|v| v * v).sum();
     let hratio = he_ours / he_ref;

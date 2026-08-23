@@ -114,8 +114,9 @@ fn uwb_speech_tracking_gate() {
     let (snr, corr, energy) = score(&ours, &reference, REF_LEAD);
     println!("uwb-speech-q4: {snr:.2} dB corr {corr:.4} energy {energy:.3}");
 
-    assert!(snr >= 1.0, "tracking SNR {snr:.2} dB < 1.0 dB");
-    assert!(corr >= 0.72, "tracking correlation {corr:.4} < 0.72");
+    // r450: measured 21.91 dB / 0.9968 (was ≈2 dB under the r403 law).
+    assert!(snr >= 19.0, "tracking SNR {snr:.2} dB < 19 dB");
+    assert!(corr >= 0.99, "tracking correlation {corr:.4} < 0.99");
     assert!(
         (0.8..=2.2).contains(&energy),
         "tracking energy ratio {energy:.3} outside [0.8, 2.2]"

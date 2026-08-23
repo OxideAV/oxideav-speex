@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Ultra-wideband second-layer fold — exact outer crossover law, and
+  the source is zero-stuffed** (r450 crafted 3-layer probes,
+  `tests/fixtures/hb-gain-probes/NOTES.md`). Crafted UWB streams with
+  known random first-high-band innovation and one-at-a-time sweeps of
+  the second layer's 5-bit gain, its envelope, and the first band's
+  envelope measure
+  `e_l2 = 0.664 · fold_quant_bound[g5] · |A_l2(π)|/|A_hb1(0)| · (−1)ⁿ ·
+  zerostuff(e_hb1)` — linear over the whole staged gain table, and the
+  fold source is the first high band's excitation **zero-stuffed** to
+  the 16 kHz half-band rate, both spectral images kept (fit score
+  0.98–0.997 vs 0.61–0.67 for the r403 linear-interpolated source).
+  Spectral continuity at the **8 kHz join**: after the two QMF folds
+  the second layer's `π` edge and the first band's `0` edge both land
+  at 8 kHz, completing the crossover-anchored architecture at every
+  band boundary. Supersedes the r403 source and its
+  `UWB_FOLD_RECONSTRUCTION_MULT = 1/16` flat constant; the r403-era
+  "tone oracle vs speech oracle conflict" dissolves — the tone
+  fixture's "independent" outer tones are the zero-stuffed source's
+  images, which linear interpolation was suppressing.
+- Conformance deltas (floors tightened): `hb-mode4-uwb-q10` full
+  6.6→**20.2 dB** (alignment corr 0.9967), per-band mean error
+  **0.10 / 0.49 / 0.70 dB**; `uwb-fold-geometry` tone full
+  19.4→**22.6 dB / corr 0.9973**, outer band 8.8→**46.8 dB / corr
+  1.00000**; `uwb-speech` bands **0.85 / 0.84 / 1.12 dB** (campaign-A
+  divergence closed), its q4 tracking gate 2→**21.9 dB / 0.9968**;
+  UWB output-high-pass row 26.9 dB / 0.99899.
+
+### Changed
+
 - **Narrowband pitch: the exact short-lag rules and the measured
   output high-pass land** (r450 crafted-bitstream probes). Three
   measured supersessions of r393/r410 fitted readings:
