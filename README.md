@@ -78,10 +78,13 @@ What is implemented and tested:
   mono decode; the encoder emits the `(L+R)/2` downmix with the
   per-frame code-9 message prefixed and declares 2 channels. On the
   staged `stereo-nb-ladder-q4` oracle the interleaved SNR tracks the
-  mono decode within ≈2.3 dB (18.4 vs 20.7 dB — the r450 narrowband
-  fixes lifted the mono floor so far that the §4.1 block-phase
-  approximation is now the visible term;
-  `tests/intensity_stereo_fixture.rs`). The §4.1
+  mono decode within 1.5 dB (19.3 vs 20.7 dB,
+  `tests/intensity_stereo_fixture.rs`). r450 crafted stereo probes
+  confirmed the steady laws to 0.3 % (`ln(gL/gR) = bal/8`;
+  `gL²+gR²` = the staged `1/e_ratio` table at every index) and pinned
+  the §4.1 block phase **sample-exactly**: the reference's gain block
+  leads its audio by one sub-frame, which `StereoDecoder` reproduces
+  with a one-sub-frame mono carry. The §4.1
   sub-frame block-phase offset is a `speexdec`-pipeline detail this
   decoder does not reproduce (bounds byte-exactness). The raw payload
   also stays available via `InbandRequest::IntensityStereo`.
@@ -564,17 +567,17 @@ mode-1 fixture.
   future crafted-stream campaign (enh-on vs enh-off reference decodes
   of the same streams) could measure it the same way the output
   high-pass fell.
-* **Mode-1 comfort-noise excitation.** The vocoder mode's
-  noise-generation rule (what the OL excitation gain scales when the
-  pitch history is cold) is not staged; this crate renders the forced
-  pitch path over a zero innovation — exact in structure, noise-free.
-  A PRNG's output cannot be recovered black-box; only a docs-side
-  trace of the noise rule would close it.
-* **Intensity stereo §4.1 block phase.** The interleaved decode tracks
-  the (now 20.7 dB) mono decode within ≈2.3 dB; the sub-frame
-  block-phase offset of the stereo reconstruction is the visible
-  residual — a crafted-stereo-stream probe campaign is the natural
-  next step.
+* **Mode-1 comfort noise — statistical, not sample-exact.** r450
+  probes measure the vocoder mode's noise law (a deterministic
+  decoder-side sequence at output rms `1.051·exp(qe/3.5)` through the
+  lsp-0 envelope, linear over a 31× gain grid) and the decoder now
+  injects its own white sequence at that level
+  (`NB_MODE1_NOISE_SCALE`, deterministic per decoder instance;
+  matches the reference's rms to 0.2 % on the calibration envelope,
+  ±8 % across envelopes / ±6 % under the pitch loop). Sample-exact
+  mode-1 conformance would need the reference PRNG itself, which a
+  black-box probe cannot recover and copying whose output would not
+  be clean-room.
 * **Encoder reference-equivalence.** All three encoders now mirror the
   measured decode laws in their gain selection (including the mode-4
   two-stage search), but the reference's *search* strategies (joint

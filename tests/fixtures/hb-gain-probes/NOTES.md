@@ -109,7 +109,19 @@ that limited every earlier black-box round.
     one sub-frame, and within each block the blend runs
     `g(i) = g_new·(1−a^(N−i)) + g_prev·a^(N−i)` with `a = 0.980`
     (the balance-step probe traces the whole trajectory).
-11. **Clipping guard.** Strong-resonance probes must keep reference
+11. **Mode-1 comfort noise.** Vocoder-mode streams with the pitch
+    coefficient at zero decode, in the reference, to a
+    **deterministic decoder-side noise sequence** (identical across
+    streams, corr 0.99987; not frame-periodic) scaled linearly by the
+    frame OL gain — output rms `1.051·exp(qe/3.5)` through the lsp-0
+    envelope, exact across a 31× gain grid. The sequence itself is a
+    PRNG stream and is not carried over (extracting it would copy
+    reference output); the crate substitutes its own white sequence
+    at the measured level (`NB_MODE1_NOISE_SCALE`), which lands the
+    output rms within 0.2 % on the calibration envelope, ±8 % across
+    envelopes (the fixed realization's spectral scatter), ±6 % under
+    the forced pitch loop.
+12. **Clipping guard.** Strong-resonance probes must keep reference
    peaks well inside i16 — saturated reference output masquerades as a
    unity-pole pitch loop (first tap-probe battery discarded for this).
    Conversely, near-silent probes sink into the reference's i16

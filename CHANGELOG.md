@@ -6,6 +6,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Mode-1 comfort noise at the measured level** (r450 probes). The
+  reference decodes the vocoder mode's zero-innovation frames to a
+  deterministic decoder-side noise sequence scaled linearly by the
+  frame OL gain (output rms `1.051·exp(qe/3.5)` through the lsp-0
+  envelope, exact over a 31× grid; the sequence is identical across
+  streams and not frame-periodic). The decoder now injects its own
+  deterministic white sequence at that level
+  (`NB_MODE1_NOISE_SCALE = 0.854` in the excitation domain,
+  variance-compensated under the forced pitch loop) — mode-1 output is
+  no longer noise-free; the reference's exact PRNG stream is
+  unrecoverable black-box and is deliberately not carried over.
+- The intensity-stereo README/gates reflect the measured §4.1 block
+  phase; the stale stereo "block phase not reproduced" caveats are
+  gone.
+
 ### Changed
 
 - **Intensity stereo: the §4.1 block phase is measured and reproduced**

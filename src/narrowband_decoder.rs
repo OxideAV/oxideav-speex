@@ -155,6 +155,10 @@ pub struct NarrowbandDecoder {
     /// consumed by the wideband high-band innovation gain base (r450,
     /// `crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`).
     last_crossover_response: [f64; 4],
+    /// Comfort-noise PRNG state for the mode-1 vocoder excitation
+    /// (r450 — see [`NB_MODE1_NOISE_SCALE`]). Seeded at construction so
+    /// decodes stay deterministic.
+    noise_state: u64,
     /// Innovation-only part `g·c[n]` of the most recent frame's
     /// excitation — the r450 mode-1 fold source (the fold does not
     /// carry the adaptive-codebook contribution; see
@@ -177,6 +181,7 @@ impl NarrowbandDecoder {
             prev_lsp_q10: None,
             last_frame_excitation: [0.0; NARROWBAND_FRAME_SAMPLES],
             last_crossover_response: [1.0; 4],
+            noise_state: 0x9E37_79B9_7F4A_7C15,
             last_frame_innovation: [0.0; NARROWBAND_FRAME_SAMPLES],
         }
     }
@@ -380,6 +385,45 @@ impl NarrowbandDecoder {
                 None => [0.0f32; SUBFRAME_SAMPLES],
             };
 
+            // Mode 1 (vocoder): the reference's excitation carries a
+            // comfort-noise term the wire does not (r450 crafted-stream
+            // measurement: a deterministic decoder-side noise sequence
+            // scaled linearly by the frame OL gain — output rms
+            // 1.051·exp(qe/3.5) through the lsp-0 envelope across a 31×
+            // gain grid; a PRNG's sequence is not recoverable
+            // black-box, so this decoder substitutes its own
+            // white sequence at the measured level, energy-compensated
+            // against the forced pitch loop). Everything else decodes
+            // noise-free.
+            let c = if submode.mode_id == 1 {
+                let g_frame =
+                    crate::gain_reconstruction::reconstruct_frame_ol_exc_gain(gain_indices.frame);
+                let coef = f64::from(crate::forced_pitch_gain::forced_pitch_coef(
+                    body.ol_pitch_gain_index,
+                ));
+                // Noise attenuation under the forced pitch loop:
+                // (1−coef²) on the injected term leaves the composed
+                // excitation at ≈ K·g·√(1−coef²) after the loop's
+                // 1/√(1−coef²) amplification — within 6 % of the
+                // measured pitch-on probe.
+                let k = f64::from(NB_MODE1_NOISE_SCALE)
+                    * f64::from(g_frame)
+                    * (1.0 - coef * coef).max(0.0);
+                let mut noise = c;
+                for slot in noise.iter_mut() {
+                    // xorshift64* — uniform in (−√3, √3): unit variance.
+                    self.noise_state ^= self.noise_state >> 12;
+                    self.noise_state ^= self.noise_state << 25;
+                    self.noise_state ^= self.noise_state >> 27;
+                    let u = (self.noise_state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64
+                        / (1u64 << 53) as f64;
+                    *slot += (k * (u * 2.0 - 1.0) * 1.732_050_8) as f32;
+                }
+                noise
+            } else {
+                c
+            };
+
             // Full excitation e[n] = p[n] + c[n].
             let e = gain_scaled_excitation_subframe(&p, &c);
 
@@ -460,6 +504,20 @@ impl NarrowbandDecoder {
         self.filter.history()
     }
 }
+
+/// Level of the mode-1 comfort-noise excitation relative to the frame
+/// OL gain (r450 crafted-stream measurement,
+/// `tests/fixtures/hb-gain-probes/NOTES.md`): mode-1 streams with the
+/// pitch coefficient at zero decode, in the reference, to a
+/// deterministic noise sequence whose output rms is `1.051·exp(qe/3.5)`
+/// through the lsp-0 envelope (constant over a 31× gain grid), i.e. an
+/// excitation-domain rms of ≈ `0.854·g` through that envelope's
+/// impulse-response norm; other envelopes read the same law within the
+/// fixed realization's ±12 % spectral scatter. With the forced pitch
+/// loop active the noise term is variance-compensated
+/// (`·√(1−coef²)`) so the composed excitation keeps the measured
+/// level.
+pub const NB_MODE1_NOISE_SCALE: f32 = 0.854;
 
 /// Round to nearest and saturate an `f64` excitation sample into the
 /// `i16` range for the history buffer. (The history buffer stores `i16`

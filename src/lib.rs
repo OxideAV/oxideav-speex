@@ -685,6 +685,7 @@ pub use narrowband_body::{
 };
 pub use narrowband_decoder::{
     saturate_i16, NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
+    NB_MODE1_NOISE_SCALE,
 };
 // internal: narrowband frame-writer plumbing behind [`NarrowbandEncoder`], exposed for tests only
 #[doc(hidden)]
