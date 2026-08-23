@@ -42,12 +42,19 @@
 //!  g(i) = g_new * (1 - a^(N-i))  +  g_prev * a^(N-i),   a = 0.980
 //! ```
 //!
-//! The block-phase offset the reference file carries (§4.1 of the note —
-//! narrowband exact, wideband/ultra-wideband a fixed negative offset) is
-//! a `speexdec`-pipeline detail; this decoder applies the interpolation
-//! aligned to the frame and does not reproduce that sub-frame phase, so
-//! byte-exactness against `expected.pcm` is bounded by it while the
-//! per-sample gains are reference-correct.
+//! ## Block phase (r450 — measured)
+//!
+//! Crafted stereo streams (sign-flip and balance-step probes,
+//! `tests/fixtures/hb-gain-probes/NOTES.md`) pin the §4.1 block phase
+//! exactly: the reference's gain block **leads its decoded audio by
+//! one sub-frame** (`N/4` output samples — its mono path is buffered
+//! by a sub-frame, its stereo gains are not; the switch lands sample-
+//! exactly at `frame_start − N/4` in audio-aligned time). The steady
+//! laws confirm to 0.3 %: `ln(gL/gR) = bal/8` across the balance grid
+//! and `gL² + gR²` hits the staged `1/e_ratio` table on every index.
+//! [`StereoDecoder`] reproduces the lead by buffering the mono signal
+//! one sub-frame (matching the reference's own relative timing), so
+//! the interpolation lands on the measured phase.
 
 /// The `e_ratio` ladder (docs `intensity-stereo.md` §3.1): geometric,
 /// ratio ≈ 2^(1/3), fitting all three sampling modes uniformly.
@@ -118,6 +125,9 @@ pub fn pack_stereo_payload(sign: u8, bal: u8, e: u8) -> u8 {
 pub struct StereoDecoder {
     prev: StereoGains,
     seeded: bool,
+    /// One-sub-frame mono carry implementing the measured block phase
+    /// (module docs): the gains lead the audio by `N/4` samples.
+    carry: Vec<i16>,
 }
 
 impl Default for StereoDecoder {
@@ -133,6 +143,7 @@ impl StereoDecoder {
         Self {
             prev: StereoGains { gl: 1.0, gr: 1.0 },
             seeded: false,
+            carry: Vec::new(),
         }
     }
 
@@ -142,14 +153,26 @@ impl StereoDecoder {
     pub fn interleave_frame(&mut self, mono: &[i16], payload: u8) -> Vec<i16> {
         let target = stereo_gains(payload);
         // First frame: no transient, use the target directly as prev so
-        // the block starts at steady state.
+        // the block starts at steady state; seed the one-sub-frame mono
+        // carry with silence (the reference's buffer starts zeroed).
+        let n = mono.len();
+        let lead = n / 4;
         if !self.seeded {
             self.prev = target;
             self.seeded = true;
+            self.carry = vec![0i16; lead];
         }
-        let n = mono.len();
+        // The gain block is aligned to the *delayed* mono (module docs:
+        // the reference's gains lead its audio by N/4): consume
+        // [carry, mono[..n-lead]] under this frame's block, keep the
+        // frame's tail for the next block.
         let mut out = Vec::with_capacity(n * 2);
-        for (i, &s) in mono.iter().enumerate() {
+        let delayed = self
+            .carry
+            .iter()
+            .copied()
+            .chain(mono[..n - lead].iter().copied());
+        for (i, s) in delayed.enumerate() {
             // Weight on the previous frame's gains: a^(N-i).
             let w_prev = STEREO_INTERP_A.powi((n - i) as i32);
             let gl = target.gl * (1.0 - w_prev) + self.prev.gl * w_prev;
@@ -158,6 +181,8 @@ impl StereoDecoder {
             out.push(clamp_i16(gl * sv));
             out.push(clamp_i16(gr * sv));
         }
+        self.carry.clear();
+        self.carry.extend_from_slice(&mono[n - lead..]);
         self.prev = target;
         out
     }
@@ -264,9 +289,13 @@ mod tests {
         let out = d.interleave_frame(&mono, payload);
         assert_eq!(out.len(), 320);
         let g = stereo_gains(payload);
-        // First frame is steady (prev seeded to target): every sample uses g.
-        assert_eq!(out[0], (g.gl * 1000.0).round() as i16);
-        assert_eq!(out[1], (g.gr * 1000.0).round() as i16);
+        // First frame is steady (prev seeded to target) but the first
+        // N/4 samples are the zero-seeded one-sub-frame mono carry
+        // (r450 block phase); the block's steady gains show from there.
+        assert_eq!(out[0], 0);
+        assert_eq!(out[1], 0);
+        assert_eq!(out[80], (g.gl * 1000.0).round() as i16);
+        assert_eq!(out[81], (g.gr * 1000.0).round() as i16);
     }
 
     #[test]

@@ -99,7 +99,17 @@ that limited every earlier black-box round.
    stream" where the identical mode-1 construction decodes — the
    crate's `UwbLayerUndocumented` rejection is the conformant
    surface (negative result; the RFC ladder never emits them).
-10. **Clipping guard.** Strong-resonance probes must keep reference
+10. **Intensity-stereo laws + block phase.** Crafted stereo streams
+    (the header's channel field patched to 2; per-frame code-9
+    payloads chosen directly) confirm the steady laws to 0.3 %
+    (`ln(gL/gR) = bal/8` over the balance grid; `gL²+gR²` hits the
+    staged `1/e_ratio` table on every index) and pin the §4.1 block
+    phase **sample-exactly**: a sign-flip probe switches channels at
+    `frame_start − 40` — the reference's gain block leads its audio by
+    one sub-frame, and within each block the blend runs
+    `g(i) = g_new·(1−a^(N−i)) + g_prev·a^(N−i)` with `a = 0.980`
+    (the balance-step probe traces the whole trajectory).
+11. **Clipping guard.** Strong-resonance probes must keep reference
    peaks well inside i16 — saturated reference output masquerades as a
    unity-pole pitch loop (first tap-probe battery discarded for this).
    Conversely, near-silent probes sink into the reference's i16

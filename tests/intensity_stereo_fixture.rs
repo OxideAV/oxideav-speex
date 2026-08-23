@@ -137,14 +137,13 @@ fn interleaved_tracks_mono_decode() {
     // The mono decode floor (r450: the NB fixes lifted this fixture's
     // mono decode from 13.8 to ≈20.7 dB).
     assert!(mono_snr > 18.0, "mono decode SNR {mono_snr:.2} dB < 18");
-    // The stereo law tracks it within 3 dB (measured 18.4 vs 20.7 —
-    // with the mono decode now this close to the reference, the §4.1
-    // sub-frame block-phase approximation is the visible term; a
-    // stereo-law probe campaign is the recorded follow-up) and stays
-    // well above the pre-r450 interleaved level outright.
+    // The stereo law tracks the mono decode within 2 dB (r450 measured
+    // 19.25 vs 20.69 — the crafted stereo probes pinned the §4.1 block
+    // phase as a one-sub-frame gain lead, now reproduced by the
+    // decoder's mono carry, and confirmed the steady laws to 0.3 %).
     assert!(
-        inter_snr > mono_snr - 3.0,
-        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 3 dB (stereo law regressed)"
+        inter_snr > mono_snr - 2.0,
+        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 2 dB (stereo law regressed)"
     );
-    assert!(inter_snr > 16.0, "interleaved {inter_snr:.2} dB < 16");
+    assert!(inter_snr > 18.0, "interleaved {inter_snr:.2} dB < 18");
 }

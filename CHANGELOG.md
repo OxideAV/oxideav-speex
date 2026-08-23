@@ -6,6 +6,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Intensity stereo: the §4.1 block phase is measured and reproduced**
+  (r450 crafted stereo probes — the stream header's channel field
+  patched to 2 and every per-frame code-9 payload chosen directly).
+  A sign-flip probe locates the channel switch **sample-exactly at
+  `frame_start − N/4`**: the reference's gain block leads its decoded
+  audio by one sub-frame (its mono path is buffered, its stereo gains
+  are not), and a balance-step probe traces the in-block blend as
+  exactly the documented `g(i) = g_new·(1−a^{N−i}) + g_prev·a^{N−i}`,
+  `a = 0.980`. `StereoDecoder` now carries the mono signal one
+  sub-frame so the interpolation lands on the measured phase. The
+  steady laws confirm to 0.3 %: `ln(gL/gR) = bal/8` across the balance
+  grid, and `gL² + gR²` reproduces the staged `1/e_ratio` table
+  `{0.25, 0.315, 0.397, 0.5}` at every index. The stereo fixture's
+  interleaved decode now tracks its (r450-lifted, 20.7 dB) mono decode
+  within 1.5 dB (floors tightened).
+- The ultra-wideband second layer's excitation-VQ modes are measured as
+  **rejected by the reference decoder itself** (crafted 3-layer
+  streams; see the uwb_decoder module docs) — the crate's typed
+  `UwbLayerUndocumented` error is the conformant surface and the
+  former "sub-frame geometry" gap closes as a negative result.
+
 ### Added
 
 - **Wideband / ultra-wideband quality-10 (44 kbit/s) encoding lands**
