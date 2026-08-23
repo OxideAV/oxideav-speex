@@ -524,7 +524,13 @@ mode-1 fixture.
   **0.85 / 0.84 / 1.12 dB** (`tests/uwb_speech_3layer_fixture.rs`);
   the q4 tracking gate 2 → **21.9 dB / 0.9968**
   (`tests/uwb_conformance_fixture.rs`). Fuzzed by
-  `tests/uwb_robustness.rs`.
+  `tests/uwb_robustness.rs`. Second-layer excitation-VQ modes are
+  **rejected by the reference decoder itself** (r450 crafted-stream
+  probe: Table-10.1-framed VQ-mode second layers error as corrupted
+  where the identical mode-1 construction decodes; the RFC ladder
+  never emits them), so this crate's typed `UwbLayerUndocumented`
+  rejection is the conformant surface — that gap is closed as a
+  negative result.
 
 * **Encoders — narrowband, wideband and ultra-wideband, all
   qualities 0..=10** (rounds r372–r450). The full encode chains ship

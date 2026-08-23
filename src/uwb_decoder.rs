@@ -58,12 +58,15 @@
 //! this source scores high-band correlation **0.93** and full-signal
 //! **19 dB / 0.994**, versus the earlier QMF-recombined-excitation
 //! generalisation's ≈0 high-band correlation and 25× energy overshoot.
-//! The residual outer multiplier is fixture-fitted (±1 % window pending
-//! bit-exact low band), the same posture as the inner constant. The
-//! excitation-VQ modes 2..=4 additionally
-//! lack a pinned sub-frame geometry at the 16 kHz half-band rate
-//! (Table 10.1's VQ budgets are stated for the 8 kHz half-band) and
-//! surface [`UwbDecodeError::UwbLayerUndocumented`].
+//! The excitation-VQ modes 2..=4 in the second layer surface
+//! [`UwbDecodeError::UwbLayerUndocumented`] — and the r450 crafted
+//! streams show that is the *reference's* behaviour too: 3-layer
+//! streams carrying a Table-10.1-framed VQ-mode second layer are
+//! rejected outright by the reference decoder ("corrupted stream"),
+//! while the identical construction with a mode-1 second layer
+//! decodes. No conformant quality setting emits them (RFC 5574's
+//! ladder pins mode 1 at every quality), so the rejection is the
+//! conformant surface, not a gap.
 //!
 //! ## Campaign-A differential-debug of the speech oracle
 //!
@@ -342,9 +345,10 @@ impl UltraWidebandDecoder {
         };
         let body =
             WidebandHighBandBody::parse(reader, &submode).map_err(|_| UwbDecodeError::Framing)?;
-        // The excitation-VQ modes' sub-frame geometry at the 16 kHz
-        // half-band is not pinned (module docs) — surface the gap after
-        // the parse so the cursor diagnostics stay sane.
+        // The excitation-VQ modes are rejected by the reference decoder
+        // too (r450 crafted-stream probe — module docs); surface the
+        // typed error after the parse so the cursor diagnostics stay
+        // sane.
         if submode.excitation_vq_bits > 0 {
             return Err(UwbDecodeError::UwbLayerUndocumented {
                 mode_id: submode.mode_id,

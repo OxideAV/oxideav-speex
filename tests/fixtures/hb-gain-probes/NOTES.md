@@ -94,7 +94,12 @@ that limited every earlier black-box round.
    `fc ≈ 41.75 Hz, Q ≈ 1.38` × first-order ≈ 33 Hz); 32 kHz matches
    the 16 kHz response in absolute Hz. See
    `oxideav_speex::OutputHighpass`.
-9. **Clipping guard.** Strong-resonance probes must keep reference
+9. **UWB second-layer VQ modes are rejected by the reference.**
+   Table-10.1-framed mode-2/3 second layers error as "corrupted
+   stream" where the identical mode-1 construction decodes — the
+   crate's `UwbLayerUndocumented` rejection is the conformant
+   surface (negative result; the RFC ladder never emits them).
+10. **Clipping guard.** Strong-resonance probes must keep reference
    peaks well inside i16 — saturated reference output masquerades as a
    unity-pole pitch loop (first tap-probe battery discarded for this).
    Conversely, near-silent probes sink into the reference's i16
