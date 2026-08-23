@@ -67,7 +67,6 @@
 use crate::adaptive_codebook::ExcitationBuffer;
 use crate::fixed_codebook_gain::FixedCodebookGainIndices;
 use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
-use crate::gain_scaled_innovation::gain_scaled_innovation_from_indices;
 use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_recursive;
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::lsp_to_lpc::{subframe_lpc_set_with_base, LPC_ORDER};
@@ -150,6 +149,12 @@ pub struct NarrowbandDecoder {
     /// [`crate::hb_fold`]). Zero at stream start and after a silence
     /// frame.
     last_frame_excitation: [f32; NARROWBAND_FRAME_SAMPLES],
+    /// Per-sub-frame magnitude response `|A(e^{jπ})|` of the most
+    /// recently decoded frame's interpolated LPC analysis filters —
+    /// the low band's spectral weighting at the 4 kHz QMF crossover,
+    /// consumed by the wideband high-band innovation gain base (r450,
+    /// `crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`).
+    last_crossover_response: [f64; 4],
 }
 
 impl Default for NarrowbandDecoder {
@@ -166,6 +171,7 @@ impl NarrowbandDecoder {
             excitation: ExcitationBuffer::new(),
             prev_lsp_q10: None,
             last_frame_excitation: [0.0; NARROWBAND_FRAME_SAMPLES],
+            last_crossover_response: [1.0; 4],
         }
     }
 
@@ -180,6 +186,15 @@ impl NarrowbandDecoder {
     /// (whose excitation is zero by construction).
     pub fn last_frame_excitation(&self) -> &[f32; NARROWBAND_FRAME_SAMPLES] {
         &self.last_frame_excitation
+    }
+
+    /// Per-sub-frame `|A(e^{jπ})|` of the most recently decoded frame's
+    /// interpolated low-band LPC set — the analysis filter's magnitude
+    /// response at the 4 kHz QMF crossover (`z = −1`). Persists across
+    /// silence frames (which update no envelope); `1.0` before the
+    /// first envelope-carrying frame.
+    pub fn last_crossover_response(&self) -> &[f64; 4] {
+        &self.last_crossover_response
     }
 
     /// Resolve the de-biased pitch period for sub-frame `sf_idx` from
@@ -295,19 +310,28 @@ impl NarrowbandDecoder {
         // `LSP_LINEAR` base so each sub-frame's LSP angles land inside
         // the conformant `(0, π)` band by construction (see `lsp_base`).
         let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
+        for (slot, lpc) in self.last_crossover_response.iter_mut().zip(lpc_sets.iter()) {
+            *slot = crossover_response(lpc);
+        }
 
         for sf_idx in 0..SUBFRAMES_PER_FRAME {
             let lpc: [f64; LPC_ORDER] = lpc_sets[sf_idx];
 
-            // Innovation (fixed-codebook) contribution c[n].
-            let c_raw = body.subframes[sf_idx]
-                .innovation_sub_vector(submode)
-                .map_err(|_| NarrowbandDecodeError::InnovationUndocumented {
-                    mode_id: submode.mode_id,
-                })?;
+            // Innovation (fixed-codebook) contribution c[n] — the f32
+            // shape path carries the exact mode-7 stage-2 weight.
+            let c_shape = crate::innovation::decode_subframe_f32(
+                submode,
+                body.subframes[sf_idx].innovation_vq_index,
+            )
+            .map_err(|_| NarrowbandDecodeError::InnovationUndocumented {
+                mode_id: submode.mode_id,
+            })?;
             let gain_indices = FixedCodebookGainIndices::from_body(body, submode, sf_idx)
                 .ok_or(NarrowbandDecodeError::GainIndicesUnavailable)?;
-            let c = gain_scaled_innovation_from_indices(&c_raw, gain_indices);
+            let c = crate::gain_scaled_innovation::gain_scaled_innovation_from_shape_f32(
+                &c_shape,
+                gain_indices,
+            );
 
             // Pitch (adaptive-codebook) contribution p[n], with the
             // r410 fixture-arbitrated in-sub-frame recursion for short
@@ -404,6 +428,19 @@ impl NarrowbandDecoder {
 /// `i16` range for the history buffer. (The history buffer stores `i16`
 /// matching the staged codebook entry width.)
 #[inline]
+/// `|A(e^{jπ})|` for `A(z) = 1 − Σ aᵢ z⁻ⁱ` — the LPC analysis filter's
+/// magnitude response at the Nyquist edge (`z = −1`), i.e. at the 4 kHz
+/// QMF crossover for the 8 kHz low band.
+fn crossover_response(lpc: &[f64; LPC_ORDER]) -> f64 {
+    let mut a_pi = 1.0f64;
+    for (j, &aj) in lpc.iter().enumerate() {
+        // z⁻ⁱ at z = −1 is (−1)ⁱ with i = j + 1.
+        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+        a_pi -= aj * sgn;
+    }
+    a_pi.abs()
+}
+
 fn round_to_i16(v: f32) -> i16 {
     saturate_i16(f64::from(v))
 }

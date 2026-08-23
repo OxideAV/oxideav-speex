@@ -26,16 +26,23 @@
 //!    every other delay — the provenance/08 alignment-sweep control.
 //! 3. Per-row agreement with the staged CSV (docs checkout only,
 //!    skip-if-absent): ρ, `gc_recon`, `lb_frame_rms`, `hb_exc_rms`.
-//! 4. The staged table's gain *direction* — `log g` on the fixed-2
-//!    exponents of `gc_recon` and `lb_frame_rms` (the crate's
-//!    [`HB_GC_STATE_EXP_GC`]/[`HB_GC_STATE_EXP_LB`] reading) reaches the
-//!    doc's R² ≈ 0.79 / rms ≈ 8.9 dB — and no better closed form is
-//!    asserted, exactly the doc's posture.
+//! 4. The staged table's gain *direction* — `log g` on the doc's
+//!    fixed-2 exponents of `gc_recon` and `lb_frame_rms` reaches the
+//!    doc's R² ≈ 0.79 / rms ≈ 8.9 dB. (r450: the crate's decode law is
+//!    now the crafted-probe crossover-anchored linear law — see
+//!    `HB_GC_CROSSOVER_SCALE` — and this regression stands as a
+//!    replication of the *staged measurement*, whose loose fit the
+//!    probes explain as natural-speech co-variation.)
 
 use oxideav_speex::{
     decode_hb_subframe_mode4_f32, reconstruct_hb_exc_gain, HbExcitationGainIndex, QmfAnalysis,
-    HB_GC_STATE_EXP_GC, HB_GC_STATE_EXP_LB,
 };
+
+/// Provenance/08's fixed exponents for its gain-direction regression
+/// (the doc's reading, replicated here as a measurement; not the
+/// crate's decode law as of r450).
+const DOC_EXP_GC: f64 = 2.0;
+const DOC_EXP_LB: f64 = 2.0;
 
 const EXPECTED: &[u8] = include_bytes!("fixtures/hb-mode4-wb-q10/expected.pcm");
 const TRACE: &str = include_str!("fixtures/hb-mode4-wb-q10/frame-trace.txt");
@@ -438,8 +445,8 @@ fn staged_recovered_gain_table_reproduced() {
 }
 
 /// **Gain-law direction gate** on the staged table (docs checkout only):
-/// the crate's fixed-exponent reading — `g ∝ (gc_recon · lb_frame_rms)²`,
-/// [`HB_GC_STATE_EXP_GC`] = [`HB_GC_STATE_EXP_LB`] = 2 — reaches the
+/// the doc's fixed-exponent reading — `g ∝ (gc_recon · lb_frame_rms)²`,
+/// [`DOC_EXP_GC`] = [`DOC_EXP_LB`] = 2 — reaches the
 /// doc's regression quality (R² ≈ 0.79, rms ≈ 8.9 dB with both exponents
 /// fixed at 2) on the staged rows, and the transmitted correction alone
 /// explains nothing (R² ≈ 0.005). The absolute intercept stays free —
@@ -484,8 +491,8 @@ fn gain_law_direction_matches_staged_regression() {
         (1.0 - ss_res / ss_tot, rms_db)
     };
 
-    let e_gc = f64::from(HB_GC_STATE_EXP_GC);
-    let e_lb = f64::from(HB_GC_STATE_EXP_LB);
+    let e_gc = DOC_EXP_GC;
+    let e_lb = DOC_EXP_LB;
     let (r2_crate, rms_crate) = fit(&|p| e_gc * p.0 + e_lb * p.1);
     let (r2_gc_only, _) = {
         // gc-only: best single-variable linear fit on log gc.

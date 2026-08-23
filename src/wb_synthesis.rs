@@ -263,13 +263,14 @@ pub fn synthesise_high_band_frame_folded_exc(
     )
 }
 
-/// [`synthesise_high_band_frame_folded_exc`] with the same frame's
-/// reconstructed **low-band signal level** threaded (r440).
+/// [`synthesise_high_band_frame_folded_exc`] with the embedded low
+/// band's per-sub-frame **crossover amplitude** threaded (r450).
 ///
-/// `lb_frame_rms` is the RMS of the embedded narrowband frame's
-/// 160-sample reconstructed output — the decoder state provenance/08
-/// measures as the base of the modes-2/3/4 absolute innovation gain
-/// (see [`crate::gain_scaled_hb_innovation::hb_gc_state_gain`]). Pass
+/// `hb_gain_base[sf]` is the low band's spectral amplitude at the 4 kHz
+/// QMF crossover for sub-frame `sf` — `rms(e_lb)/|A_lb(π)|`, the
+/// decoder state the r450 crafted-stream probes measure as the base of
+/// the modes-2/3/4 absolute innovation gain (see
+/// [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]). Pass
 /// `None` to keep the legacy correction-only gain (the stateless
 /// single-frame entries do). The mode-1 folded path is unaffected.
 #[allow(clippy::too_many_arguments)]
@@ -279,7 +280,7 @@ pub fn synthesise_high_band_frame_leveled(
     filter: &mut HbSynthesisFilter,
     prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
     lb_excitation: &[f32; HB_FRAME_SAMPLES],
-    lb_frame_rms: Option<f64>,
+    hb_gain_base: Option<&[f64; HB_SUBFRAMES_PER_FRAME]>,
     exc_out: &mut [f32; HB_FRAME_SAMPLES],
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
@@ -332,7 +333,16 @@ pub fn synthesise_high_band_frame_leveled(
                     body,
                     submode,
                     sf,
-                    lb_frame_rms,
+                    hb_gain_base.map(|b| {
+                        // |A_hb(e^{jπ})| of this sub-frame's interpolated
+                        // high-band LPC (z⁻ⁱ at z = −1 is (−1)ⁱ).
+                        let mut api = 1.0f64;
+                        for (j, &aj) in lpc.iter().enumerate() {
+                            let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+                            api -= aj * sgn;
+                        }
+                        (b[sf], api.abs())
+                    }),
                 )?;
             // Promote the f32 excitation to f64 for the synthesis
             // recurrence.

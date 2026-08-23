@@ -6,6 +6,51 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **High-band modes 2/3/4 absolute innovation gain — the exact law
+  lands** (r450, crafted-bitstream probes,
+  `tests/fixtures/hb-gain-probes/NOTES.md`). The crate's frame writers
+  now double as a probe generator: streams whose per-sub-frame gain
+  index, innovation content, low-band level / envelope / innovation /
+  pitch, and high-band envelope are varied **one at a time** were
+  decoded by the reference binary (black-box), and the per-sub-frame
+  high-band gain measures as
+  `g = gc_recon · |A_hb(π)| · rms(e_lb) / |A_lb(π)|` — the transmitted
+  4-bit correction times the ratio anchoring the reconstructed high
+  band to the low band's spectral amplitude at the 4 kHz QMF crossover,
+  with `gc_recon`'s staged `0.87360` multiplier as the **only**
+  constant (measured 0.852…0.884 across a 66× envelope range). Linear
+  in the correction, no innovation-energy term, no backward-adaptive
+  memory, one law for modes 2/3/4 (`hb_gc_crossover_gain`, wired
+  per-sub-frame through `NarrowbandDecoder::last_crossover_response`).
+  Supersedes the r440 fixture-fitted `(gc·lb_rms)²` reading and the
+  r446 "backward-adaptive memory" interpretation (natural-speech
+  co-variation and envelope motion, respectively). The mode-4
+  innovation polarity flips back to direct (`HB_INNOVATION_POLARITY =
+  1.0`): the r440 flip compensated a one-sample **parity** error in the
+  fixture alignment (an odd full-rate offset negates a QMF-recovered
+  high band), not a real inversion.
+- **Narrowband mode-7 stage-2 weight = 0.455** (r450, measured
+  0.4545…0.4555 across the gain grid, constant;
+  `NB_MODE7_STAGE2_WEIGHT`, exact on the new `decode_subframe_f32`
+  path). The unweighted stage sum made every quality-10 low band
+  ≈ +1.6 dB hot. The analogous stage-isolation probe re-confirms the
+  high-band mode-4 stage-2 weight as exactly the staged 0.4.
+- Conformance deltas from the two laws (gates tightened accordingly):
+  `hb-mode4-wb-q10` isolated 4–8 kHz sub-band **−7.1 dB / corr −0.54 →
+  +21.1 dB / corr 0.998** (at the parity-corrected 143-sample
+  alignment; energy ratio 1.12), low band 13.7 dB / 0.979 / energy
+  0.99; `hb-mode4-uwb-q10` per-band mean error 1.29→**0.29** /
+  5.55→**0.81** / 7.98→6.47 dB; wideband speech matrix `wb-q6`
+  15.6(18.3)→**20.1 dB** raw full-signal (energy 0.987), `wb-q8` →
+  **20.8 dB**; the r446 gain-probe pair decodes at ≤ 0.4 dB per-segment
+  band error in both bands (was a pinned 6…27 dB divergence).
+- The r446 probe conclusions are re-read by the r450 gate docs: the
+  "backward-adaptive base" evidence was the transmitted high-band
+  envelope moving `|A_hb(π)|` under encoder control — with the encoder
+  out of the loop, every driver is same-sub-frame and memoryless.
+
 ### Added
 
 - **QMF-recovered high-band excitation — full crate-machinery

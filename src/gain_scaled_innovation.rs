@@ -173,6 +173,21 @@ pub fn gain_scaled_innovation_from_indices(
     gain_scaled_innovation_subframe(c_raw, gain)
 }
 
+/// [`gain_scaled_innovation_from_indices`] over an exact `f32`
+/// innovation shape (the [`crate::decode_subframe_f32`] output, which
+/// carries the mode-7 stage-2 weight without integer rounding).
+pub fn gain_scaled_innovation_from_shape_f32(
+    shape: &[f32; GAIN_SCALED_INNOVATION_SAMPLES],
+    indices: FixedCodebookGainIndices,
+) -> [f32; GAIN_SCALED_INNOVATION_SAMPLES] {
+    let gain = reconstruct_fixed_codebook_gain(indices);
+    let mut out = [0.0f32; GAIN_SCALED_INNOVATION_SAMPLES];
+    for (slot, &c) in out.iter_mut().zip(shape.iter()) {
+        *slot = gain * INNOVATION_CODEBOOK_SCALE * c;
+    }
+    out
+}
+
 /// Scale a single innovation sample `c_raw` by the reconstructed gain
 /// (including the [`INNOVATION_CODEBOOK_SCALE`] Q5 row normalisation).
 ///

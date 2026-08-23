@@ -18,14 +18,19 @@
 //!    while the transmitted 4-bit correction stays parked at the grid
 //!    bottom: the base is **backward-adaptive decoder state** (recent
 //!    high-band excitation memory), not the transmitted field.
-//! 3. [`crate_decode_known_divergence`] — the crate's r440
-//!    fixture-fitted `(gc·lb_rms)²` law consequently diverges on these
-//!    off-manifold streams (4–8 kHz per-segment band error up to
-//!    ≈ 27 dB, low band unaffected) while staying the best available
-//!    fit on natural speech. Pinned as a **known divergence** with
-//!    per-segment ceilings: when the reference's predictor update rule
-//!    lands (the recorded docs ask), this gate is the immediate
-//!    validation target — a fix shows up as these numbers collapsing.
+//! 3. [`crate_decode_tracks_probes`] — under the r450
+//!    **crossover-anchored gain law**
+//!    (`g = gc_recon·|A_hb(π)|·rms(e_lb)/|A_lb(π)|`, measured by
+//!    crafted-bitstream probing — `oxideav_speex::hb_gc_crossover_gain`)
+//!    the crate decodes both off-manifold probe streams to
+//!    **≤ 0.4 dB** per-segment band error in *both* bands — the r440
+//!    fitted law's 6…27 dB known divergence this gate used to pin is
+//!    closed, and the ceilings are now conformance floors. (The r446
+//!    "backward-adaptive memory" reading of finding 2 is superseded:
+//!    the tracking was the transmitted high-band *envelope* moving
+//!    `|A_hb(π)|` plus the correction steps, not decoder gain memory —
+//!    crafted streams that hold every field constant show no memory at
+//!    all.)
 
 use oxideav_speex::{
     decode_hb_subframe_mode4_f32, BitReader, NarrowbandFrameBody, NarrowbandFrameHeader,
@@ -408,7 +413,7 @@ fn segment_band_errors(spx: &[u8], pcm_bytes: &[u8]) -> (usize, Vec<(f64, f64)>)
 /// speech manifold** — ceilings pinned; a landed gain law collapses
 /// them (and the two measurement gates above say what it must be).
 #[test]
-fn crate_decode_known_divergence() {
+fn crate_decode_tracks_probes() {
     let (d1, lbv) = segment_band_errors(LBVAR_SPX, LBVAR_PCM);
     let (d2, hbv) = segment_band_errors(HBVAR_SPX, HBVAR_PCM);
     println!("lbvar delay {d1}: per-seg (lo,hi) dB {lbv:?}");
@@ -418,38 +423,29 @@ fn crate_decode_known_divergence() {
         "decoder delay moved"
     );
 
-    // The low band is unaffected by the high-band gain law.
+    // The low band decodes essentially exactly on both probes
+    // (measured ≤ 0.08 dB per segment).
     for (k, &(lo, _)) in lbv.iter().enumerate() {
-        assert!(lo < 3.5, "lbvar seg {k}: low band {lo:.2} dB ≥ 3.5");
+        assert!(lo < 0.5, "lbvar seg {k}: low band {lo:.2} dB ≥ 0.5");
     }
     for (k, &(lo, _)) in hbv.iter().enumerate() {
-        assert!(lo < 3.0, "hbvar seg {k}: low band {lo:.2} dB ≥ 3.0");
+        assert!(lo < 0.5, "hbvar seg {k}: low band {lo:.2} dB ≥ 0.5");
     }
-    // Known-divergence ceilings (measured r446 + margin): lbvar
-    // 19.1/5.9/11.9/17.1/22.7 dB — the U-shape around the one
-    // lb:hb ratio the law was fitted at is the causal signature;
-    // hbvar 23.0/23.0/23.0/19.1/15.4 dB.
-    let lb_ceil = [23.0, 10.0, 16.0, 21.0, 27.0];
-    let hb_ceil = [27.0, 27.0, 27.0, 23.5, 20.0];
-    let mut all_low = true;
+    // r450 crossover-anchored law: both probe streams decode to
+    // ≤ 0.4 dB per-segment high-band error (measured lbvar
+    // 0.07/0.02/0.04/0.03/0.06, hbvar 0.37/0.23/0.09/0.05/0.03 —
+    // the r446 fitted-law divergence of 6…27 dB is closed). Floor at
+    // 1 dB with cross-platform margin.
     for k in 0..5 {
         assert!(
-            lbv[k].1 < lb_ceil[k],
-            "lbvar seg {k}: 4–8 kHz {:.2} dB ≥ ceiling {} — worse than the known divergence",
-            lbv[k].1,
-            lb_ceil[k]
+            lbv[k].1 < 1.0,
+            "lbvar seg {k}: 4–8 kHz {:.2} dB ≥ 1.0 (gain-law regression)",
+            lbv[k].1
         );
         assert!(
-            hbv[k].1 < hb_ceil[k],
-            "hbvar seg {k}: 4–8 kHz {:.2} dB ≥ ceiling {} — worse than the known divergence",
-            hbv[k].1,
-            hb_ceil[k]
+            hbv[k].1 < 1.0,
+            "hbvar seg {k}: 4–8 kHz {:.2} dB ≥ 1.0 (gain-law regression)",
+            hbv[k].1
         );
-        if lbv[k].1 > 5.0 || hbv[k].1 > 5.0 {
-            all_low = false;
-        }
-    }
-    if all_low {
-        println!("NOTE: gain law appears pinned — replace these ceilings with floors");
     }
 }

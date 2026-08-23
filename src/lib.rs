@@ -545,15 +545,15 @@ pub use gain_scaled_excitation::{
 #[doc(hidden)]
 pub use gain_scaled_hb_innovation::{
     gain_scaled_hb_innovation_from_body, gain_scaled_hb_innovation_from_body_leveled,
-    gain_scaled_hb_innovation_sample, gain_scaled_hb_innovation_subframe, hb_gc_state_gain,
-    GAIN_SCALED_HB_INNOVATION_SAMPLES, HB_GC_STATE_EXP_GC, HB_GC_STATE_EXP_LB, HB_GC_STATE_SCALE,
-    HB_INNOVATION_POLARITY,
+    gain_scaled_hb_innovation_sample, gain_scaled_hb_innovation_subframe, hb_gc_crossover_gain,
+    GAIN_SCALED_HB_INNOVATION_SAMPLES, HB_INNOVATION_POLARITY,
 };
 // internal: gain-scaled innovation plumbing, exposed for tests only
 #[doc(hidden)]
 pub use gain_scaled_innovation::{
-    gain_scaled_innovation_from_indices, gain_scaled_innovation_sample,
-    gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES, INNOVATION_CODEBOOK_SCALE,
+    gain_scaled_innovation_from_indices, gain_scaled_innovation_from_shape_f32,
+    gain_scaled_innovation_sample, gain_scaled_innovation_subframe, GAIN_SCALED_INNOVATION_SAMPLES,
+    INNOVATION_CODEBOOK_SCALE,
 };
 // internal: gain-scaled pitch contribution plumbing, exposed for tests only
 #[doc(hidden)]
@@ -616,8 +616,9 @@ pub use innovation::{InnovationError, SUBFRAME_SAMPLES};
 // internal: narrowband innovation codebook plumbing, exposed for tests only
 #[doc(hidden)]
 pub use innovation::{
-    decode_subframe as decode_innovation_subframe, sub_vector as innovation_sub_vector,
-    InnovationCodebook, InnovationMapping,
+    decode_subframe as decode_innovation_subframe, decode_subframe_f32,
+    sub_vector as innovation_sub_vector, InnovationCodebook, InnovationMapping,
+    NB_MODE7_STAGE2_WEIGHT,
 };
 // internal: narrowband innovation search plumbing, exposed for tests only
 #[doc(hidden)]

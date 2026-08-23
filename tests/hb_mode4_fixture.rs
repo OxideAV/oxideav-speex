@@ -14,15 +14,15 @@
 //! weight 0.4) now *decodes* the stream. This gate pins:
 //!
 //! 1. The stream decodes without error (76 wideband frames).
-//! 2. The low band (0–4 kHz, NB 7) is reference-tracking (~2 dB mean
-//!    band error).
-//! 3. The mode-4 high band (4–8 kHz) tracks with a **documented
-//!    residual** (~13 dB mean band error at the doc-faithful magnitude).
-//!    The residual is the absolute per-frame HB-innovation gain/energy
-//!    law, which the staged evidence (codebook *shape* + the 0.4 stage
-//!    weight, via sign-difference isolation) does not pin — recorded in
-//!    the crate README as a precise docs gap. A fix drops the 4–8 kHz
-//!    floor; a regression fails loudly.
+//! 2. The low band (0–4 kHz, NB 7) is reference-tracking (r450: the
+//!    measured mode-7 stage-2 weight closes the former +1.6 dB energy
+//!    bias — ≈1.7 dB mean band error, energy ratio ≈0.99).
+//! 3. The mode-4 high band (4–8 kHz) decodes through the r450
+//!    crossover-anchored gain law
+//!    (`g = gc_recon·|A_hb(π)|·rms(e_lb)/|A_lb(π)|`, measured by
+//!    crafted-bitstream probing — see
+//!    `oxideav_speex::hb_gc_crossover_gain`): ≈3.1 dB mean band error,
+//!    isolated sub-band SNR ≈21 dB at correlation ≈0.998.
 
 use oxideav_speex::{QmfAnalysis, SpeexDecoder};
 
@@ -121,17 +121,12 @@ fn mode4_q10_decodes_with_documented_residual() {
     let (lo, hi) = (slo / c as f64, shi / c as f64);
     println!("hb-mode4-wb-q10 band mean|err| dB: 0-4k={lo:.2} 4-8k={hi:.2}");
 
-    // Low band (NB 7) tracks the reference.
-    assert!(lo < 3.5, "0-4 kHz mean |err| {lo:.2} dB ≥ 3.5 (regression)");
-    // Mode-4 high band: r440 state-derived gain base drops the band
-    // error from ~13.1 dB (gc-only gain) to ~6.1 dB. The remaining
-    // residual is the unpinned exact gain law (provenance/08 records
-    // the direction, deliberately not a formula — a discriminating
-    // fixture pair is the recorded docs ask).
-    assert!(hi < 8.0, "4-8 kHz mean |err| {hi:.2} dB ≥ 8 (regression)");
-    if hi < 3.0 {
-        println!("NOTE: HB mode-4 gain law appears pinned — tighten this floor");
-    }
+    // Low band (NB 7) tracks the reference (r450 measured 1.74 dB).
+    assert!(lo < 2.5, "0-4 kHz mean |err| {lo:.2} dB ≥ 2.5 (regression)");
+    // Mode-4 high band through the r450 crossover-anchored gain law
+    // (measured 3.12 dB; was ~6.1 dB under the r440 fitted law and
+    // ~13.1 dB correction-only).
+    assert!(hi < 4.5, "4-8 kHz mean |err| {hi:.2} dB ≥ 4.5 (regression)");
 }
 
 /// Split a 16 kHz signal into its two 8 kHz sub-bands with the crate's
@@ -196,35 +191,41 @@ fn mode4_q10_qmf_subband_gate() {
         let pcm = dec.decode_packet_pcm_i16(pkt).expect("q10 stream decodes");
         ours.extend(pcm.iter().map(|&s| f64::from(s)));
     }
-    // Align at full rate. `expected.pcm` is trimmed to the 24 000-sample
-    // source length (fixture notes §PCM geometry), i.e. the toolchain
-    // removed the whole codec look-ahead at the front; this decoder's
-    // output is untrimmed, so OUR stream is *delayed* relative to the
-    // reference. Sweep that delay on low-band waveform correlation and
-    // pin it (measured r440: 142 full-rate samples, low-band corr
-    // ≈ 0.66 whole-file / 0.94–0.96 on voiced frames).
+    // Align at full rate — over BOTH parities. `expected.pcm` is
+    // trimmed to the 24 000-sample source length (fixture notes §PCM
+    // geometry): the toolchain removed the whole codec look-ahead at
+    // the front, so OUR stream is *delayed* relative to the reference.
+    // The r440 revision of this gate swept that delay in half-band
+    // steps (even full-rate delays only) and pinned "142"; the r450
+    // crafted-stream probes showed the true delay is **odd** (143) —
+    // and because the QMF high band is recovered through a (−1)ⁿ
+    // modulation, a one-sample parity error *negates* the recovered
+    // high band (and comb-filters both bands), which is why the r440
+    // gate read hb corr +0.44 under the then-inverted mode-4 polarity.
+    // Sweep every full-rate delay on low-band waveform correlation.
     let n0 = (reference.len().min(ours.len()) / 320) * 320;
     let (rlb_probe, _) = qmf_split(&reference[..n0]);
-    let (olb_probe, _) = qmf_split(&ours[..n0]);
     let mut best_delay = 0usize;
     let mut best_corr = f64::NEG_INFINITY;
-    for delay in 0..150usize {
-        let m = (olb_probe.len() - delay).min(rlb_probe.len());
-        let (_, c) = snr_corr(&rlb_probe[..m], &olb_probe[delay..delay + m]);
+    for delay in 100..200usize {
+        let oa = &ours[delay..];
+        let n = ((n0 - delay).min(rlb_probe.len() * 2) / 320) * 320;
+        let (olb, _) = qmf_split(&oa[..n]);
+        let m = olb.len().min(rlb_probe.len());
+        let (_, c) = snr_corr(&rlb_probe[160..m], &olb[160..m]);
         if c > best_corr {
             best_corr = c;
             best_delay = delay;
         }
     }
-    println!("half-band best our-delay {best_delay} (lb corr {best_corr:.4})");
-    assert!(
-        (70..=73).contains(&best_delay),
-        "decoder delay vs the trimmed reference moved (was ≈142–144 full-rate samples, got {})",
-        2 * best_delay
+    println!("full-rate best our-delay {best_delay} (lb corr {best_corr:.4})");
+    assert_eq!(
+        best_delay, 143,
+        "decoder delay vs the trimmed reference moved"
     );
 
     // Trim our leading delay at full rate and split both streams.
-    let ours_aligned = &ours[2 * best_delay..];
+    let ours_aligned = &ours[best_delay..];
     let n = (reference.len().min(ours_aligned.len()) / 320) * 320;
     let (ref_lb, ref_hb) = qmf_split(&reference[..n]);
     let (our_lb, our_hb) = qmf_split(&ours_aligned[..n]);
@@ -239,26 +240,19 @@ fn mode4_q10_qmf_subband_gate() {
          high {hb_snr:.2} dB corr {hb_corr:.4} energy ratio {hb_energy_ratio:.3}"
     );
 
-    // Low band: whole-file waveform correlation (measured r440: 0.38 —
-    // voiced frames sit at 0.94–0.96; the whole-file figure is diluted
-    // by the near-crossover fricative content, whose reconstruction
-    // needs the high band too).
+    // r450 measured: low 13.72 dB / 0.9786 / energy 0.987 (the mode-7
+    // stage-2 weight closed the former +1.6 dB low-band energy bias);
+    // high 21.13 dB / 0.9979 / energy 1.119 through the
+    // crossover-anchored gain law + direct innovation polarity.
+    assert!(lb_corr > 0.95, "low sub-band corr {lb_corr:.4} ≤ 0.95");
+    assert!(lb_snr > 11.0, "low sub-band snr {lb_snr:.2} dB ≤ 11");
     assert!(
-        lb_corr > 0.30,
-        "low sub-band corr {lb_corr:.4} ≤ 0.30 (regression from 0.38)"
+        hb_corr > 0.99,
+        "high sub-band corr {hb_corr:.4} ≤ 0.99 (shape/sign/gain regression)"
     );
-    assert!(lb_snr > -3.0, "low sub-band snr {lb_snr:.2} dB ≤ -3");
-    // High band: the r440 state-derived gain base + global innovation
-    // polarity (both fixture-pinned; the exact gain law remains a
-    // recorded docs gap). Measured r440: corr +0.44, energy ratio 0.74.
-    // Positive correlation is the polarity pin — a sign regression
-    // flips it hard negative.
+    assert!(hb_snr > 17.0, "high sub-band snr {hb_snr:.2} dB ≤ 17");
     assert!(
-        hb_corr > 0.30,
-        "high sub-band corr {hb_corr:.4} ≤ 0.30 (shape/sign/gain regression)"
-    );
-    assert!(
-        hb_energy_ratio > 0.35 && hb_energy_ratio < 2.0,
-        "high sub-band energy ratio {hb_energy_ratio:.3} outside [0.35, 2]"
+        hb_energy_ratio > 0.95 && hb_energy_ratio < 1.3,
+        "high sub-band energy ratio {hb_energy_ratio:.3} outside [0.95, 1.3]"
     );
 }

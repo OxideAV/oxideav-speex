@@ -345,6 +345,53 @@ impl std::error::Error for InnovationError {}
 /// For mode 0 (silence), the all-zero 40-sample vector is returned —
 /// no innovation field is transmitted and the fixed-codebook
 /// contribution is implicitly zero per §9.3 row "Innovation VQ" = 0.
+/// Stage-2 refinement weight of the narrowband **mode-7** two-stage
+/// innovation, measured r450 by crafted-bitstream black-box probing
+/// (`tests/fixtures/hb-gain-probes/NOTES.md`): on narrowband streams
+/// with per-sub-frame random 96-bit innovation fields and no pitch, a
+/// two-regressor band-limited fit of the reference decoder's
+/// inverse-filtered excitation against the two stages' codebook
+/// waveforms gives stage-1 weight 0.9990…1.0003 and stage-2 weight
+/// 0.4545…0.4555, constant across the 3-bit innovation-gain grid. The
+/// analogous measurement for the high-band mode-4 pair confirms its
+/// staged `0.4` (stage-2-only crafted streams fit at 1.0006 of the
+/// stage-1-only gain through the 0.4-weighted decode, i.e. 0.4002).
+pub const NB_MODE7_STAGE2_WEIGHT: f32 = 0.455;
+
+/// Decode the innovation sub-frame **shape** in `f32`, applying the
+/// exact mode-7 stage-2 weight [`NB_MODE7_STAGE2_WEIGHT`] (the `i16`
+/// [`decode_subframe`] rounds that weighted stage to the nearest
+/// integer). Single-stage modes return the raw rows as `f32`.
+pub fn decode_subframe_f32(
+    submode: &NarrowbandSubmode,
+    innovation_vq_index: u128,
+) -> Result<[f32; SUBFRAME_SAMPLES], InnovationError> {
+    let mapping = InnovationMapping::for_mode(submode);
+    match mapping {
+        InnovationMapping::Silence => Ok([0.0; SUBFRAME_SAMPLES]),
+        InnovationMapping::Undocumented => Err(InnovationError::Undocumented),
+        InnovationMapping::Documented { codebook, count } => {
+            let raw = decode_stage(codebook, count, innovation_vq_index)?;
+            let mut out = [0.0f32; SUBFRAME_SAMPLES];
+            for (o, &v) in out.iter_mut().zip(raw.iter()) {
+                *o = f32::from(v);
+            }
+            Ok(out)
+        }
+        InnovationMapping::DocumentedTwoStage { codebook, count } => {
+            let stage_bits = u32::from(codebook.index_bits()) * u32::from(count);
+            let mask = (1u128 << stage_bits) - 1;
+            let stage1 = decode_stage(codebook, count, (innovation_vq_index >> stage_bits) & mask)?;
+            let stage2 = decode_stage(codebook, count, innovation_vq_index & mask)?;
+            let mut out = [0.0f32; SUBFRAME_SAMPLES];
+            for (o, (&a, &b)) in out.iter_mut().zip(stage1.iter().zip(stage2.iter())) {
+                *o = f32::from(a) + NB_MODE7_STAGE2_WEIGHT * f32::from(b);
+            }
+            Ok(out)
+        }
+    }
+}
+
 pub fn decode_subframe(
     submode: &NarrowbandSubmode,
     innovation_vq_index: u128,
@@ -360,17 +407,18 @@ pub fn decode_subframe(
             // Stage 1 occupies the field's most-significant half (it is
             // first on the wire — binding doc §2's first staircase),
             // stage 2 the least-significant half. The decoded c[n] is
-            // the element-wise sum of the two stages.
+            // stage 1 plus the 0.455-weighted stage 2 (measured r450).
             let stage_bits = u32::from(codebook.index_bits()) * u32::from(count);
             let mask = (1u128 << stage_bits) - 1;
             let stage1 = decode_stage(codebook, count, (innovation_vq_index >> stage_bits) & mask)?;
             let stage2 = decode_stage(codebook, count, innovation_vq_index & mask)?;
             let mut out = [0i16; SUBFRAME_SAMPLES];
             for (o, (&a, &b)) in out.iter_mut().zip(stage1.iter().zip(stage2.iter())) {
-                // Staged rows are signed-char-range Q5 fractions, so the
-                // two-stage sum stays far inside i16; saturate anyway so
-                // a hand-built table can never wrap.
-                *o = (i32::from(a) + i32::from(b)).clamp(-32768, 32767) as i16;
+                // Stage 2 carries the measured NB_MODE7_STAGE2_WEIGHT
+                // (r450); this integer surface rounds it to the nearest
+                // integer — the exact shape is decode_subframe_f32.
+                let weighted = f64::from(b) * f64::from(NB_MODE7_STAGE2_WEIGHT);
+                *o = (i32::from(a) + weighted.round() as i32).clamp(-32768, 32767) as i16;
             }
             Ok(out)
         }
@@ -668,8 +716,10 @@ mod tests {
     #[test]
     fn decode_subframe_mode_7_sums_the_two_stages() {
         // Mode 7: two 48-bit stages of 8 × Sv5_64 over the same 40
-        // samples; the decoded c[n] is the element-wise sum. Pack
-        // distinct per-stage index sequences and check every sample.
+        // samples; the decoded c[n] is stage 1 plus stage 2 at the
+        // measured NB_MODE7_STAGE2_WEIGHT (r450) — exact on the f32
+        // surface, round-to-nearest on the i16 one. Pack distinct
+        // per-stage index sequences and check every sample.
         let s = NarrowbandSubmode::for_id(7).unwrap();
         let stage1: [u32; 8] = [0, 1, 2, 7, 13, 33, 50, 63];
         let stage2: [u32; 8] = [63, 50, 33, 13, 7, 2, 1, 0];
@@ -678,14 +728,23 @@ mod tests {
             packed = (packed << 6) | u128::from(idx);
         }
         let v = decode_subframe(&s, packed).unwrap();
+        let vf = decode_subframe_f32(&s, packed).unwrap();
         for sv in 0..8 {
             let r1 = &innovation_5_64()[stage1[sv] as usize];
             let r2 = &innovation_5_64()[stage2[sv] as usize];
             for k in 0..5 {
+                let exact = f32::from(r1[k]) + NB_MODE7_STAGE2_WEIGHT * f32::from(r2[k]);
+                assert_eq!(
+                    vf[sv * 5 + k],
+                    exact,
+                    "sub-vector {sv} sample {k} must be the weighted stage sum"
+                );
                 assert_eq!(
                     v[sv * 5 + k],
-                    r1[k] + r2[k],
-                    "sub-vector {sv} sample {k} must be the stage sum"
+                    f64::from(exact - f32::from(r1[k]))
+                        .round()
+                        .mul_add(1.0, f64::from(r1[k])) as i16,
+                    "i16 surface rounds the weighted stage 2 (sv {sv} k {k})"
                 );
             }
         }
@@ -698,15 +757,23 @@ mod tests {
         // row 0) must land at samples 0..5.
         let s = NarrowbandSubmode::for_id(7).unwrap();
         let packed = 42u128 << (15 * 6);
-        let v = decode_subframe(&s, packed).unwrap();
+        let v = decode_subframe_f32(&s, packed).unwrap();
         let row42 = &innovation_5_64()[42];
         let row0 = &innovation_5_64()[0];
         for k in 0..5 {
-            assert_eq!(v[k], row42[k] + row0[k], "sample {k}");
+            assert_eq!(
+                v[k],
+                f32::from(row42[k]) + NB_MODE7_STAGE2_WEIGHT * f32::from(row0[k]),
+                "sample {k}"
+            );
         }
         for sv in 1..8 {
             for k in 0..5 {
-                assert_eq!(v[sv * 5 + k], 2 * row0[k], "sub-vector {sv} sample {k}");
+                assert_eq!(
+                    v[sv * 5 + k],
+                    f32::from(row0[k]) + NB_MODE7_STAGE2_WEIGHT * f32::from(row0[k]),
+                    "sub-vector {sv} sample {k}"
+                );
             }
         }
     }
@@ -715,11 +782,14 @@ mod tests {
     fn decode_subframe_mode_7_max_indices_all_resolve() {
         let s = NarrowbandSubmode::for_id(7).unwrap();
         let packed = (1u128 << 96) - 1;
-        let v = decode_subframe(&s, packed).unwrap();
+        let v = decode_subframe_f32(&s, packed).unwrap();
         let max_row = &innovation_5_64()[63];
         for sv in 0..8 {
             for k in 0..5 {
-                assert_eq!(v[sv * 5 + k], 2 * max_row[k]);
+                assert_eq!(
+                    v[sv * 5 + k],
+                    f32::from(max_row[k]) + NB_MODE7_STAGE2_WEIGHT * f32::from(max_row[k])
+                );
             }
         }
     }

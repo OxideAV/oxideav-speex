@@ -794,17 +794,20 @@ impl NarrowbandEncoder {
 
         if stages == 2 {
             // Stage 2 quantises the residual stage 1 leaves at the same
-            // working gain; the two stages' rows sum in the decode law.
+            // working gain; the decode law adds stage 2 at the measured
+            // NB_MODE7_STAGE2_WEIGHT (r450), so the search sees that
+            // effective scale.
+            let w2 = f64::from(crate::innovation::NB_MODE7_STAGE2_WEIGHT);
             let mut r3 = [0.0_f64; SUBFRAME_SAMPLES];
             for n in 0..SUBFRAME_SAMPLES {
                 r3[n] = r2[n] - g_guess * cb[n];
             }
-            let choice2 = search_innovation(&r3, g_guess * scale, codebook, count);
+            let choice2 = search_innovation(&r3, g_guess * scale * w2, codebook, count);
             for (sv, &idx) in choice2.indices.iter().enumerate() {
                 if let Some(row) = sub_vector(codebook, idx) {
                     let base = sv * sv_len;
                     for (k, &v) in row.iter().enumerate() {
-                        cb[base + k] += f64::from(v) * scale;
+                        cb[base + k] += f64::from(v) * scale * w2;
                     }
                 }
             }
