@@ -28,8 +28,9 @@
 //!
 //! ## Fixed-point output convention
 //!
-//! Each codebook entry is a `signed char` (Speex source dimensioning;
-//! kept as `i16` in the staged CSVs for sign-safety). Per the
+//! Each codebook entry is a single-byte signed integer per the staged
+//! `.meta` sidecars (kept as `i16` in the staged CSVs for
+//! sign-safety). Per the
 //! `.meta` sidecars the per-stage decoder scaling is `1/256`,
 //! `1/512`, or `1/1024`. To keep the reconstructed coefficients in
 //! integer arithmetic with no loss, this module sums each stage's

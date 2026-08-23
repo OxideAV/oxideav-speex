@@ -23,8 +23,8 @@
 //! the same clean-room category the Speex LSP→LPC trace doc
 //! (`docs/audio/speex/gain-quantiser-and-lsp-lpc-trace.md` §5) grants
 //! for the LSP polynomial reconstruction: *"a textbook DSP procedure …
-//! no codec-specific tuning required."* No Speex source was consulted to
-//! derive it.
+//! no codec-specific tuning required."* The construction below is
+//! derived from that textbook procedure alone.
 //!
 //! For a real prototype lowpass `h0[n]` of even length `L`, the
 //! two-band QMF relations are:
