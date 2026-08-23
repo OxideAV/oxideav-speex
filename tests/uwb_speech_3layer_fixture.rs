@@ -300,18 +300,20 @@ fn decode_tracks_reference() {
         m[0], m[1], m[2]
     );
 
-    // Narrowband band is reference-accurate (measured 1.12 dB).
-    assert!(m[0] < 2.0, "0-4 kHz mean |err| {:.2} dB ≥ 2.0", m[0]);
-    // High-band fold layers — tracking floors at the campaign-A level
-    // (measured 4.77 / 7.06 dB). A fix drops these; a regression fails.
+    // Narrowband band is reference-accurate (r450 measured 0.96 dB).
+    assert!(m[0] < 1.5, "0-4 kHz mean |err| {:.2} dB ≥ 1.5", m[0]);
+    // High-band fold layers under the r450 crossover-anchored,
+    // innovation-only-source fold law (measured 0.92 / 3.17 dB; was
+    // 4.77 / 7.06 dB at campaign A). The 8–16 kHz tail is the outer
+    // (second-layer) fold, still on the r403 excitation-source law.
     assert!(
-        m[1] < 6.5,
-        "4-8 kHz mean |err| {:.2} dB ≥ 6.5 (regression)",
+        m[1] < 1.8,
+        "4-8 kHz mean |err| {:.2} dB ≥ 1.8 (regression)",
         m[1]
     );
     assert!(
-        m[2] < 9.0,
-        "8-16 kHz mean |err| {:.2} dB ≥ 9.0 (regression)",
+        m[2] < 4.5,
+        "8-16 kHz mean |err| {:.2} dB ≥ 4.5 (regression)",
         m[2]
     );
 

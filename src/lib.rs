@@ -574,9 +574,10 @@ pub use hb_excitation_gain::{
 // internal: folded high-band excitation law plumbing, exposed for tests only
 #[doc(hidden)]
 pub use hb_fold::{
-    folded_hb_excitation_slice, folded_hb_excitation_subframe, folded_uwb_excitation_slice,
-    hb_crossover_response, hb_crossover_response_bwexp, hb_crossover_response_from_lsp,
-    upsample_hb_excitation_linear, HB_FOLD_ENVELOPE_COMPRESSION_GAMMA, HB_FOLD_RECONSTRUCTION_MULT,
+    folded_hb_excitation_slice, folded_hb_excitation_subframe,
+    folded_hb_excitation_subframe_crossover, folded_uwb_excitation_slice, hb_crossover_response,
+    hb_crossover_response_bwexp, hb_crossover_response_from_lsp, upsample_hb_excitation_linear,
+    HB_FOLD_CROSSOVER_SCALE, HB_FOLD_ENVELOPE_COMPRESSION_GAMMA, HB_FOLD_RECONSTRUCTION_MULT,
     UWB_FOLD_RECONSTRUCTION_MULT,
 };
 // stable: error + sub-frame length used in the visible

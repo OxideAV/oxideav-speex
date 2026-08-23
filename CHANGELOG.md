@@ -8,6 +8,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Mode-1 folded high band — exact crossover-anchored law, and the
+  fold source is the innovation-only excitation** (r450
+  crafted-bitstream probes, `tests/fixtures/hb-gain-probes/NOTES.md`).
+  Mode-1 streams sweeping the 5-bit folded-gain grid, the high-band
+  envelope, the low-band envelope and the low-band level one at a time
+  measure `s = 0.8518 · fold_quant_bound[g5] · |A_hb(π)| / |A_lb(π)|` —
+  **linear over the whole 32-level staged table** (flat to 0.2 %; the
+  r393/r410 `min(C·|Â|, 1/(2√2))` ceiling was an artefact of fitting
+  without the `1/|A_lb(π)|` term) — and a two-source fit on a
+  pitch-plus-random-innovation stream splits the fold source cleanly:
+  innovation weight matches the law exactly, **pitch weight −0.0001**.
+  The r393/r403 composed-excitation source (`e = p + c`) is superseded:
+  only `g·c[n]` folds ([`NarrowbandDecoder::last_frame_innovation`],
+  mirrored in the encoder's mode-1 gain selection). Same
+  spectral-continuity architecture as the modes-2/3/4 law.
+- Conformance deltas (floors tightened): `wb-q4` speech
+  15.6→**20.5 dB** full-signal, its high band **−6.9 dB / corr 0.49 →
+  +16.5 dB / corr 0.989** (the fitted law folded the pitch contribution
+  too, up to ≈10× hot in energy on pitchy frames); `wb-mode1-folded`
+  tone high band 38.9→**44.1 dB / corr 1.00000**; `uwb-speech` bands
+  1.12/4.77/7.06→**0.96/0.92/3.17 dB** (the campaign-A "outer-layer
+  divergence" was mostly the inner fold's law+source; the remaining
+  8–16 kHz tail is the r403 outer-source law, still open); UWB tone
+  full 19.1→19.4 dB.
+
+### Changed
+
 - **High-band modes 2/3/4 absolute innovation gain — the exact law
   lands** (r450, crafted-bitstream probes,
   `tests/fixtures/hb-gain-probes/NOTES.md`). The crate's frame writers

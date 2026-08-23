@@ -266,13 +266,25 @@ pub fn synthesise_high_band_frame_folded_exc(
 /// [`synthesise_high_band_frame_folded_exc`] with the embedded low
 /// band's per-sub-frame **crossover amplitude** threaded (r450).
 ///
-/// `hb_gain_base[sf]` is the low band's spectral amplitude at the 4 kHz
-/// QMF crossover for sub-frame `sf` — `rms(e_lb)/|A_lb(π)|`, the
-/// decoder state the r450 crafted-stream probes measure as the base of
-/// the modes-2/3/4 absolute innovation gain (see
-/// [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]). Pass
-/// `None` to keep the legacy correction-only gain (the stateless
-/// single-frame entries do). The mode-1 folded path is unaffected.
+/// `hb_gain_base` carries, per sub-frame, the pair
+/// `(rms(e_lb)/|A_lb(π)|, |A_lb(π)|)` — the low band's spectral
+/// amplitude at the 4 kHz QMF crossover plus the crossover response
+/// itself — and the frame's **innovation-only** low-band excitation
+/// `g·c[n]`, the decoder state the r450 crafted-stream probes measure
+/// as the base/source of both high-band absolute gain laws (modes
+/// 2/3/4: [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`];
+/// mode 1: [`crate::hb_fold::HB_FOLD_CROSSOVER_SCALE`] — whose fold
+/// source is the innovation-only track, not the composed excitation).
+/// Pass `None` to keep the legacy laws (the stateless single-frame
+/// entries do).
+/// Per-sub-frame crossover-law inputs: `(rms(e_lb)/|A_lb(π)|,
+/// |A_lb(π)|)` pairs plus the frame's innovation-only low-band
+/// excitation (the mode-1 fold source).
+pub type HbGainBaseCtx<'a> = (
+    &'a [(f64, f64); HB_SUBFRAMES_PER_FRAME],
+    &'a [f32; HB_FRAME_SAMPLES],
+);
+
 #[allow(clippy::too_many_arguments)]
 pub fn synthesise_high_band_frame_leveled(
     body: &WidebandHighBandBody,
@@ -280,7 +292,7 @@ pub fn synthesise_high_band_frame_leveled(
     filter: &mut HbSynthesisFilter,
     prev_hb_lsp_delta_q10: &mut Option<[i32; HB_LPC_ORDER]>,
     lb_excitation: &[f32; HB_FRAME_SAMPLES],
-    hb_gain_base: Option<&[f64; HB_SUBFRAMES_PER_FRAME]>,
+    hb_gain_base: Option<HbGainBaseCtx<'_>>,
     exc_out: &mut [f32; HB_FRAME_SAMPLES],
 ) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
     // Current frame's reconstructed high-band LSP codebook-delta vector
@@ -321,19 +333,35 @@ pub fn synthesise_high_band_frame_leveled(
                 crate::hb_excitation_gain::HbExcitationGainIndex::from_body(body, submode, sf)
                     .map(crate::gain_reconstruction::reconstruct_hb_exc_gain)
                     .unwrap_or(0.0);
-            let mut lb = [0.0f32; HB_SUBFRAME_SAMPLES];
-            lb.copy_from_slice(
-                &lb_excitation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
-            );
-            // r410 crossover-shaped folded law (crate::hb_fold docs).
-            crate::hb_fold::folded_hb_excitation_subframe_shaped(&lb, gain, &lpc)
+            match hb_gain_base {
+                // r450 crossover-anchored fold law over the
+                // innovation-only source (crate::hb_fold docs).
+                Some((base, lb_innovation)) => {
+                    let mut lb = [0.0f32; HB_SUBFRAME_SAMPLES];
+                    lb.copy_from_slice(
+                        &lb_innovation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
+                    );
+                    crate::hb_fold::folded_hb_excitation_subframe_crossover(
+                        &lb, gain, &lpc, base[sf].1,
+                    )
+                }
+                // legacy r410 crossover-shaped law over the composed
+                // excitation (stateless entries).
+                None => {
+                    let mut lb = [0.0f32; HB_SUBFRAME_SAMPLES];
+                    lb.copy_from_slice(
+                        &lb_excitation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
+                    );
+                    crate::hb_fold::folded_hb_excitation_subframe_shaped(&lb, gain, &lpc)
+                }
+            }
         } else {
             let e_hb =
                 crate::gain_scaled_hb_innovation::gain_scaled_hb_innovation_from_body_leveled(
                     body,
                     submode,
                     sf,
-                    hb_gain_base.map(|b| {
+                    hb_gain_base.map(|(b, _)| {
                         // |A_hb(e^{jπ})| of this sub-frame's interpolated
                         // high-band LPC (z⁻ⁱ at z = −1 is (−1)ⁱ).
                         let mut api = 1.0f64;
@@ -341,7 +369,7 @@ pub fn synthesise_high_band_frame_leveled(
                             let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
                             api -= aj * sgn;
                         }
-                        (b[sf], api.abs())
+                        (b[sf].0, api.abs())
                     }),
                 )?;
             // Promote the f32 excitation to f64 for the synthesis

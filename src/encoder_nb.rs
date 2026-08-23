@@ -144,6 +144,15 @@ pub struct NarrowbandEncoder {
     prev_input_tail: [f64; ANALYSIS_LOOKBACK],
     /// Previous frame's reconstructed (quantised) delta-Q10 LSPs.
     prev_lsp_q10: Option<[i32; LPC_ORDER]>,
+    /// Most recent frame's innovation-only excitation `g·c[n]` (the
+    /// encoder-side mirror of
+    /// [`crate::NarrowbandDecoder::last_frame_innovation`]) — the r450
+    /// mode-1 fold source.
+    last_inn: [f64; NB_FRAME_SAMPLES],
+    /// Most recent frame's per-sub-frame `|A_lb(π)|` from the quantised
+    /// envelope (mirror of
+    /// [`crate::NarrowbandDecoder::last_crossover_response`]).
+    last_api: [f64; 4],
     /// Excitation history (`f64`), most-recent last.
     exc_hist: Vec<f64>,
     /// Analysis (prediction-error) filter input history, most-recent last.
@@ -162,6 +171,8 @@ impl NarrowbandEncoder {
         Self {
             prev_input_tail: [0.0; ANALYSIS_LOOKBACK],
             prev_lsp_q10: None,
+            last_inn: [0.0; NB_FRAME_SAMPLES],
+            last_api: [1.0; 4],
             exc_hist: vec![0.0; EXC_HIST_LEN],
             analysis_hist: [0.0; LPC_ORDER],
         }
@@ -249,6 +260,14 @@ impl NarrowbandEncoder {
         let prev = self.prev_lsp_q10.unwrap_or(active_lsp);
         let sub_lsp = NbSubFrameLsp::new(&prev, &active_lsp);
         let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
+        for (slot, lpc) in self.last_api.iter_mut().zip(lpc_sets.iter()) {
+            let mut a_pi = 1.0f64;
+            for (j, &aj) in lpc.iter().enumerate() {
+                let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+                a_pi -= aj * sgn;
+            }
+            *slot = a_pi.abs();
+        }
 
         // Frame-level OL excitation gain: a magnitude estimate from the
         // whole-frame residual (computed with a scratch analysis filter so
@@ -411,6 +430,13 @@ impl NarrowbandEncoder {
                 }
                 None => (0u8, 0u128, pitch),
             };
+            // Innovation-only part (r450 mode-1 fold source mirror).
+            {
+                let base = sf * SUBFRAME_SAMPLES;
+                for n in 0..SUBFRAME_SAMPLES {
+                    self.last_inn[base + n] = exc[n] - pitch[n];
+                }
+            }
 
             // Decoded-excitation error for this sub-frame.
             for n in 0..SUBFRAME_SAMPLES {
@@ -850,6 +876,21 @@ impl NarrowbandEncoder {
         let src = &self.exc_hist[self.exc_hist.len() - n..];
         out[NB_FRAME_SAMPLES - n..].copy_from_slice(src);
         out
+    }
+
+    /// The most recent frame's innovation-only excitation `g·c[n]` —
+    /// the encoder-side mirror of
+    /// [`crate::NarrowbandDecoder::last_frame_innovation`], the r450
+    /// mode-1 fold source.
+    pub fn last_frame_innovation(&self) -> &[f64; NB_FRAME_SAMPLES] {
+        &self.last_inn
+    }
+
+    /// Per-sub-frame `|A_lb(π)|` of the most recent frame's quantised
+    /// envelope — mirror of
+    /// [`crate::NarrowbandDecoder::last_crossover_response`].
+    pub fn last_crossover_response(&self) -> &[f64; 4] {
+        &self.last_api
     }
 
     /// Push a 40-sample excitation block into the history ring.

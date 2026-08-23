@@ -155,6 +155,11 @@ pub struct NarrowbandDecoder {
     /// consumed by the wideband high-band innovation gain base (r450,
     /// `crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`).
     last_crossover_response: [f64; 4],
+    /// Innovation-only part `g·c[n]` of the most recent frame's
+    /// excitation — the r450 mode-1 fold source (the fold does not
+    /// carry the adaptive-codebook contribution; see
+    /// `crate::hb_fold::HB_FOLD_CROSSOVER_SCALE`).
+    last_frame_innovation: [f32; NARROWBAND_FRAME_SAMPLES],
 }
 
 impl Default for NarrowbandDecoder {
@@ -172,6 +177,7 @@ impl NarrowbandDecoder {
             prev_lsp_q10: None,
             last_frame_excitation: [0.0; NARROWBAND_FRAME_SAMPLES],
             last_crossover_response: [1.0; 4],
+            last_frame_innovation: [0.0; NARROWBAND_FRAME_SAMPLES],
         }
     }
 
@@ -195,6 +201,14 @@ impl NarrowbandDecoder {
     /// first envelope-carrying frame.
     pub fn last_crossover_response(&self) -> &[f64; 4] {
         &self.last_crossover_response
+    }
+
+    /// Innovation-only part `g·c[n]` of the most recently decoded
+    /// frame's excitation (the r450 crafted-stream probes pin this —
+    /// not the composed `e[n] = p[n] + c[n]` — as the mode-1 folded
+    /// high band's source; the pitch contribution does not fold).
+    pub fn last_frame_innovation(&self) -> &[f32; NARROWBAND_FRAME_SAMPLES] {
+        &self.last_frame_innovation
     }
 
     /// Resolve the de-biased pitch period for sub-frame `sf_idx` from
@@ -348,10 +362,12 @@ impl NarrowbandDecoder {
             // Full excitation e[n] = p[n] + c[n].
             let e = gain_scaled_excitation_subframe(&p, &c);
 
-            // Retain the full-precision excitation for the wideband
-            // folded high-band law (see `last_frame_excitation`).
+            // Retain the full-precision excitation (modes-2/3/4 gain
+            // base) and its innovation-only part (mode-1 fold source).
             self.last_frame_excitation[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES]
                 .copy_from_slice(&e);
+            self.last_frame_innovation[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES]
+                .copy_from_slice(&c);
 
             // Feedback: push the emitted excitation into the history so
             // the NEXT sub-frame's adaptive codebook reads it.

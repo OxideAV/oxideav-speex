@@ -293,12 +293,13 @@ impl WidebandDecoder {
         // fixture-arbitrated law — see `crate::hb_fold`); the fold
         // source is the low-band decoder's just-composed excitation.
         let lb_excitation = *self.low_band.last_frame_excitation();
-        // The modes-2/3/4 absolute innovation-gain base is the embedded
-        // low band's per-sub-frame spectral amplitude at the 4 kHz QMF
-        // crossover: rms(e_lb)/|A_lb(π)| (r450 crafted-stream probes —
-        // see `hb_gc_crossover_gain`).
+        // Both high-band absolute gain laws anchor on the embedded low
+        // band at the 4 kHz QMF crossover (r450 crafted-stream probes):
+        // per sub-frame, (rms(e_lb)/|A_lb(π)|, |A_lb(π)|) — see
+        // `hb_gc_crossover_gain` (modes 2/3/4) and
+        // `HB_FOLD_CROSSOVER_SCALE` (mode 1).
         let api = self.low_band.last_crossover_response();
-        let mut hb_gain_base = [0.0f64; 4];
+        let mut hb_gain_base = [(0.0f64, 1.0f64); 4];
         for (sf, slot) in hb_gain_base.iter_mut().enumerate() {
             let seg = &lb_excitation[sf * 40..(sf + 1) * 40];
             let rms = (seg
@@ -307,8 +308,9 @@ impl WidebandDecoder {
                 .sum::<f64>()
                 / seg.len() as f64)
                 .sqrt();
-            *slot = rms / api[sf].max(1e-9);
+            *slot = (rms / api[sf].max(1e-9), api[sf]);
         }
+        let lb_innovation = *self.low_band.last_frame_innovation();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
         let high_band = synthesise_high_band_frame_leveled(
             hb_body,
@@ -316,7 +318,7 @@ impl WidebandDecoder {
             &mut self.high_band_filter,
             &mut self.prev_hb_lsp_delta_q10,
             &lb_excitation,
-            Some(&hb_gain_base),
+            Some((&hb_gain_base, &lb_innovation)),
             &mut hb_excitation,
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;

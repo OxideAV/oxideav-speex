@@ -354,20 +354,29 @@ impl WidebandEncoder {
                 }
                 None => {
                     // Mode 1: gain-only — the decoder reconstructs by
-                    // folding the low-band excitation with the r410
-                    // crossover-shaped law (e = C·g·|A_hb(π)|^E·(−1)ⁿ·
-                    // e_lb, crate::hb_fold docs), so the transmitted
-                    // gain is the fold-consistent target
-                    // g = rms(residual)/(C·|A_hb(π)|^E·rms(e_lb))
-                    // against the embedded narrowband encoder's locally
-                    // reconstructed excitation (the analysis-by-
-                    // synthesis mirror of the decoder's fold source).
-                    let src = self.low_band.last_frame_excitation();
+                    // folding the low band's **innovation-only**
+                    // excitation with the r450 crossover-anchored law
+                    // (e = 0.8518·g·(|A_hb(π)|/|A_lb(π)|)·(−1)ⁿ·c_lb,
+                    // crate::hb_fold docs), so the transmitted gain is
+                    // the fold-consistent target
+                    // g = rms(residual)·|A_lb(π)| /
+                    //     (0.8518·|A_hb(π)|·rms(c_lb))
+                    // against the embedded narrowband encoder's local
+                    // innovation track (the analysis-by-synthesis
+                    // mirror of the decoder's fold source).
+                    let src = self.low_band.last_frame_innovation();
                     let sf_src = &src[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
                     let src_rms = (sf_src.iter().map(|&v| v * v).sum::<f64>()
                         / HB_SUBFRAME_SAMPLES as f64)
                         .sqrt();
-                    let unit_scale = crate::hb_fold::folded_hb_scale(1.0, &lpc_sets[sf]);
+                    let lb_api = self.low_band.last_crossover_response()[sf];
+                    let mut hb_api = 1.0f64;
+                    for (j, &aj) in lpc_sets[sf].iter().enumerate() {
+                        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+                        hb_api -= aj * sgn;
+                    }
+                    let unit_scale =
+                        crate::hb_fold::HB_FOLD_CROSSOVER_SCALE * hb_api.abs() / lb_api.max(1e-9);
                     let target = if src_rms > 1e-9 && unit_scale > 1e-12 {
                         r_rms / (unit_scale * src_rms)
                     } else {

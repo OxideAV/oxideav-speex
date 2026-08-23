@@ -260,6 +260,63 @@ pub fn folded_hb_scale(gain: f32, lpc: &[f64; HB_LPC_ORDER]) -> f64 {
 /// envelope troughs; the crossover shaping is what the reference
 /// decoder's black-box envelope sweep pins (module docs of
 /// [`hb_crossover_response`]).
+/// Scale of the r450 **crossover-anchored** mode-1 folded
+/// reconstruction, measured by crafted-bitstream black-box probing
+/// (`tests/fixtures/hb-gain-probes/NOTES.md`): with the crate's own
+/// writers emitting mode-1 wideband streams whose 5-bit folded-gain
+/// index, high-band envelope, low-band envelope and low-band level are
+/// varied one at a time, the reference decode's per-sub-frame fold
+/// scale is
+///
+/// ```text
+///   s = HB_FOLD_CROSSOVER_SCALE · fold_quant_bound[g5] · |A_hb(π)| / |A_lb(π)|
+/// ```
+///
+/// — **linear over the whole 32-level staged gain table**
+/// (`s/fold_quant_bound[g5]` flat to 0.2 % from level 0 to 31: there is
+/// no saturation, so the r393/r410 flat-ceiling reading
+/// `min(C·|Â|, 1/(2√2))` was an artefact of fitting without the
+/// `1/|A_lb(π)|` term), proportional to the high-band envelope's
+/// crossover response (six interior envelopes at `s/|A_hb(π)|`
+/// 0.2187…0.2441 over a 66× range), inversely proportional to the low
+/// band's (valid-codepoint envelope variants moving 143×), and
+/// independent of the low-band level. Same spectral-continuity shape as
+/// the modes-2/3/4 law
+/// ([`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]) with
+/// the 5-bit fold table in place of `gc_recon`; the constant is
+/// measured 0.8515…0.8522 on interior envelopes (the two deepest swept
+/// envelopes read 15…45 % high through this crate's `|A(π)|` — the
+/// §7.6 near-degenerate divergence).
+pub const HB_FOLD_CROSSOVER_SCALE: f64 = 0.8518;
+
+/// [`folded_hb_excitation_subframe_shaped`] under the r450
+/// crossover-anchored law (see [`HB_FOLD_CROSSOVER_SCALE`]): the fold
+/// scale is `s = 0.8518·g·|A_hb(π)|/|A_lb(π)|`, where `gain` is the
+/// staged 32-level folded-gain reconstruction, `lpc` the sub-frame's
+/// interpolated high-band LPC set and `lb_api` the same sub-frame's
+/// low-band `|A_lb(π)|`
+/// ([`crate::NarrowbandDecoder::last_crossover_response`]).
+#[inline]
+pub fn folded_hb_excitation_subframe_crossover(
+    exc_lb: &[f32; HB_SUBFRAME_SAMPLES],
+    gain: f32,
+    lpc: &[f64; HB_LPC_ORDER],
+    lb_api: f64,
+) -> [f64; HB_SUBFRAME_SAMPLES] {
+    let mut hb_api = 1.0f64;
+    for (j, &aj) in lpc.iter().enumerate() {
+        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+        hb_api -= aj * sgn;
+    }
+    let k = HB_FOLD_CROSSOVER_SCALE * f64::from(gain) * hb_api.abs() / lb_api.max(1e-9);
+    let mut out = [0.0f64; HB_SUBFRAME_SAMPLES];
+    for (n, (slot, &e)) in out.iter_mut().zip(exc_lb.iter()).enumerate() {
+        let folded = k * f64::from(e);
+        *slot = if n % 2 == 0 { folded } else { -folded };
+    }
+    out
+}
+
 #[inline]
 pub fn folded_hb_excitation_subframe_shaped(
     exc_lb: &[f32; HB_SUBFRAME_SAMPLES],
