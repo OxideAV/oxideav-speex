@@ -109,8 +109,8 @@
 //!   path.
 
 use crate::codebooks::{
-    innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
-    innovation_8_128,
+    innovation_5_64, innovation_5_256, innovation_8_128, innovation_10_16, innovation_10_32,
+    innovation_20_32,
 };
 use crate::submode::NarrowbandSubmode;
 
@@ -468,8 +468,8 @@ fn decode_stage(
 mod tests {
     use super::*;
     use crate::codebooks::{
-        innovation_10_16, innovation_10_32, innovation_20_32, innovation_5_256, innovation_5_64,
-        innovation_8_128,
+        innovation_5_64, innovation_5_256, innovation_8_128, innovation_10_16, innovation_10_32,
+        innovation_20_32,
     };
     use crate::submode::NARROWBAND_SUBMODES;
 

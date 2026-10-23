@@ -8,8 +8,8 @@
 //! check structural validity + signal tracking, not sample equality.
 
 use oxideav_speex::{
-    BitReader, NarrowbandDecoder, NarrowbandEncoder, NarrowbandFrameBody, NarrowbandFrameHeader,
-    NarrowbandSubmode, NB_FRAME_SAMPLES,
+    BitReader, NB_FRAME_SAMPLES, NarrowbandDecoder, NarrowbandEncoder, NarrowbandFrameBody,
+    NarrowbandFrameHeader, NarrowbandSubmode,
 };
 
 /// A deterministic voiced test signal: a pitch-periodic pulse train run

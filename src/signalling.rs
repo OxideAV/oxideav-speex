@@ -518,11 +518,7 @@ impl InbandMessage {
 /// Helper: a u32 mask that selects the low `n` bits (`n` in 1..=32).
 /// `n == 32` returns `u32::MAX` (avoids the `1 << 32` UB shift).
 fn masked(n: u32) -> u32 {
-    if n >= 32 {
-        u32::MAX
-    } else {
-        (1u32 << n) - 1
-    }
+    if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
 }
 
 /// A parsed mode-13 custom in-band message.

@@ -35,7 +35,7 @@
 //!    probes explain as natural-speech co-variation.)
 
 use oxideav_speex::{
-    decode_hb_subframe_mode4_f32, reconstruct_hb_exc_gain, HbExcitationGainIndex, QmfAnalysis,
+    HbExcitationGainIndex, QmfAnalysis, decode_hb_subframe_mode4_f32, reconstruct_hb_exc_gain,
 };
 
 /// Provenance/08's fixed exponents for its gain-direction regression
@@ -191,7 +191,7 @@ fn inverse_filter_global_lpc(x: &[f64]) -> Vec<f64> {
         *slot = x[m..].iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
     }
     r[0] *= 1.0001; // white-noise floor, the manual's worked value
-                    // Levinson-Durbin, order 8 (prediction coefficients).
+    // Levinson-Durbin, order 8 (prediction coefficients).
     let mut a = [0.0f64; HB_ORDER];
     let mut err = r[0];
     for i in 0..HB_ORDER {
@@ -235,7 +235,9 @@ struct Row {
 /// given sub-frame window offset (in recovered-band samples).
 fn measure(offset: i64) -> Vec<Row> {
     let pcm: Vec<f64> = EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let (lb, hb) = qmf_split(&pcm);

@@ -71,11 +71,11 @@
 use crate::bitreader::{BitError, BitReader};
 use crate::codebooks::NB_LSP_ORDER;
 use crate::innovation::{
-    decode_subframe as decode_innovation_subframe, InnovationError, SUBFRAME_SAMPLES,
+    InnovationError, SUBFRAME_SAMPLES, decode_subframe as decode_innovation_subframe,
 };
-use crate::lsp::{reconstruct_q10, NbLspStages};
+use crate::lsp::{NbLspStages, reconstruct_q10};
 use crate::lsp_interp::NbSubFrameLsp;
-use crate::pitch_gain::{reconstruct as reconstruct_pitch_gain_taps, PitchGainTaps};
+use crate::pitch_gain::{PitchGainTaps, reconstruct as reconstruct_pitch_gain_taps};
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 use core::fmt;
 
@@ -356,8 +356,8 @@ fn read_wide(reader: &mut BitReader<'_>, n: u32) -> Result<u128, BitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
-    use crate::submode::{NarrowbandSubmode, Submode, NARROWBAND_SUBMODES};
+    use crate::frame::{NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
+    use crate::submode::{NARROWBAND_SUBMODES, NarrowbandSubmode, Submode};
 
     /// Build a synthetic CELP frame body whose bits are all `1`,
     /// prefixed by a 5-bit header (wideband=0, mode_id=`mode`). Useful

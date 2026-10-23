@@ -32,8 +32,8 @@
 //! the staged manual and is not implemented.
 
 use crate::bitreader::BitWriter;
-use crate::encoder_nb::{EncodeError, NarrowbandEncoder, NB_FRAME_SAMPLES};
-use crate::encoder_uwb::{write_uwb_frame, UltraWidebandEncoder, UwbEncodeError};
+use crate::encoder_nb::{EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
+use crate::encoder_uwb::{UltraWidebandEncoder, UwbEncodeError, write_uwb_frame};
 use crate::encoder_wb::{WbEncodeError, WidebandEncoder};
 use crate::frame::{FrameError, NarrowbandFrameHeader};
 use crate::qmf::QMF_WIDEBAND_FRAME;
@@ -279,9 +279,11 @@ mod tests {
         let mut dec = SpeexDecoder::new();
         let decoded = dec.decode_packet(&pkt).unwrap();
         assert_eq!(decoded.len(), 2);
-        assert!(decoded
-            .iter()
-            .all(|f| matches!(f, DecodedFrame::Wideband { .. })));
+        assert!(
+            decoded
+                .iter()
+                .all(|f| matches!(f, DecodedFrame::Wideband { .. }))
+        );
     }
 
     #[test]

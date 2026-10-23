@@ -19,9 +19,9 @@
 //! over the in-tree codebook tables.
 
 use oxideav_speex::{
-    synthesise_high_band_frame, BitReader, BitWriter, HbSynthesisFilter, SubBandLayer,
-    UwbFrameLayout, WidebandHighBandBody, WidebandHighBandSubmode, HB_FRAME_SAMPLES,
-    WIDEBAND_HIGH_BAND_SUBMODES,
+    BitReader, BitWriter, HB_FRAME_SAMPLES, HbSynthesisFilter, SubBandLayer, UwbFrameLayout,
+    WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandBody, WidebandHighBandSubmode,
+    synthesise_high_band_frame,
 };
 
 /// Build a synthetic mode-2 high-band frame: 12-bit LSP MSVQ index,

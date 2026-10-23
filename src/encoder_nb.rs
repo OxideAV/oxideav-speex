@@ -58,19 +58,19 @@
 //! through the staged `provenance/02` law (0.9 damping, `15·coef`
 //! clamped to the 4-bit grid).
 
-use crate::adaptive_codebook::{resolve_lookback, TAP_PITCH_OFFSETS};
+use crate::adaptive_codebook::{TAP_PITCH_OFFSETS, resolve_lookback};
 use crate::frame::FrameError;
 use crate::gain_reconstruction::{
     quantise_frame_ol_exc_gain_exact, quantise_subframe_gain_correction,
     reconstruct_frame_ol_exc_gain, reconstruct_subframe_gain_correction,
 };
-use crate::innovation::{sub_vector, InnovationCodebook, InnovationMapping, SUBFRAME_SAMPLES};
+use crate::innovation::{InnovationCodebook, InnovationMapping, SUBFRAME_SAMPLES, sub_vector};
 use crate::innovation_search::search_innovation;
 use crate::lpc_to_lsp::lpc_to_lsp;
 use crate::lsp_base::nb_lsp_base_q10;
 use crate::lsp_interp::NbSubFrameLsp;
 use crate::lsp_quant::{pack_lsp_index, quantise_lsp_q10};
-use crate::lsp_to_lpc::{lsp_vector_radians_to_q10, subframe_lpc_set_with_base, LPC_ORDER};
+use crate::lsp_to_lpc::{LPC_ORDER, lsp_vector_radians_to_q10, subframe_lpc_set_with_base};
 use crate::narrowband_body::{
     NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX, PITCH_PERIOD_MIN,
 };
@@ -288,7 +288,7 @@ impl NarrowbandEncoder {
             InnovationMapping::Documented { codebook, count } => (Some(codebook), count, 1),
             InnovationMapping::DocumentedTwoStage { codebook, count } => (Some(codebook), count, 2),
             InnovationMapping::Undocumented => {
-                return Err(EncodeError::UndocumentedInnovation(submode.mode_id))
+                return Err(EncodeError::UndocumentedInnovation(submode.mode_id));
             }
         };
 
@@ -519,7 +519,7 @@ impl NarrowbandEncoder {
             let mut trial = self.clone();
             let (subframes, err) =
                 trial.encode_subframes(input, lpc_sets, g, codebook, count, stages, plan, submode);
-            if best.as_ref().map_or(true, |(e, _, _, _)| err < *e) {
+            if best.as_ref().is_none_or(|(e, _, _, _)| err < *e) {
                 best = Some((err, cand, subframes, trial));
             }
         }
@@ -596,11 +596,7 @@ impl NarrowbandEncoder {
             .map(codebook_rms)
             .unwrap_or(1.0)
             * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
-        if cb_rms > 0.0 {
-            rms / cb_rms
-        } else {
-            rms
-        }
+        if cb_rms > 0.0 { rms / cb_rms } else { rms }
     }
 
     /// Whole-frame residual through a **scratch** analysis filter (the
@@ -1060,9 +1056,10 @@ mod tests {
         let mut dec = crate::SpeexDecoder::new();
         let pcm = dec.decode_packet_pcm_i16(&pkt).expect("mode 1 decodes");
         assert_eq!(pcm.len(), 2 * NB_FRAME_SAMPLES);
-        assert!(pcm
-            .iter()
-            .all(|&s| (-32768..=32767).contains(&i32::from(s))));
+        assert!(
+            pcm.iter()
+                .all(|&s| (-32768..=32767).contains(&i32::from(s)))
+        );
     }
 
     #[test]

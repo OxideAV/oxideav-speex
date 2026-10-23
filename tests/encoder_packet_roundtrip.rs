@@ -8,8 +8,8 @@
 //! convenience surface produces the right shape at the right rate.
 
 use oxideav_speex::{
-    DecodedFrame, NarrowbandEncoder, SpeexDecoder, WidebandEncoder, NB_FRAME_SAMPLES,
-    QMF_WIDEBAND_FRAME,
+    DecodedFrame, NB_FRAME_SAMPLES, NarrowbandEncoder, QMF_WIDEBAND_FRAME, SpeexDecoder,
+    WidebandEncoder,
 };
 
 fn nb_frame(amp: f64, frame_idx: usize) -> [i16; NB_FRAME_SAMPLES] {

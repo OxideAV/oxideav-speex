@@ -48,12 +48,12 @@
 //! innovation-codebook binding is fully pinned as of r450 (it encodes),
 //! as are the reserved high-rate IDs 5..=7.
 
-use crate::encoder_nb::{EncodeError, NarrowbandEncoder, NB_FRAME_SAMPLES};
+use crate::encoder_nb::{EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
 use crate::frame::FrameError;
 use crate::gain_reconstruction::{quantise_hb_exc_gain, reconstruct_hb_exc_gain};
 use crate::hb_encode::encode_wideband_frame;
 use crate::hb_innovation::{
-    decode_hb_subframe, HbInnovationCodebook, HbInnovationMapping, HB_SUBFRAME_SAMPLES,
+    HB_SUBFRAME_SAMPLES, HbInnovationCodebook, HbInnovationMapping, decode_hb_subframe,
 };
 use crate::hb_innovation_search::search_hb_innovation;
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
@@ -64,11 +64,11 @@ use crate::lsp_base::hb_lsp_base_q10;
 use crate::lsp_to_lpc::{hb_subframe_lpc_set_with_base, radians_to_lsp_q10};
 use crate::narrowband_body::NarrowbandFrameBody;
 use crate::narrowband_decoder::saturate_i16;
-use crate::qmf::{QmfAnalysis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QMF_WIDEBAND_FRAME, QmfAnalysis};
 use crate::submode::NarrowbandSubmode;
 use crate::wideband::{
-    HighBandSubFrameIndices, WidebandHighBandBody, WidebandHighBandSubmode,
-    HIGH_BAND_SUBFRAMES_PER_FRAME,
+    HIGH_BAND_SUBFRAMES_PER_FRAME, HighBandSubFrameIndices, WidebandHighBandBody,
+    WidebandHighBandSubmode,
 };
 
 use crate::codebooks::HB_LPC_ORDER;
@@ -318,7 +318,7 @@ impl WidebandEncoder {
                 (Some(codebook), count, true)
             }
             HbInnovationMapping::Undocumented => {
-                return Err(WbEncodeError::UndocumentedHbInnovation(submode.mode_id))
+                return Err(WbEncodeError::UndocumentedHbInnovation(submode.mode_id));
             }
         };
 
@@ -555,7 +555,7 @@ fn hb_quantise_gain_and_search(
             let d = r - model[n];
             err += d * d;
         }
-        if best.map_or(true, |(e, _, _)| err < e) {
+        if best.is_none_or(|(e, _, _)| err < e) {
             best = Some((err, raw as u8, packed));
         }
     }
@@ -600,7 +600,7 @@ mod tests {
         // encode_packet_quality wires the Table 10.2-derived ladder:
         // one frame + terminator packs to the staged bits-per-frame
         // total and decodes through the top-level SpeexDecoder.
-        use crate::quality::{wb_bitrate_bps, FRAMES_PER_SECOND};
+        use crate::quality::{FRAMES_PER_SECOND, wb_bitrate_bps};
         for q in 0..=10u8 {
             let mut enc = WidebandEncoder::new();
             let frames = [wideband_frame(5000.0)];

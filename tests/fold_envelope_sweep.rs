@@ -26,9 +26,9 @@
 //! flagged deep-envelope regime.
 
 use oxideav_speex::{
-    hb_crossover_response, hb_crossover_response_bwexp, hb_crossover_response_from_lsp,
-    hb_lsp_with_base_q10, hb_subframe_lpc_set_with_base, reconstruct_hb_lsp_q10, HbLspStages,
-    HbSubFrameLsp, HB_FOLD_ENVELOPE_COMPRESSION_GAMMA,
+    HB_FOLD_ENVELOPE_COMPRESSION_GAMMA, HbLspStages, HbSubFrameLsp, hb_crossover_response,
+    hb_crossover_response_bwexp, hb_crossover_response_from_lsp, hb_lsp_with_base_q10,
+    hb_subframe_lpc_set_with_base, reconstruct_hb_lsp_q10,
 };
 
 const MEASUREMENTS: &str = include_str!("fixtures/fold-envelope-sweep/sweep-measurements.txt");

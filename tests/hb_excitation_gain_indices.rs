@@ -18,8 +18,8 @@
 //! crate's public API surface.
 
 use oxideav_speex::{
-    BitReader, BitWriter, HbExcitationGainIndex, WidebandHighBandBody, WidebandHighBandSubmode,
-    HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+    BitReader, BitWriter, HIGH_BAND_SUBFRAMES_PER_FRAME, HbExcitationGainIndex,
+    WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandBody, WidebandHighBandSubmode,
 };
 
 /// Build a synthetic high-band body for `submode` whose four

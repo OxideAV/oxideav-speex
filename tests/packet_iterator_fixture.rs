@@ -16,7 +16,7 @@
 //! always appends a mode-15 terminator + zero-pad to fill the last
 //! byte).
 
-use oxideav_speex::{parse_packet, PacketFrame, PacketFrames};
+use oxideav_speex::{PacketFrame, PacketFrames, parse_packet};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/nb_440hz_q8.spx");
 

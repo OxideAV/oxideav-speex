@@ -36,7 +36,7 @@
 //! state is separate and advances only when a high band is present.
 
 use crate::narrowband_decoder::{
-    NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
+    NARROWBAND_FRAME_SAMPLES, NarrowbandDecodeError, NarrowbandDecoder,
 };
 use crate::packet::{PacketError, PacketFrame, PacketFrames};
 use crate::qmf::QMF_WIDEBAND_FRAME;
@@ -307,7 +307,7 @@ impl SpeexDecoder {
                 let hb_submode = match high_band_header.submode {
                     WidebandSubmode::Documented(s) => s,
                     WidebandSubmode::ReservedHighRate(id) => {
-                        return Err(DecodeError::HighBandReserved { mode_id: id })
+                        return Err(DecodeError::HighBandReserved { mode_id: id });
                     }
                 };
                 // Delegate the whole wideband assembly (low band + r393

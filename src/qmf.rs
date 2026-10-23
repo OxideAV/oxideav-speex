@@ -78,7 +78,7 @@
 //! a stream of wideband frames reconstructs continuously with no
 //! inter-frame discontinuity.
 
-use crate::codebooks::{qmf_h0_float, QMF_FILTER_LEN};
+use crate::codebooks::{QMF_FILTER_LEN, qmf_h0_float};
 
 /// Number of 8 kHz half-band samples per wideband frame (one band).
 pub const QMF_HALF_BAND_FRAME: usize = crate::wb_synthesis::HB_FRAME_SAMPLES;

@@ -75,21 +75,21 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    parse_options, AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct,
-    CodecParameters, Decoder, Encoder, Error, Frame, OptionField, OptionKind, OptionValue, Packet,
-    Result, RuntimeContext, SampleFormat, TimeBase,
+    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
+    Decoder, Encoder, Error, Frame, OptionField, OptionKind, OptionValue, Packet, Result,
+    RuntimeContext, SampleFormat, TimeBase, parse_options,
 };
 
-use crate::encoder_nb::{NarrowbandEncoder, NB_FRAME_SAMPLES};
+use crate::encoder_nb::{NB_FRAME_SAMPLES, NarrowbandEncoder};
 use crate::encoder_uwb::UltraWidebandEncoder;
 use crate::encoder_wb::WidebandEncoder;
 use crate::header::{
-    SpeexHeader, SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND, SPEEX_MODE_ULTRAWIDEBAND,
-    SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN,
+    SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND, SPEEX_MODE_ULTRAWIDEBAND,
+    SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN, SpeexHeader,
 };
 use crate::qmf::QMF_WIDEBAND_FRAME;
-use crate::quality::{nb_mode_for_quality, uwb_bitrate_bps, wb_bitrate_bps, MAX_QUALITY};
-use crate::stereo::{downmix_mean, encode_stereo_payload, StereoDecoder};
+use crate::quality::{MAX_QUALITY, nb_mode_for_quality, uwb_bitrate_bps, wb_bitrate_bps};
+use crate::stereo::{StereoDecoder, downmix_mean, encode_stereo_payload};
 use crate::stream_decoder::SpeexStreamDecoder;
 use crate::submode::NarrowbandSubmode;
 use crate::uwb_decoder::UWB_FRAME_SAMPLES;
@@ -300,11 +300,12 @@ impl Decoder for SpeexFrameworkDecoder {
         let data = &packet.data;
         // In-band stream header (Ogg packet 0): (re)configure and
         // schedule the metadata packets that follow.
-        if data.len() >= SPEEX_STRING_LEN && &data[..SPEEX_STRING_LEN] == SPEEX_MAGIC {
-            if let Ok(header) = SpeexHeader::parse(data) {
-                self.install_header(header, true)?;
-                return Ok(());
-            }
+        if data.len() >= SPEEX_STRING_LEN
+            && &data[..SPEEX_STRING_LEN] == SPEEX_MAGIC
+            && let Ok(header) = SpeexHeader::parse(data)
+        {
+            self.install_header(header, true)?;
+            return Ok(());
         }
         // Comment / extra-header packets after an in-band header carry
         // no audio.
@@ -488,12 +489,12 @@ impl SpeexFrameworkEncoder {
                 "speex: encoder accepts 1 or 2 input channels (2 is downmixed to mono), got {in_channels}"
             )));
         }
-        if let Some(fmt) = params.sample_format {
-            if fmt != SampleFormat::S16 {
-                return Err(Error::unsupported(format!(
-                    "speex: encoder consumes interleaved S16 input, got {fmt:?}"
-                )));
-            }
+        if let Some(fmt) = params.sample_format
+            && fmt != SampleFormat::S16
+        {
+            return Err(Error::unsupported(format!(
+                "speex: encoder consumes interleaved S16 input, got {fmt:?}"
+            )));
         }
         let opts: SpeexEncoderOptions = parse_options(&params.options)?;
         if opts.quality == 10 && class != RateClass::Narrowband {

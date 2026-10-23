@@ -199,7 +199,7 @@ impl BitWriter {
     /// `true` when the cursor is exactly on a byte boundary (the next
     /// write will start a fresh byte).
     pub fn is_byte_aligned(&self) -> bool {
-        self.bits % 8 == 0
+        self.bits.is_multiple_of(8)
     }
 
     /// Write a single bit. `bit != 0` writes a `1`; `bit == 0` writes a

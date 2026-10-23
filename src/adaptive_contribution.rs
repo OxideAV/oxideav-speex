@@ -91,7 +91,7 @@
 //!   all-zero contribution without any branching in this module.
 
 use crate::adaptive_codebook::{
-    sample_lookback_indices, ExcitationBuffer, ExcitationError, ADAPTIVE_CODEBOOK_TAPS,
+    ADAPTIVE_CODEBOOK_TAPS, ExcitationBuffer, ExcitationError, sample_lookback_indices,
 };
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::narrowband_body::{PITCH_PERIOD_MAX, PITCH_PERIOD_MIN};

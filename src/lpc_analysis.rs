@@ -42,7 +42,7 @@
 //! own worked example value (§8.2 p.26).
 
 use crate::codebooks::{
-    lpc_analysis_window_float, lpc_lag_window_float, LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN,
+    LPC_ANALYSIS_WINDOW_LEN, LPC_LAG_WINDOW_LEN, lpc_analysis_window_float, lpc_lag_window_float,
 };
 use crate::lsp_to_lpc::LPC_ORDER;
 

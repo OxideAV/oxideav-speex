@@ -16,8 +16,8 @@
 //! layer per frame).
 
 use crate::decoder::{DecodeError, SpeexDecoder};
-use crate::header::{SpeexHeader, SPEEX_MODE_ULTRAWIDEBAND};
-use crate::uwb_decoder::{UltraWidebandDecoder, UwbDecodeError, UWB_FRAME_SAMPLES};
+use crate::header::{SPEEX_MODE_ULTRAWIDEBAND, SpeexHeader};
+use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UltraWidebandDecoder, UwbDecodeError};
 use core::fmt;
 
 /// Errors from [`SpeexStreamDecoder`].
@@ -195,7 +195,7 @@ impl SpeexStreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder_nb::{NarrowbandEncoder, NB_FRAME_SAMPLES};
+    use crate::encoder_nb::{NB_FRAME_SAMPLES, NarrowbandEncoder};
     use crate::encoder_uwb::UltraWidebandEncoder;
     use crate::encoder_wb::WidebandEncoder;
     use crate::header::{SPEEX_MODE_NARROWBAND, SPEEX_MODE_WIDEBAND};

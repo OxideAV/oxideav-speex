@@ -69,7 +69,7 @@ use crate::fixed_codebook_gain::FixedCodebookGainIndices;
 use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
 use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_repeat;
 use crate::innovation::SUBFRAME_SAMPLES;
-use crate::lsp_to_lpc::{subframe_lpc_set_with_base, LPC_ORDER};
+use crate::lsp_to_lpc::{LPC_ORDER, subframe_lpc_set_with_base};
 use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MIN};
 use crate::pitch_gain::PitchGainTaps;
 use crate::submode::{NarrowbandSubmode, PitchGainQuant, SUBFRAMES_PER_FRAME};
@@ -565,7 +565,7 @@ pub fn saturate_i16(v: f64) -> i16 {
 mod tests {
     use super::*;
     use crate::frame::NarrowbandFrameHeader;
-    use crate::submode::{NarrowbandSubmode, Submode, NARROWBAND_SUBMODES};
+    use crate::submode::{NARROWBAND_SUBMODES, NarrowbandSubmode, Submode};
 
     /// Build an all-ones frame body for the given mode (same helper the
     /// body parser tests use): wideband flag 0, mode ID in the next 4

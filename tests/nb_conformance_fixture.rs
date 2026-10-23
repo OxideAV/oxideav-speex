@@ -35,8 +35,8 @@
 //! and asserts the improvement.
 
 use oxideav_speex::{
-    NarrowbandDecoder, NarrowbandFrameBody, NarrowbandFrameHeader, OutputHighpass, Submode,
-    NARROWBAND_FRAME_SAMPLES,
+    NARROWBAND_FRAME_SAMPLES, NarrowbandDecoder, NarrowbandFrameBody, NarrowbandFrameHeader,
+    OutputHighpass, Submode,
 };
 
 /// Fixed alignment: reference decode leads ours by 40 samples at 8 kHz
@@ -208,7 +208,9 @@ fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
 
 fn reference_pcm(bytes: &[u8]) -> Vec<f64> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }

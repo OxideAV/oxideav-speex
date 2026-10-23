@@ -98,8 +98,8 @@ mod tests {
     use crate::bitreader::BitReader;
     use crate::narrowband_body::NarrowbandSubFrameIndices;
     use crate::wideband::{
-        HighBandSubFrameIndices, WidebandHighBandFrameHeader, WidebandSubmode,
-        HIGH_BAND_FRAME_PREFIX_BITS, HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+        HIGH_BAND_FRAME_PREFIX_BITS, HIGH_BAND_SUBFRAMES_PER_FRAME, HighBandSubFrameIndices,
+        WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandFrameHeader, WidebandSubmode,
     };
 
     /// A synthetic high-band body whose fields exercise every bit of the

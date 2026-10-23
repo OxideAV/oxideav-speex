@@ -86,9 +86,9 @@
 
 use crate::codebooks::{HB_LPC_ORDER, NB_LSP_ORDER};
 use crate::hb_lsp::HB_LSP_OUTPUT_Q;
-use crate::hb_lsp_interp::{HbSubFrameLsp, HB_LSP_INTERP_OUTPUT_Q, HB_LSP_SUBFRAMES_PER_FRAME};
+use crate::hb_lsp_interp::{HB_LSP_INTERP_OUTPUT_Q, HB_LSP_SUBFRAMES_PER_FRAME, HbSubFrameLsp};
 use crate::lsp::NB_LSP_OUTPUT_Q;
-use crate::lsp_interp::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+use crate::lsp_interp::{NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME, NbSubFrameLsp};
 
 /// Number of LPC coefficients produced (equals the narrowband LSP
 /// order, [`NB_LSP_ORDER`] = 10).
@@ -248,7 +248,10 @@ fn lsp_to_lpc_slice(lsp_rad: &[f64], out: &mut [f64]) {
         "LSP and LPC slices must share length"
     );
     let n = lsp_rad.len();
-    assert!(n % 2 == 0, "LSP→LPC core requires an even filter order");
+    assert!(
+        n.is_multiple_of(2),
+        "LSP→LPC core requires an even filter order"
+    );
 
     // Build P(z) from the even-indexed LSPs and Q(z) from the
     // odd-indexed LSPs. Each LSP contributes a second-order section
@@ -918,7 +921,7 @@ mod tests {
         // new order-8 conversion: a documented high-band sub-mode +
         // synthetic stage indices reconstruct to a Q10 vector that
         // converts to eight finite LPC coefficients.
-        use crate::hb_lsp::{reconstruct_q10, HbLspStages};
+        use crate::hb_lsp::{HbLspStages, reconstruct_q10};
         let stages = HbLspStages {
             stage1: 17,
             stage2: 42,

@@ -70,7 +70,9 @@ fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
 
 fn reference_pcm() -> Vec<f64> {
     EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }

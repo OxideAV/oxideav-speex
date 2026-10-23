@@ -103,7 +103,7 @@
 //! [`crate::uwb_decoder`] module docs).
 
 use crate::codebooks::HB_LPC_ORDER;
-use crate::hb_innovation::{HbInnovationError, HB_SUBFRAME_SAMPLES};
+use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationError};
 use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::hb_synthesis::HbSynthesisFilter;
 use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;

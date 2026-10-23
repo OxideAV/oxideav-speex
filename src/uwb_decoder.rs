@@ -101,19 +101,19 @@
 use crate::bitreader::BitReader;
 use crate::codebooks::HB_LPC_ORDER;
 use crate::decoder::ControlMessage;
-use crate::frame::{NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+use crate::frame::{NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
 use crate::hb_fold::folded_uwb_excitation_subframe_crossover;
 use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::hb_synthesis::HbSynthesisFilter;
 use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
-use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QMF_WIDEBAND_FRAME, QmfSynthesis};
 use crate::signalling::{CustomInbandMessage, InbandMessage};
 use crate::submode::Submode;
 use crate::wideband::{
-    WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
-    HIGH_BAND_SUBFRAMES_PER_FRAME,
+    HIGH_BAND_SUBFRAMES_PER_FRAME, WidebandHighBandBody, WidebandHighBandFrameHeader,
+    WidebandSubmode,
 };
 use crate::wideband_decoder::{WidebandDecodeError, WidebandDecoder, WidebandFrame};
 use core::fmt;
@@ -340,7 +340,7 @@ impl UltraWidebandDecoder {
         let submode = match hb_header.submode {
             WidebandSubmode::Documented(s) => s,
             WidebandSubmode::ReservedHighRate(id) => {
-                return Err(UwbDecodeError::UwbLayerReserved { mode_id: id })
+                return Err(UwbDecodeError::UwbLayerReserved { mode_id: id });
             }
         };
         let body =
@@ -485,7 +485,7 @@ mod tests {
         // Terminator + pad.
         w.write_bit(0).unwrap();
         w.write(15, 4).unwrap();
-        while w.bits_written() % 8 != 0 {
+        while !w.bits_written().is_multiple_of(8) {
             w.write_bit(0).unwrap();
         }
         w.into_bytes()
@@ -564,7 +564,7 @@ mod tests {
         push_uwb_frame(&mut w, 5, 2, 1, 0x0456, [8, 9, 10, 11]);
         w.write_bit(0).unwrap();
         w.write(15, 4).unwrap();
-        while w.bits_written() % 8 != 0 {
+        while !w.bits_written().is_multiple_of(8) {
             w.write_bit(0).unwrap();
         }
         let pkt = w.into_bytes();
@@ -648,7 +648,7 @@ mod tests {
         w.write_bit(1).unwrap();
         w.write_bit(0).unwrap();
         w.write(15, 4).unwrap();
-        while w.bits_written() % 8 != 0 {
+        while !w.bits_written().is_multiple_of(8) {
             w.write_bit(0).unwrap();
         }
         let pkt = w.into_bytes();

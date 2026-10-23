@@ -43,7 +43,7 @@
 //! gap, not a correctness one — the chosen indices always decode to a
 //! valid innovation).
 
-use crate::innovation::{sub_vector, InnovationCodebook, SUBFRAME_SAMPLES};
+use crate::innovation::{InnovationCodebook, SUBFRAME_SAMPLES, sub_vector};
 
 /// Result of an innovation sub-vector search over one 40-sample sub-frame.
 #[derive(Debug, Clone, PartialEq)]

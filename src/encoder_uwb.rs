@@ -64,14 +64,14 @@ use crate::encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
 use crate::frame::{FrameError, NarrowbandFrameHeader};
 use crate::gain_reconstruction::quantise_hb_exc_gain;
 use crate::hb_encode::write_high_band_frame;
-use crate::hb_fold::{upsample_hb_excitation_linear, UWB_FOLD_RECONSTRUCTION_MULT};
+use crate::hb_fold::{UWB_FOLD_RECONSTRUCTION_MULT, upsample_hb_excitation_linear};
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
 use crate::lpc_analysis::analyse_hb;
 use crate::lpc_to_lsp::hb_lpc_to_lsp;
 use crate::lsp_base::hb_lsp_base_q10;
 use crate::lsp_to_lpc::{lpc_from_hb_lsp_delta_q10, radians_to_lsp_q10};
 use crate::narrowband_decoder::saturate_i16;
-use crate::qmf::{QmfAnalysis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QMF_WIDEBAND_FRAME, QmfAnalysis};
 use crate::quality::uwb_modes_for_quality;
 use crate::submode::NarrowbandSubmode;
 use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES};
@@ -252,7 +252,7 @@ impl UltraWidebandEncoder {
         // advances).
         match WidebandHighBandSubmode::for_id(uwb_mode) {
             Some(s) if s.excitation_vq_bits > 0 => {
-                return Err(UwbEncodeError::UndocumentedUwbMode(uwb_mode))
+                return Err(UwbEncodeError::UndocumentedUwbMode(uwb_mode));
             }
             Some(_) => {}
             None => return Err(UwbEncodeError::UnknownUwbMode(uwb_mode)),
@@ -543,7 +543,7 @@ mod tests {
         // to exactly ceil((bits + 5) / 8) bytes where bits is the
         // quality's staged bits-per-frame total — the wire-budget tie
         // between the quality module and the packers.
-        use crate::quality::{uwb_bitrate_bps, FRAMES_PER_SECOND};
+        use crate::quality::{FRAMES_PER_SECOND, uwb_bitrate_bps};
         for q in 0..=10u8 {
             let mut enc = UltraWidebandEncoder::new();
             let frames = [uwb_frame(5000.0)];

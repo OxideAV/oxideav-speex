@@ -119,7 +119,7 @@
 //! MSB-first and concatenates the resolved sub-vectors into a single
 //! 40-sample `[i16; 40]` vector.
 
-use crate::codebooks::{hb_innovation_10_32, hb_innovation_8_128};
+use crate::codebooks::{hb_innovation_8_128, hb_innovation_10_32};
 use crate::wideband::WidebandHighBandSubmode;
 
 /// Selector for one of the two documented high-band innovation codebook
@@ -477,7 +477,7 @@ pub fn decode_hb_subframe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codebooks::{hb_innovation_10_32, hb_innovation_8_128};
+    use crate::codebooks::{hb_innovation_8_128, hb_innovation_10_32};
     use crate::wideband::WIDEBAND_HIGH_BAND_SUBMODES;
 
     // ---- Codebook-shape primitive ----

@@ -33,9 +33,9 @@
 //!    all.)
 
 use oxideav_speex::{
-    decode_hb_subframe_mode4_f32, BitReader, NarrowbandFrameBody, NarrowbandFrameHeader,
-    QmfAnalysis, SpeexDecoder, Submode, WidebandHighBandBody, WidebandHighBandFrameHeader,
-    WidebandSubmode,
+    BitReader, NarrowbandFrameBody, NarrowbandFrameHeader, QmfAnalysis, SpeexDecoder, Submode,
+    WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
+    decode_hb_subframe_mode4_f32,
 };
 
 const LBVAR_SPX: &[u8] = include_bytes!("fixtures/hb-mode4-gain-probes/lbvar.spx");
@@ -195,7 +195,9 @@ struct Row {
 /// −40 recovered-band offset.
 fn measure(spx: &[u8], pcm_bytes: &[u8]) -> Vec<Row> {
     let pcm: Vec<f64> = pcm_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let (lb, hb) = qmf_split(&pcm);
@@ -372,7 +374,9 @@ fn decode_ours(spx: &[u8]) -> Vec<f64> {
 /// against the reference, at the swept whole-file alignment.
 fn segment_band_errors(spx: &[u8], pcm_bytes: &[u8]) -> (usize, Vec<(f64, f64)>) {
     let reference: Vec<f64> = pcm_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let ours = decode_ours(spx);

@@ -16,9 +16,9 @@
 // base-aware `lpc_from_hb_lsp_delta_q10` (base + delta), not the
 // delta-only `lpc_from_hb_lsp_q10`.
 use oxideav_speex::{
-    lpc_from_hb_lsp_delta_q10, reconstruct_hb_lsp_q10, BitReader, BitWriter, HbLspStages,
-    WidebandHighBandBody, WidebandHighBandSubmode, HB_LPC_ORDER, HB_LSP_STAGE_BITS,
-    HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+    BitReader, BitWriter, HB_LPC_ORDER, HB_LSP_STAGE_BITS, HIGH_BAND_SUBFRAMES_PER_FRAME,
+    HbLspStages, WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandBody, WidebandHighBandSubmode,
+    lpc_from_hb_lsp_delta_q10, reconstruct_hb_lsp_q10,
 };
 
 /// Write `n` zero bits, splitting wide fields into 32-bit chunks so the

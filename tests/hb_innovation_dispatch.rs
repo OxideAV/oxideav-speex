@@ -19,10 +19,10 @@
 //! crate's public API surface over the in-tree codebook tables.
 
 use oxideav_speex::{
-    decode_hb_subframe, decode_hb_subframe_mode4_f32, hb_innovation_sub_vector, BitReader,
-    BitWriter, HbInnovationCodebook, HbInnovationMapping, WidebandHighBandBody,
-    WidebandHighBandSubmode, HB_SUBFRAME_SAMPLES, HIGH_BAND_SUBFRAMES_PER_FRAME,
-    WIDEBAND_HIGH_BAND_SUBMODES,
+    BitReader, BitWriter, HB_SUBFRAME_SAMPLES, HIGH_BAND_SUBFRAMES_PER_FRAME, HbInnovationCodebook,
+    HbInnovationMapping, WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandBody,
+    WidebandHighBandSubmode, decode_hb_subframe, decode_hb_subframe_mode4_f32,
+    hb_innovation_sub_vector,
 };
 
 /// Build a synthetic mode-2 high-band body whose four sub-frames carry

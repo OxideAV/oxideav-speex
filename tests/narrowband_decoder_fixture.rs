@@ -25,8 +25,8 @@
 //! page-walker the sibling fixture tests use lifts the audio packets.
 
 use oxideav_speex::{
-    NarrowbandDecoder, NarrowbandFrameBody, NarrowbandFrameHeader, Submode,
-    NARROWBAND_FRAME_SAMPLES,
+    NARROWBAND_FRAME_SAMPLES, NarrowbandDecoder, NarrowbandFrameBody, NarrowbandFrameHeader,
+    Submode,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/nb_440hz_q8.spx");

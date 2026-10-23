@@ -105,7 +105,9 @@ fn score(ours: &[f64], reference: &[f64], lead: usize) -> (f64, f64, f64) {
 #[test]
 fn uwb_speech_tracking_gate() {
     let reference: Vec<f64> = EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let ours = decode_fixture();

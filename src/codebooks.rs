@@ -499,7 +499,7 @@ pub fn qmf_h0_float() -> &'static [f64] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::submode::{NarrowbandSubmode, PitchGainQuant, NARROWBAND_SUBMODES};
+    use crate::submode::{NARROWBAND_SUBMODES, NarrowbandSubmode, PitchGainQuant};
 
     #[test]
     fn narrowband_lsp_codebooks_have_expected_dimensions() {

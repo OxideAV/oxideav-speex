@@ -85,7 +85,9 @@ fn band_db(frame: &[f64]) -> (f64, f64) {
 #[test]
 fn mode4_q10_decodes_with_documented_residual() {
     let reference: Vec<f64> = EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let packets = lift(INPUT);
@@ -181,7 +183,9 @@ fn snr_corr(reference: &[f64], ours: &[f64]) -> (f64, f64) {
 #[test]
 fn mode4_q10_qmf_subband_gate() {
     let reference: Vec<f64> = EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     let packets = lift(INPUT);

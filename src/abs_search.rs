@@ -29,7 +29,7 @@
 //! [`crate::pitch_gain`] and are interpreted in the crate's pinned **Q6**
 //! pitch-gain domain (`gain = tap / 64`, [`crate::gain_scaled_pitch`]).
 
-use crate::adaptive_codebook::{resolve_lookback, ADAPTIVE_CODEBOOK_TAPS, TAP_PITCH_OFFSETS};
+use crate::adaptive_codebook::{ADAPTIVE_CODEBOOK_TAPS, TAP_PITCH_OFFSETS, resolve_lookback};
 use crate::gain_scaled_pitch::PITCH_GAIN_SCALING;
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::lsp_to_lpc::LPC_ORDER;

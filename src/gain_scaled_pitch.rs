@@ -92,7 +92,7 @@
 
 use crate::adaptive_codebook::ExcitationBuffer;
 use crate::adaptive_contribution::{
-    adaptive_contribution_sample, adaptive_contribution_subframe, AdaptiveContributionError,
+    AdaptiveContributionError, adaptive_contribution_sample, adaptive_contribution_subframe,
 };
 use crate::innovation::SUBFRAME_SAMPLES;
 use crate::pitch_gain::PitchGainTaps;

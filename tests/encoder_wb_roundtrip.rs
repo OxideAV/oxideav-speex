@@ -9,7 +9,7 @@
 //! that the high band actually carries energy when the input has 4–8 kHz
 //! content.
 
-use oxideav_speex::{WidebandDecoder, WidebandEncoder, QMF_WIDEBAND_FRAME};
+use oxideav_speex::{QMF_WIDEBAND_FRAME, WidebandDecoder, WidebandEncoder};
 
 /// A 16 kHz frame with energy in both bands: a voiced-ish 300 Hz
 /// fundamental plus a 6 kHz high-band tone.

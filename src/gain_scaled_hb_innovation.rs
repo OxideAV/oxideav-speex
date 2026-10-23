@@ -100,7 +100,7 @@
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
-use crate::hb_innovation::{decode_hb_subframe, HbInnovationError, HB_SUBFRAME_SAMPLES};
+use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationError, decode_hb_subframe};
 use crate::wideband::{WidebandHighBandBody, WidebandHighBandSubmode};
 
 /// Polarity of the high-band innovation excitation (modes 2/3/4)

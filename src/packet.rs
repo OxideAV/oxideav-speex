@@ -43,7 +43,7 @@
 //! treats <5 bits remaining as end-of-packet padding.
 
 use crate::bitreader::{BitError, BitReader};
-use crate::frame::{FrameError, NarrowbandFrameHeader, NARROWBAND_FRAME_PREFIX_BITS};
+use crate::frame::{FrameError, NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
 use crate::narrowband_body::{NarrowbandBodyError, NarrowbandFrameBody};
 use crate::signalling::{CustomInbandMessage, InbandMessage, SignallingError};
 use crate::submode::{NarrowbandSubmode, Submode};
@@ -508,7 +508,7 @@ pub fn parse_packet(buf: &[u8]) -> Result<Vec<PacketFrame>, PacketError> {
 mod tests {
     use super::*;
     use crate::bitreader::{BitReader, BitWriter};
-    use crate::signalling::{InbandKind, INBAND_CODE_BITS};
+    use crate::signalling::{INBAND_CODE_BITS, InbandKind};
     use crate::submode::Submode;
 
     // Test helpers — assemble synthetic Speex packet bodies via the
@@ -802,11 +802,11 @@ mod tests {
         // (mode 0 = zero bits). Total = 5 + 4 = 9 bits, then padding.
         let mut p = BitWriter::new();
         push_prefix(&mut p, true, 0); // wb=1, mode=0
-                                      // narrowband body for mode 0 is 0 bits
-                                      // now the high-band 4-bit prefix
+        // narrowband body for mode 0 is 0 bits
+        // now the high-band 4-bit prefix
         p.write(0, 1).unwrap(); // hb wideband flag (we just use 0 for silence)
         p.write(0, 3).unwrap(); // hb mode_id = 0
-                                // hb mode 0 body = 0 bits
+        // hb mode 0 body = 0 bits
         push_prefix(&mut p, false, 15); // terminator
         p.write(0, 1).unwrap(); // pad to round to bytes
         let buf = p.into_bytes();
@@ -840,7 +840,7 @@ mod tests {
         push_prefix(&mut p, true, 0); // wb=1, narrowband mode 0
         p.write(0, 1).unwrap(); // hb wideband flag
         p.write(5, 3).unwrap(); // hb mode_id = 5 (reserved-high-rate)
-                                // Pad to byte boundary
+        // Pad to byte boundary
         p.write(0, 7).unwrap();
         let buf = p.into_bytes();
         let err = parse_packet(&buf).unwrap_err();
@@ -1032,13 +1032,13 @@ mod tests {
         // high-band flag 0 (mode 0 silence high band).
         let mut p = BitWriter::new();
         push_prefix(&mut p, true, 0); // wideband flag = 1, low-band mode 0
-                                      // High-band: 1-bit wideband flag (0 = no further band) + 3-bit
-                                      // high-band mode (0 = silence).
+        // High-band: 1-bit wideband flag (0 = no further band) + 3-bit
+        // high-band mode (0 = silence).
         p.write(0, 1).unwrap(); // high-band wideband flag = 0
         p.write(0, 3).unwrap(); // high-band mode 0
         push_prefix(&mut p, false, 15); // terminator so the trailing
-                                        // zero padding is not parsed as a
-                                        // spurious mode-0 frame
+        // zero padding is not parsed as a
+        // spurious mode-0 frame
         p.write(0, 1).unwrap(); // pad to a whole byte
         let buf = p.into_bytes();
 

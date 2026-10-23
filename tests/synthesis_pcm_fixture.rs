@@ -32,8 +32,8 @@
 //! Speex audio packets out of their single-stream Ogg framing).
 
 use oxideav_speex::{
-    lsp_to_lpc, lsp_vector_q10_to_radians, NarrowbandFrameBody, NarrowbandFrameHeader, Submode,
-    SynthesisFilter,
+    NarrowbandFrameBody, NarrowbandFrameHeader, Submode, SynthesisFilter, lsp_to_lpc,
+    lsp_vector_q10_to_radians,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/nb_440hz_q8.spx");

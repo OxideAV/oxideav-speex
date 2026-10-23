@@ -29,7 +29,7 @@
 //!   appends a mode-15 terminator and/or trailing zeros to pad).
 
 use oxideav_speex::{
-    NarrowbandFrameBody, NarrowbandFrameHeader, NbLspStages, Submode, NARROWBAND_FRAME_PREFIX_BITS,
+    NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameBody, NarrowbandFrameHeader, NbLspStages, Submode,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/nb_440hz_q8.spx");
@@ -305,7 +305,7 @@ fn sub_frame_lsp_interpolation_walks_real_audio_stream() {
     //   * After many frames the interpolation envelope is non-flat at
     //     least some of the time, confirming the previous-frame state
     //     is actually being used and not silently zeroed.
-    use oxideav_speex::{NbSubFrameLsp, NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME};
+    use oxideav_speex::{NB_LSP_INTERP_OUTPUT_Q, NB_LSP_SUBFRAMES_PER_FRAME, NbSubFrameLsp};
 
     let packets = lift_ogg_packets(FIXTURE);
     let audio = &packets[2..];
@@ -517,7 +517,7 @@ fn innovation_subvector_decodes_for_mode_5_fixture() {
     // now decode into a 40-sample c[n] vector, and the per-sub-vector
     // lookups must match a manual MSB-first walk of the raw 48-bit
     // `innovation_vq_index` field against the staged codebook.
-    use oxideav_speex::{innovation_5_64, SUBFRAME_SAMPLES};
+    use oxideav_speex::{SUBFRAME_SAMPLES, innovation_5_64};
     let packets = lift_ogg_packets(FIXTURE);
     let audio = &packets[2..];
     let mut total = 0u32;

@@ -85,7 +85,7 @@
 //! * No per-sub-frame 3-tap VQ (that is [`crate::pitch_gain`]).
 //! * No high-band path (§10.2: the high band has no pitch predictor).
 
-use crate::pitch_gain::{PitchGainTaps, PITCH_GAIN_TAPS};
+use crate::pitch_gain::{PITCH_GAIN_TAPS, PitchGainTaps};
 
 /// Bit width of the frame-level forced (open-loop) pitch-gain field
 /// (Table 9.1 `OL pitch gain` row, modes 1 / 2 / 8).

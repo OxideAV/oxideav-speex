@@ -92,8 +92,8 @@
 //!   pitch field). The high band never consults this module.
 
 use crate::codebooks::{
-    pitch_gain_5bit, pitch_gain_7bit, PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES,
-    PITCH_GAIN_BIAS, PITCH_GAIN_COLS,
+    PITCH_GAIN_5BIT_ENTRIES, PITCH_GAIN_7BIT_ENTRIES, PITCH_GAIN_BIAS, PITCH_GAIN_COLS,
+    pitch_gain_5bit, pitch_gain_7bit,
 };
 use crate::submode::PitchGainQuant;
 

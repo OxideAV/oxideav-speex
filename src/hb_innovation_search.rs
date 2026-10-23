@@ -26,7 +26,7 @@
 //! search — a fidelity refinement, not a correctness one: the chosen
 //! slots always decode to a valid high-band innovation).
 
-use crate::hb_innovation::{hb_innovation_sub_vector, HbInnovationCodebook, HB_SUBFRAME_SAMPLES};
+use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationCodebook, hb_innovation_sub_vector};
 
 /// Result of a high-band innovation search over one 40-sample sub-frame.
 #[derive(Debug, Clone, PartialEq)]

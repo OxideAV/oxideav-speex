@@ -13,11 +13,11 @@
 //! analysed one — the encoder's spectral-envelope path is closed against
 //! the existing decoder reconstruction.
 
-use oxideav_speex::{
-    lpc_analyse, lpc_from_lsp_delta_q10, lpc_to_lsp, lsp_vector_radians_to_q10, nb_lsp_base_q10,
-    pack_lsp_index, quantise_lsp_q10, NbLspStages,
-};
 use oxideav_speex::{LspQuant, NB_LSP_ORDER, NB_LSP_STAGES_30BIT};
+use oxideav_speex::{
+    NbLspStages, lpc_analyse, lpc_from_lsp_delta_q10, lpc_to_lsp, lsp_vector_radians_to_q10,
+    nb_lsp_base_q10, pack_lsp_index, quantise_lsp_q10,
+};
 
 /// Subtract the pinned narrowband LSP base vector from an absolute Q10 LSP
 /// vector, producing the codebook-**delta** domain the multi-stage VQ

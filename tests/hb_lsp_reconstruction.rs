@@ -9,9 +9,9 @@
 //! synthesised per-stage indices.
 
 use oxideav_speex::{
-    reconstruct_hb_lsp_q10, BitReader, BitWriter, HbLspStages, WidebandHighBandBody,
-    WidebandHighBandSubmode, HB_LPC_ORDER, HB_LSP_OUTPUT_Q, HB_LSP_STAGE_BITS,
-    HB_LSP_STAGE_ENTRIES, HIGH_BAND_SUBFRAMES_PER_FRAME, WIDEBAND_HIGH_BAND_SUBMODES,
+    BitReader, BitWriter, HB_LPC_ORDER, HB_LSP_OUTPUT_Q, HB_LSP_STAGE_BITS, HB_LSP_STAGE_ENTRIES,
+    HIGH_BAND_SUBFRAMES_PER_FRAME, HbLspStages, WIDEBAND_HIGH_BAND_SUBMODES, WidebandHighBandBody,
+    WidebandHighBandSubmode, reconstruct_hb_lsp_q10,
 };
 
 /// Construct the bit-stream body for high-band mode 2 (the smallest

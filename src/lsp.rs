@@ -91,8 +91,8 @@
 //!   (LSPs → quantised indices) is a separate analysis path.
 
 use crate::codebooks::{
-    nb_lsp_high1, nb_lsp_high2, nb_lsp_low1, nb_lsp_low2, nb_lsp_scale, nb_lsp_stage0, NbLspScale,
-    NB_LSP_ORDER, NB_LSP_SPLIT_HALF, NB_LSP_STAGE_ENTRIES,
+    NB_LSP_ORDER, NB_LSP_SPLIT_HALF, NB_LSP_STAGE_ENTRIES, NbLspScale, nb_lsp_high1, nb_lsp_high2,
+    nb_lsp_low1, nb_lsp_low2, nb_lsp_scale, nb_lsp_stage0,
 };
 use crate::submode::LspQuant;
 
@@ -227,15 +227,15 @@ pub fn reconstruct_q10(stages: NbLspStages) -> Option<[i32; NB_LSP_ORDER]> {
     {
         return None;
     }
-    if let Some(low2) = stages.low2 {
-        if (low2 as usize) >= NB_LSP_STAGE_ENTRIES {
-            return None;
-        }
+    if let Some(low2) = stages.low2
+        && (low2 as usize) >= NB_LSP_STAGE_ENTRIES
+    {
+        return None;
     }
-    if let Some(high2) = stages.high2 {
-        if (high2 as usize) >= NB_LSP_STAGE_ENTRIES {
-            return None;
-        }
+    if let Some(high2) = stages.high2
+        && (high2 as usize) >= NB_LSP_STAGE_ENTRIES
+    {
+        return None;
     }
 
     let mut out = [0i32; NB_LSP_ORDER];

@@ -91,7 +91,7 @@
 //!   round.
 
 use crate::codebooks::{
-    hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2, NbLspScale, HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES,
+    HB_LPC_ORDER, HB_LSP_STAGE_ENTRIES, NbLspScale, hb_lsp_scale, hb_lsp_stage1, hb_lsp_stage2,
 };
 use crate::wideband::WidebandHighBandSubmode;
 

@@ -238,7 +238,9 @@ struct Recovered {
 
 fn recover() -> Recovered {
     let pcm: Vec<f64> = EXPECTED
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect();
     // Two-stage split: 32 kHz → (0–8 kHz @16 kHz, 8–16 kHz), then the
@@ -363,13 +365,7 @@ fn fit(y: &[f64], xs: &[&[f64]]) -> (f64, f64, Vec<f64>) {
     let n = y.len();
     let k = xs.len() + 1;
     // Normal equations over [x…, 1].
-    let col = |i: usize, r: usize| -> f64 {
-        if i < xs.len() {
-            xs[i][r]
-        } else {
-            1.0
-        }
-    };
+    let col = |i: usize, r: usize| -> f64 { if i < xs.len() { xs[i][r] } else { 1.0 } };
     let mut m = vec![vec![0.0f64; k + 1]; k];
     for r in 0..n {
         for i in 0..k {

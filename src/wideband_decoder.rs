@@ -50,11 +50,11 @@ use crate::frame::NarrowbandFrameHeader;
 use crate::hb_synthesis::HbSynthesisFilter;
 use crate::narrowband_body::NarrowbandFrameBody;
 use crate::narrowband_decoder::{
-    NarrowbandDecodeError, NarrowbandDecoder, NARROWBAND_FRAME_SAMPLES,
+    NARROWBAND_FRAME_SAMPLES, NarrowbandDecodeError, NarrowbandDecoder,
 };
-use crate::qmf::{QmfSynthesis, QMF_WIDEBAND_FRAME};
+use crate::qmf::{QMF_WIDEBAND_FRAME, QmfSynthesis};
 use crate::submode::Submode;
-use crate::wb_synthesis::{synthesise_high_band_frame_leveled_env, HB_FRAME_SAMPLES};
+use crate::wb_synthesis::{HB_FRAME_SAMPLES, synthesise_high_band_frame_leveled_env};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -126,10 +126,16 @@ impl fmt::Display for WidebandDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WidebandDecodeError::NotNarrowbandLowBand => {
-                write!(f, "wideband decode: embedded low band is not a narrowband CELP frame")
+                write!(
+                    f,
+                    "wideband decode: embedded low band is not a narrowband CELP frame"
+                )
             }
             WidebandDecodeError::NoHighBandLayer => {
-                write!(f, "wideband decode: wideband flag 0 — no high-band layer present")
+                write!(
+                    f,
+                    "wideband decode: wideband flag 0 — no high-band layer present"
+                )
             }
             WidebandDecodeError::HighBandReserved { mode_id } => write!(
                 f,
@@ -138,9 +144,14 @@ impl fmt::Display for WidebandDecodeError {
             WidebandDecodeError::Narrowband(e) => write!(f, "wideband decode: low band: {e}"),
             WidebandDecodeError::HighBand(e) => write!(f, "wideband decode: high band: {e}"),
             WidebandDecodeError::HighBandUndocumented => {
-                write!(f, "wideband decode: high-band excitation codebook binding is a docs gap")
+                write!(
+                    f,
+                    "wideband decode: high-band excitation codebook binding is a docs gap"
+                )
             }
-            WidebandDecodeError::Framing => write!(f, "wideband decode: framing/bit-reader failure"),
+            WidebandDecodeError::Framing => {
+                write!(f, "wideband decode: framing/bit-reader failure")
+            }
         }
     }
 }
@@ -280,7 +291,7 @@ impl WidebandDecoder {
         let hb_submode = match hb_header.submode {
             WidebandSubmode::Documented(s) => s,
             WidebandSubmode::ReservedHighRate(id) => {
-                return Err(WidebandDecodeError::HighBandReserved { mode_id: id })
+                return Err(WidebandDecodeError::HighBandReserved { mode_id: id });
             }
         };
         let hb_body =

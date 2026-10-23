@@ -50,7 +50,9 @@ fn lift(buf: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn f64_pcm(b: &[u8]) -> Vec<f64> {
-    b.chunks_exact(2)
+    b.as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }
