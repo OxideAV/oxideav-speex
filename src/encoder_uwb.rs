@@ -28,12 +28,13 @@
 //!    posture as r382/r385) → LSP → Q10 − base → the same 2-stage
 //!    12-bit MSVQ the wideband high band uses.
 //! 4. **High half gains** — per 80-sample sub-frame (four per frame,
-//!    pinned by the mode-1 bit budget): the fold-consistent target
-//!    `g = rms(residual) / (K · rms(fold source))` quantised through the
-//!    staged 32-level 5-bit folded-gain grid
-//!    ([`crate::gain_reconstruction::quantise_hb_exc_gain`]), where the
-//!    fold source and `K = UWB_FOLD_RECONSTRUCTION_MULT` are the r403
-//!    fixture-pinned pair (step below).
+//!    pinned by the mode-1 bit budget): the 5-bit field whose exact outer
+//!    fold `x = 0.7·exp((q−10)/8)·(A_l2(−1)+0.01)/(A_hb(+1)+0.01)·src`
+//!    best matches the residual RMS in the log domain
+//!    ([`crate::hb_fold::UWB_FOLD_CROSSOVER_SCALE`]), where `src` is the
+//!    first high band's locally decoded excitation **zero-stuffed** to
+//!    16 kHz — the decoder's fold source (`tracer-2026-09.md` §6) — and
+//!    `A_l2` the sub-frame's §9.1-interpolated envelope.
 //! 5. **Pack** — the embedded wideband frame first (narrowband prefix
 //!    with the wideband flag, Table 9.1 body, first high-band frame),
 //!    then the second high-band frame through the same
@@ -43,39 +44,32 @@
 //! ## Fidelity
 //!
 //! Functional, not bit-exact — the same posture as the narrowband and
-//! wideband encoders. As of round r403 the decoder-side mode-1 fold
-//! **source** (the first-high-band excitation, linear-interpolated to
-//! the 16 kHz geometry) and its reconstruction multiplier are pinned by
-//! the staged 3-layer fixture (`docs/audio/speex/fixtures/
-//! uwb-fold-geometry/`; see [`crate::uwb_decoder`] / [`crate::hb_fold`]),
-//! and this encoder chooses its gains against that exact source via the
-//! local analysis-by-synthesis wideband decode, so a UWB round trip
-//! reconstructs a non-silent, gain-responsive 8–16 kHz band. Because the
-//! folded law borrows the second layer's excitation from the first high
-//! band, it reconstructs energy only where the 4–8 kHz band is
-//! non-silent — inherent to the innovation-free mode-1 fold. Supported
-//! second-layer modes: 0 (silence) and 1 (gain-only). The excitation-VQ
-//! modes 2..=4 have no pinned sub-frame geometry at the 16 kHz half-band
-//! and are rejected, as are the reserved IDs 5..=7.
+//! wideband encoders. The second-layer gain decision mirrors the exact
+//! decode law through a local decode of the wideband layers, so the
+//! 8–16 kHz band reconstructs the residual's level wherever the 4–8 kHz
+//! band carries excitation to fold (inherent to the innovation-free
+//! mode-1 layer). Supported second-layer modes: 0 (silence) and 1
+//! (gain-only); the excitation-VQ modes 2..=4 are rejected by the
+//! reference decoder in this layer (`tracer-2026-09.md` §6) and are
+//! refused here, as are the reserved IDs 5..=7.
 
 use crate::bitreader::BitWriter;
 use crate::codebooks::HB_LPC_ORDER;
 use crate::encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
 use crate::frame::{FrameError, NarrowbandFrameHeader};
-use crate::gain_reconstruction::quantise_hb_exc_gain;
 use crate::hb_encode::write_high_band_frame;
-use crate::hb_fold::{UWB_FOLD_RECONSTRUCTION_MULT, upsample_hb_excitation_linear};
+use crate::hb_fold::{UWB_FOLD_CROSSOVER_SCALE, fold_index_for_gain, hb_fold_ratio_inv};
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
+use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::lpc_analysis::analyse_hb;
 use crate::lpc_to_lsp::hb_lpc_to_lsp;
 use crate::lsp_base::hb_lsp_base_q10;
-use crate::lsp_to_lpc::{lpc_from_hb_lsp_delta_q10, radians_to_lsp_q10};
+use crate::lsp_to_lpc::{hb_subframe_lpc_set_with_base, radians_to_lsp_q10};
 use crate::narrowband_decoder::saturate_i16;
 use crate::qmf::{QMF_WIDEBAND_FRAME, QmfAnalysis};
 use crate::quality::uwb_modes_for_quality;
 use crate::submode::NarrowbandSubmode;
 use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UWB_HALF_BAND_FRAME, UWB_HB_SUBFRAMES};
-use crate::wb_synthesis::HB_FRAME_SAMPLES;
 use crate::wideband::{HighBandSubFrameIndices, WidebandHighBandBody, WidebandHighBandSubmode};
 use crate::wideband_decoder::WidebandDecoder;
 
@@ -164,6 +158,9 @@ pub struct UltraWidebandEncoder {
     /// second-layer folded gains are chosen against the decoder's true
     /// fold source (r393; see [`crate::uwb_decoder`] module docs).
     local_decoder: WidebandDecoder,
+    /// Previous frame's quantised second-layer LSP delta (Q10) — the
+    /// §9.1 interpolation state the decoder keeps for the same layer.
+    prev_layer2_lsp_delta_q10: Option<[i32; HB_LPC_ORDER]>,
 }
 
 impl Default for UltraWidebandEncoder {
@@ -180,6 +177,7 @@ impl UltraWidebandEncoder {
             wideband: WidebandEncoder::new(),
             uwb_analysis_hist: [0.0; HB_LPC_ORDER],
             local_decoder: WidebandDecoder::new(),
+            prev_layer2_lsp_delta_q10: None,
         }
     }
 
@@ -327,18 +325,13 @@ impl UltraWidebandEncoder {
             ))
         })?;
 
-        let mut exc_hb64 = [0.0f64; HB_FRAME_SAMPLES];
-        for (o, &e) in exc_hb64
-            .iter_mut()
-            .zip(self.local_decoder.last_hb_excitation())
-        {
-            *o = f64::from(e);
-        }
-        // Mirror the decoder's r403 fold source exactly: the first-high-band
-        // excitation linear-interpolated to the 16 kHz second-layer
-        // geometry (see `crate::uwb_decoder` / `crate::hb_fold`).
+        // The decoder's outer fold source: the first-high-band excitation
+        // zero-stuffed to the 16 kHz second-layer geometry
+        // (`src[2m] = x_hb[m]`, `src[2m+1] = 0`; tracer-2026-09.md §6).
         let mut exc16 = [0.0f64; QMF_WIDEBAND_FRAME];
-        upsample_hb_excitation_linear(&exc_hb64, &mut exc16);
+        for (m, &e) in self.local_decoder.last_hb_excitation().iter().enumerate() {
+            exc16[2 * m] = f64::from(e);
+        }
         Ok(exc16)
     }
 
@@ -359,20 +352,27 @@ impl UltraWidebandEncoder {
 
         // Envelope: order-8 LPC over the staged 200-sample window,
         // aligned to the frame end (module docs), quantised through the
-        // 12-bit two-stage MSVQ.
+        // 12-bit two-stage MSVQ; the per-sub-frame LPC is the §9.1
+        // interpolation the decoder reconstructs.
         let (lsp_index, active_delta) = encode_uwb_envelope(high);
-        let lpc = lpc_from_hb_lsp_delta_q10(&active_delta);
+        let sub_lsp = match self.prev_layer2_lsp_delta_q10 {
+            Some(prev) => HbSubFrameLsp::new(&prev, &active_delta),
+            None => HbSubFrameLsp::first_frame(&active_delta),
+        };
+        let lpc_sets = hb_subframe_lpc_set_with_base(&sub_lsp);
+        self.prev_layer2_lsp_delta_q10 = Some(active_delta);
+        // The first band's A_hb(+1) per sub-frame (its 8 kHz edge).
+        let hb1_env = *self.local_decoder.last_hb_env();
 
-        // Gains: per 80-sample sub-frame, the fold-consistent target
-        // `g = rms(residual) / (K · rms(fold source))` through the
-        // 32-level 5-bit folded-gain grid — the decode-side fold
-        // (`e = K·g·(−1)ⁿ·src`) then reconstructs the residual's
-        // energy envelope (r393; previously the raw residual RMS was
-        // transmitted, which the pinned law would mis-scale).
+        // Gains: per 80-sample sub-frame, the exact outer fold law
+        // `x = 0.7·exp((q−10)/8)/R·zerostuff(x_hb)` with
+        // `R = (A_hb(+1)+0.01)/(A_l2(−1)+0.01)` (tracer-2026-09.md §5–§6)
+        // inverted in the log domain against the residual RMS.
         let mut subframes = [HighBandSubFrameIndices::default(); 4];
         for (sf, slot) in subframes.iter_mut().enumerate() {
             let range = sf * UWB_HB_SUBFRAME_SAMPLES..(sf + 1) * UWB_HB_SUBFRAME_SAMPLES;
             let block = &high[range.clone()];
+            let lpc = &lpc_sets[sf];
             let mut energy = 0.0f64;
             for &x in block {
                 let mut r = x;
@@ -387,13 +387,13 @@ impl UltraWidebandEncoder {
             let src = &exc16[range];
             let src_rms =
                 (src.iter().map(|&v| v * v).sum::<f64>() / UWB_HB_SUBFRAME_SAMPLES as f64).sqrt();
-            let target = if src_rms > 1e-9 {
-                rms / (UWB_FOLD_RECONSTRUCTION_MULT * src_rms)
+            let unit = UWB_FOLD_CROSSOVER_SCALE * hb_fold_ratio_inv(lpc, hb1_env[sf].1);
+            let target = if src_rms > 1e-9 && unit > 1e-12 {
+                rms / (unit * src_rms)
             } else {
                 0.0
             };
-            let idx = quantise_hb_exc_gain(target as f32, 5);
-            slot.excitation_gain_index = idx.and_then(|i| i.raw_index()).unwrap_or(0);
+            slot.excitation_gain_index = fold_index_for_gain(target);
             slot.excitation_vq_index = 0;
         }
 

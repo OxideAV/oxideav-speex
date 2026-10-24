@@ -318,21 +318,19 @@ impl WidebandDecoder {
         // source is the low-band decoder's just-composed excitation.
         let lb_excitation = *self.low_band.last_frame_excitation();
         // Both high-band absolute gain laws anchor on the embedded low
-        // band at the 4 kHz QMF crossover (r450 crafted-stream probes):
-        // per sub-frame, (rms(e_lb)/|A_lb(π)|, |A_lb(π)|) — see
-        // `hb_gc_crossover_gain` (modes 2/3/4) and
-        // `HB_FOLD_CROSSOVER_SCALE` (mode 1).
+        // band at the 4 kHz QMF crossover. Per sub-frame:
+        // (e_L/(A_nb(−1)+0.01), A_nb(−1)) — the low-band term of the
+        // exact modes-2/3/4 law (`hb_gc_crossover_gain`,
+        // tracer-2026-09.md §1.1) plus the crossover response the
+        // mode-1 fold reads (`HB_FOLD_CROSSOVER_SCALE`).
         let api = self.low_band.last_crossover_response();
         let mut hb_gain_base = [(0.0f64, 1.0f64); 4];
         for (sf, slot) in hb_gain_base.iter_mut().enumerate() {
             let seg = &lb_excitation[sf * 40..(sf + 1) * 40];
-            let rms = (seg
-                .iter()
-                .map(|&v| f64::from(v) * f64::from(v))
-                .sum::<f64>()
-                / seg.len() as f64)
-                .sqrt();
-            *slot = (rms / api[sf].max(1e-9), api[sf]);
+            *slot = (
+                crate::gain_scaled_hb_innovation::hb_gain_lb_base(seg, api[sf]),
+                api[sf],
+            );
         }
         let lb_innovation = *self.low_band.last_frame_innovation();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];

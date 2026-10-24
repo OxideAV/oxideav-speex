@@ -500,7 +500,7 @@ pub use encoder_nb::{EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
 pub use encoder_uwb::{
     UWB_HB_SUBFRAME_SAMPLES, UltraWidebandEncoder, UwbEncodeError, UwbFrameBodies,
 };
-pub use encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies};
+pub use encoder_wb::{WbEncodeError, WidebandEncoder, WidebandFrameBodies, hb_encoder_gain_index};
 // internal: raw excitation composition plumbing, exposed for tests only
 #[doc(hidden)]
 pub use excitation::{RAW_EXCITATION_SAMPLES, raw_excitation_sample, raw_excitation_subframe};
@@ -548,6 +548,9 @@ pub use gain_scaled_hb_innovation::{
     gain_scaled_hb_innovation_from_body_leveled, gain_scaled_hb_innovation_sample,
     gain_scaled_hb_innovation_subframe, hb_gc_crossover_gain,
 };
+pub use gain_scaled_hb_innovation::{
+    HB_CROSSOVER_REGULARISER, HB_RMS_FLOOR, floored_rms, hb_gain_lb_base,
+};
 // internal: gain-scaled innovation plumbing, exposed for tests only
 #[doc(hidden)]
 pub use gain_scaled_innovation::{
@@ -579,6 +582,11 @@ pub use hb_fold::{
     UWB_FOLD_RECONSTRUCTION_MULT, folded_hb_excitation_slice, folded_hb_excitation_subframe,
     folded_hb_excitation_subframe_crossover, folded_uwb_excitation_slice, hb_crossover_response,
     hb_crossover_response_bwexp, hb_crossover_response_from_lsp, upsample_hb_excitation_linear,
+};
+#[doc(hidden)]
+pub use hb_fold::{
+    UWB_FOLD_CROSSOVER_SCALE, fold_gain_from_index, fold_index_for_gain,
+    folded_uwb_excitation_subframe_crossover, hb_fold_ratio_inv,
 };
 // stable: error + sub-frame length used in the visible
 // [`WidebandHighBandBody::hb_innovation_sub_vector`] signature

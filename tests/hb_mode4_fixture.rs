@@ -17,12 +17,13 @@
 //! 2. The low band (0–4 kHz, NB 7) is reference-tracking (r450: the
 //!    measured mode-7 stage-2 weight closes the former +1.6 dB energy
 //!    bias — ≈1.7 dB mean band error, energy ratio ≈0.99).
-//! 3. The mode-4 high band (4–8 kHz) decodes through the r450
-//!    crossover-anchored gain law
-//!    (`g = gc_recon·|A_hb(π)|·rms(e_lb)/|A_lb(π)|`, measured by
-//!    crafted-bitstream probing — see
-//!    `oxideav_speex::hb_gc_crossover_gain`): ≈3.1 dB mean band error,
-//!    isolated sub-band SNR ≈21 dB at correlation ≈0.998.
+//! 3. The mode-4 high band (4–8 kHz) decodes through the exact gain law
+//!    of `docs/audio/speex/tracer-2026-09.md` §1
+//!    (`S = 0.8736·bound[q]·e_L/R`, see
+//!    `oxideav_speex::hb_gc_crossover_gain`): isolated sub-band SNR
+//!    ≈28.6 dB at correlation ≈0.9993, energy ratio 1.002 (r480; the
+//!    per-sub-frame scale itself is gated against the staged trace by
+//!    `tests/hb_gain_trace_fixture.rs`).
 
 use oxideav_speex::{QmfAnalysis, SpeexDecoder};
 
@@ -126,8 +127,9 @@ fn mode4_q10_decodes_with_documented_residual() {
     // Low band (NB 7) tracks the reference (r450 measured 1.74 dB).
     assert!(lo < 2.5, "0-4 kHz mean |err| {lo:.2} dB ≥ 2.5 (regression)");
     // Mode-4 high band through the r450 crossover-anchored gain law
-    // (measured 3.12 dB; was ~6.1 dB under the r440 fitted law and
-    // ~13.1 dB correction-only).
+    // (r480 measured 3.03 dB on this crude per-frame DFT metric; was
+    // ~6.1 dB under the r440 fitted law and ~13.1 dB correction-only —
+    // the QMF sub-band gate below is the precise one).
     assert!(hi < 4.5, "4-8 kHz mean |err| {hi:.2} dB ≥ 4.5 (regression)");
 }
 
@@ -244,19 +246,19 @@ fn mode4_q10_qmf_subband_gate() {
          high {hb_snr:.2} dB corr {hb_corr:.4} energy ratio {hb_energy_ratio:.3}"
     );
 
-    // r450 measured: low 13.72 dB / 0.9786 / energy 0.987 (the mode-7
-    // stage-2 weight closed the former +1.6 dB low-band energy bias);
-    // high 21.13 dB / 0.9979 / energy 1.119 through the
-    // crossover-anchored gain law + direct innovation polarity.
-    assert!(lb_corr > 0.95, "low sub-band corr {lb_corr:.4} ≤ 0.95");
-    assert!(lb_snr > 11.0, "low sub-band snr {lb_snr:.2} dB ≤ 11");
+    // r480 measured: low 25.60 dB / 0.9986; high 28.64 dB / 0.9993 /
+    // energy 1.002 — the exact tracer-2026-09.md §1 gain law
+    // (S = g_c·e_L/R, both +0.01 / +0.1 regularisers) replaced the r450
+    // reading (low 13.72 / high 21.13 dB, energy 1.119).
+    assert!(lb_corr > 0.995, "low sub-band corr {lb_corr:.4} ≤ 0.995");
+    assert!(lb_snr > 22.0, "low sub-band snr {lb_snr:.2} dB ≤ 22");
     assert!(
-        hb_corr > 0.99,
-        "high sub-band corr {hb_corr:.4} ≤ 0.99 (shape/sign/gain regression)"
+        hb_corr > 0.998,
+        "high sub-band corr {hb_corr:.4} ≤ 0.998 (shape/sign/gain regression)"
     );
-    assert!(hb_snr > 17.0, "high sub-band snr {hb_snr:.2} dB ≤ 17");
+    assert!(hb_snr > 25.0, "high sub-band snr {hb_snr:.2} dB ≤ 25");
     assert!(
-        hb_energy_ratio > 0.95 && hb_energy_ratio < 1.3,
-        "high sub-band energy ratio {hb_energy_ratio:.3} outside [0.95, 1.3]"
+        hb_energy_ratio > 0.97 && hb_energy_ratio < 1.03,
+        "high sub-band energy ratio {hb_energy_ratio:.3} outside [0.97, 1.03]"
     );
 }

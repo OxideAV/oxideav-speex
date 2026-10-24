@@ -260,42 +260,44 @@ pub fn folded_hb_scale(gain: f32, lpc: &[f64; HB_LPC_ORDER]) -> f64 {
 /// envelope troughs; the crossover shaping is what the reference
 /// decoder's black-box envelope sweep pins (module docs of
 /// [`hb_crossover_response`]).
-/// Scale of the r450 **crossover-anchored** mode-1 folded
-/// reconstruction, measured by crafted-bitstream black-box probing
-/// (`tests/fixtures/hb-gain-probes/NOTES.md`): with the crate's own
-/// writers emitting mode-1 wideband streams whose 5-bit folded-gain
-/// index, high-band envelope, low-band envelope and low-band level are
-/// varied one at a time, the reference decode's per-sub-frame fold
-/// scale is
-///
-/// ```text
-///   s = HB_FOLD_CROSSOVER_SCALE · fold_quant_bound[g5] · |A_hb(π)| / |A_lb(π)|
-/// ```
-///
-/// — **linear over the whole 32-level staged gain table**
-/// (`s/fold_quant_bound[g5]` flat to 0.2 % from level 0 to 31: there is
-/// no saturation, so the r393/r410 flat-ceiling reading
-/// `min(C·|Â|, 1/(2√2))` was an artefact of fitting without the
-/// `1/|A_lb(π)|` term), proportional to the high-band envelope's
-/// crossover response (six interior envelopes at `s/|A_hb(π)|`
-/// 0.2187…0.2441 over a 66× range), inversely proportional to the low
-/// band's (valid-codepoint envelope variants moving 143×), and
-/// independent of the low-band level. Same spectral-continuity shape as
-/// the modes-2/3/4 law
-/// ([`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]) with
-/// the 5-bit fold table in place of `gc_recon`; the constant is
-/// measured 0.8515…0.8522 on interior envelopes (the two deepest swept
-/// envelopes read 15…45 % high through this crate's `|A(π)|` — the
-/// §7.6 near-degenerate divergence).
-pub const HB_FOLD_CROSSOVER_SCALE: f64 = 0.8518;
+/// The exact folded-gain base for the 5-bit field `q`:
+/// `exp((q − 10)/8)` (`docs/audio/speex/tracer-2026-09.md` §5). The staged
+/// `fold_quant_bound` table is this times a constant `1.0645` at every
+/// index (it is the encoder's decision-boundary set, not the decoder's
+/// reconstruction).
+#[inline]
+pub fn fold_gain_from_index(q: u8) -> f64 {
+    ((f64::from(q) - 10.0) / 8.0).exp()
+}
 
-/// [`folded_hb_excitation_subframe_shaped`] under the r450
-/// crossover-anchored law (see [`HB_FOLD_CROSSOVER_SCALE`]): the fold
-/// scale is `s = 0.8518·g·|A_hb(π)|/|A_lb(π)|`, where `gain` is the
-/// staged 32-level folded-gain reconstruction, `lpc` the sub-frame's
-/// interpolated high-band LPC set and `lb_api` the same sub-frame's
-/// low-band `|A_lb(π)|`
-/// ([`crate::NarrowbandDecoder::last_crossover_response`]).
+/// Encoder inverse of [`fold_gain_from_index`]: the 5-bit index whose
+/// `exp((q − 10)/8)` is nearest `g` in the log domain (clamped to
+/// `0..=31`; a non-positive / non-finite `g` maps to `0`).
+#[inline]
+pub fn fold_index_for_gain(g: f64) -> u8 {
+    if !(g.is_finite() && g > 0.0) {
+        return 0;
+    }
+    (8.0 * g.ln() + 10.0).round().clamp(0.0, 31.0) as u8
+}
+
+/// The fold constant `φ` of the wideband (4–8 kHz) mode-1 layer:
+/// `x[n] = φ · exp((q−10)/8) / R · (−1)ⁿ · src[n]`, with
+/// `R = (A_nb(−1)+0.01)/(A_hb(−1)+0.01)` from the sub-frame's interpolated
+/// quantised LPC and `src` the narrowband fixed-codebook innovation
+/// including its gain (`docs/audio/speex/tracer-2026-09.md` §5; verified
+/// by `tests/fold_gain_trace_fixture.rs` against the staged per-sub-frame
+/// traces). Supersedes the r450 probe reading
+/// `0.8518 · fold_quant_bound[q] · |A_hb(π)|/|A_lb(π)|` — the same law
+/// expressed through the boundary table (`0.8518 ≈ 0.9/1.0645`) without
+/// the `+0.01` regulariser that made its deepest envelopes read high.
+pub const HB_FOLD_CROSSOVER_SCALE: f64 = 0.9;
+
+/// Exact wideband mode-1 fold of one sub-frame (see
+/// [`HB_FOLD_CROSSOVER_SCALE`]): `gain` is the folded-gain base
+/// [`fold_gain_from_index`]`(q)`, `lpc` the sub-frame's interpolated
+/// high-band LPC set and `lb_api` the same sub-frame's narrowband
+/// `A_lb(−1)` ([`crate::NarrowbandDecoder::last_crossover_response`]).
 #[inline]
 pub fn folded_hb_excitation_subframe_crossover(
     exc_lb: &[f32; HB_SUBFRAME_SAMPLES],
@@ -303,18 +305,28 @@ pub fn folded_hb_excitation_subframe_crossover(
     lpc: &[f64; HB_LPC_ORDER],
     lb_api: f64,
 ) -> [f64; HB_SUBFRAME_SAMPLES] {
-    let mut hb_api = 1.0f64;
-    for (j, &aj) in lpc.iter().enumerate() {
-        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-        hb_api -= aj * sgn;
-    }
-    let k = HB_FOLD_CROSSOVER_SCALE * f64::from(gain) * hb_api.abs() / lb_api.max(1e-9);
+    let k = HB_FOLD_CROSSOVER_SCALE * f64::from(gain) * hb_fold_ratio_inv(lpc, lb_api);
     let mut out = [0.0f64; HB_SUBFRAME_SAMPLES];
     for (n, (slot, &e)) in out.iter_mut().zip(exc_lb.iter()).enumerate() {
         let folded = k * f64::from(e);
         *slot = if n % 2 == 0 { folded } else { -folded };
     }
     out
+}
+
+/// `1/R = (A_hb(−1)+0.01)/(A_lb(−1)+0.01)` for one sub-frame — the
+/// inverse crossover ratio both 4 kHz gain laws scale by
+/// (`tracer-2026-09.md` §1.1 step 4, §5). `lpc` is the high-band set in
+/// the crate's `A(z) = 1 − Σ a[i]·z⁻⁽ⁱ⁺¹⁾` convention, evaluated signed.
+#[inline]
+pub fn hb_fold_ratio_inv(lpc: &[f64; HB_LPC_ORDER], lb_api: f64) -> f64 {
+    let mut hb_api = 1.0f64;
+    for (j, &aj) in lpc.iter().enumerate() {
+        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+        hb_api -= aj * sgn;
+    }
+    let reg = crate::gain_scaled_hb_innovation::HB_CROSSOVER_REGULARISER;
+    (hb_api + reg) / (lb_api + reg)
 }
 
 #[inline]
@@ -442,64 +454,39 @@ pub fn folded_uwb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) 
     }
 }
 
-/// Scale of the r450 ultra-wideband **outer** (second-layer) fold law,
-/// measured by crafted 3-layer streams
-/// (`tests/fixtures/hb-gain-probes/NOTES.md`): with the first high
-/// band carrying known random innovation and the second layer's 5-bit
-/// gain / envelope and the first band's envelope swept one at a time,
-/// the reference's 8–16 kHz band is
-///
-/// ```text
-///   e_l2[n] = UWB_FOLD_CROSSOVER_SCALE · fold_quant_bound[g5]
-///             · |A_l2(π)| / |A_hb1(0)| · (−1)ⁿ · zerostuff(e_hb1)[n]
-/// ```
-///
-/// — the fold **source** is the first high band's excitation
-/// **zero-stuffed** to the 16 kHz half-band rate (both spectral
-/// images kept: per-sub-frame fit score 0.98–0.997, vs 0.61–0.67 for
-/// the r403 linear-interpolated source, which is superseded), the law
-/// is linear over the whole staged gain table (flat to 0.3 %),
-/// proportional to the second layer's own crossover response
-/// `|A_l2(π)|` and inversely proportional to the first band's
-/// response at its **zero edge** `|A_hb1(0)|` (constant to 2.5 % over
-/// a 10× sweep). Read as spectral continuity at the **8 kHz join**:
-/// after the two QMF folds, the second layer's `π` edge and the first
-/// band's `0` edge both land at 8 kHz, so the transmitted gain codes
-/// the amplitude ratio of the two layers there — the same
-/// architecture as the 4 kHz laws
-/// ([`HB_FOLD_CROSSOVER_SCALE`],
-/// [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`]).
-/// The r403 `UWB_FOLD_RECONSTRUCTION_MULT = 1/16` flat constant is
-/// superseded.
-pub const UWB_FOLD_CROSSOVER_SCALE: f64 = 0.664;
+/// The fold constant `φ` of the ultra-wideband (8–16 kHz) layer:
+/// `x[n] = φ · exp((q−10)/8) / R · src[n]` with
+/// `R = (A_inner(+1)+0.01)/(A_l2(−1)+0.01)` — the inner high band is
+/// spectrally inverted, so its 8 kHz edge sits at internal DC — and
+/// `src` the inner high band's **excitation zero-stuffed** to 16 kHz
+/// (`src[2m] = x_inner[m]`, `src[2m+1] = 0`, which makes the `(−1)ⁿ`
+/// fold invisible). `docs/audio/speex/tracer-2026-09.md` §5–§6; verified
+/// by `tests/fold_gain_trace_fixture.rs`. Supersedes the r450 probe
+/// reading `0.664 · fold_quant_bound[q] · |A_l2(π)|/|A_hb1(0)|`
+/// (`0.664 ≈ 0.7/1.0645`, no regulariser).
+pub const UWB_FOLD_CROSSOVER_SCALE: f64 = 0.7;
 
 /// Reconstruct one ultra-wideband second-layer sub-frame's excitation
-/// under the r450 outer crossover-anchored fold law (see
-/// [`UWB_FOLD_CROSSOVER_SCALE`]).
+/// under the exact outer fold law (see [`UWB_FOLD_CROSSOVER_SCALE`]).
 ///
 /// `exc_hb1` is the embedded wideband layer's high-band excitation for
-/// the matching 40-sample sub-frame; `gain` the staged 32-level folded
-/// gain; `l2_lpc` the second layer's interpolated LPC set for this
-/// sub-frame; `hb1_a0` the first band's `|A_hb1(0)|` for the same
-/// sub-frame ([`crate::WidebandDecoder::last_hb_env`]). Output is the
-/// 80-sample 16 kHz half-band excitation (zero-stuffed source, `(−1)ⁿ`
-/// fold).
+/// the matching 40-sample sub-frame; `gain` the folded-gain base
+/// [`fold_gain_from_index`]`(q)`; `l2_lpc` the second layer's
+/// interpolated LPC set for this sub-frame; `hb1_a0` the first band's
+/// signed `A_hb1(+1)` for the same sub-frame
+/// ([`crate::WidebandDecoder::last_hb_env`]). Output is the 80-sample
+/// 16 kHz half-band excitation.
 pub fn folded_uwb_excitation_subframe_crossover(
     exc_hb1: &[f32],
     gain: f32,
     l2_lpc: &[f64; HB_LPC_ORDER],
     hb1_a0: f64,
 ) -> Vec<f64> {
-    let mut l2_api = 1.0f64;
-    for (j, &aj) in l2_lpc.iter().enumerate() {
-        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-        l2_api -= aj * sgn;
-    }
-    let k = UWB_FOLD_CROSSOVER_SCALE * f64::from(gain) * l2_api.abs() / hb1_a0.max(1e-9);
+    let k = UWB_FOLD_CROSSOVER_SCALE * f64::from(gain) * hb_fold_ratio_inv(l2_lpc, hb1_a0);
     let mut out = vec![0.0f64; exc_hb1.len() * 2];
     for (i, &v) in exc_hb1.iter().enumerate() {
-        // zero-stuff: (v, 0) — then the (−1)ⁿ fold; stuffed zeros stay
-        // zero either way, so only the even positions carry signal.
+        // zero-stuff: (v, 0) — the (−1)ⁿ fold leaves the even
+        // positions' sign unchanged and the stuffed zeros zero.
         out[2 * i] = k * f64::from(v);
     }
     out

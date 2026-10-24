@@ -267,9 +267,8 @@ pub fn synthesise_high_band_frame_folded_exc(
 /// band's per-sub-frame **crossover amplitude** threaded (r450).
 ///
 /// `hb_gain_base` carries, per sub-frame, the pair
-/// `(rms(e_lb)/|A_lb(π)|, |A_lb(π)|)` — the low band's spectral
-/// amplitude at the 4 kHz QMF crossover plus the crossover response
-/// itself — and the frame's **innovation-only** low-band excitation
+/// `(e_L/(A_lb(−1)+0.01), A_lb(−1))` — the low-band term of the exact
+/// modes-2/3/4 gain law plus the crossover response itself — and the frame's **innovation-only** low-band excitation
 /// `g·c[n]`, the decoder state the r450 crafted-stream probes measure
 /// as the base/source of both high-band absolute gain laws (modes
 /// 2/3/4: [`crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`];
@@ -371,15 +370,20 @@ pub fn synthesise_high_band_frame_leveled_env(
                     .map(crate::gain_reconstruction::reconstruct_hb_exc_gain)
                     .unwrap_or(0.0);
             match hb_gain_base {
-                // r450 crossover-anchored fold law over the
-                // innovation-only source (crate::hb_fold docs).
+                // Exact fold law (tracer-2026-09.md §5) over the
+                // innovation-only source: the gain base is
+                // exp((q−10)/8) of the raw 5-bit field.
                 Some((base, lb_innovation)) => {
                     let mut lb = [0.0f32; HB_SUBFRAME_SAMPLES];
                     lb.copy_from_slice(
                         &lb_innovation[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES],
                     );
+                    let q = body.subframes[sf].excitation_gain_index;
                     crate::hb_fold::folded_hb_excitation_subframe_crossover(
-                        &lb, gain, &lpc, base[sf].1,
+                        &lb,
+                        crate::hb_fold::fold_gain_from_index(q) as f32,
+                        &lpc,
+                        base[sf].1,
                     )
                 }
                 // legacy r410 crossover-shaped law over the composed
@@ -399,14 +403,15 @@ pub fn synthesise_high_band_frame_leveled_env(
                     submode,
                     sf,
                     hb_gain_base.map(|(b, _)| {
-                        // |A_hb(e^{jπ})| of this sub-frame's interpolated
-                        // high-band LPC (z⁻ⁱ at z = −1 is (−1)ⁱ).
+                        // Signed A_hb(−1) of this sub-frame's interpolated
+                        // high-band LPC (z⁻ⁱ at z = −1 is (−1)ⁱ;
+                        // tracer-2026-09.md §1.1 step 3: no abs).
                         let mut api = 1.0f64;
                         for (j, &aj) in lpc.iter().enumerate() {
                             let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
                             api -= aj * sgn;
                         }
-                        (b[sf].0, api.abs())
+                        (b[sf].0, api)
                     }),
                 )?;
             // Promote the f32 excitation to f64 for the synthesis

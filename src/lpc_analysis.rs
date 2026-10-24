@@ -185,6 +185,22 @@ pub fn levinson_durbin(r: &[f64; AUTOCORR_LAGS]) -> LpcCoefficients {
 /// returning the residual error. Shared by the narrowband (order-10)
 /// and high-band (order-8) analysis paths.
 fn levinson_durbin_general(r: &[f64], a: &mut [f64]) -> f64 {
+    let error = levinson_durbin_plus(r, a);
+    // The recursion below runs in the `A(z) = 1 + Σ c[i]·z⁻⁽ⁱ⁺¹⁾` form;
+    // the crate-wide convention (the one `lpc_to_lsp` and the decoder's
+    // `lsp_to_lpc` / synthesis filter share) is `A(z) = 1 − Σ a[i]·z⁻⁽ⁱ⁺¹⁾`,
+    // so the predictor is returned negated. (Before r480 it was returned
+    // un-negated: every speech-like envelope then reached `lpc_to_lsp` as
+    // a non-minimum-phase polynomial, the root-find failed and the
+    // encoders silently fell back to the previous / flat envelope.)
+    for v in a.iter_mut() {
+        *v = -*v;
+    }
+    error
+}
+
+/// Levinson-Durbin in the `A(z) = 1 + Σ c[i]·z⁻⁽ⁱ⁺¹⁾` form.
+fn levinson_durbin_plus(r: &[f64], a: &mut [f64]) -> f64 {
     let order = a.len();
     debug_assert!(r.len() > order);
     let mut error = r[0];
@@ -377,9 +393,9 @@ mod tests {
     fn levinson_recovers_known_ar_process_filter() {
         // Generate a signal from a known order-2 AR process
         // x[n] = a1·x[n-1] + a2·x[n-2] + impulse, then check the
-        // recovered predictor approximates (-a1, -a2) in the leading
+        // recovered predictor approximates (a1, a2) in the leading
         // coefficients (A(z) = 1 - a1 z^-1 - a2 z^-2 → predictor a[0]
-        // = -a1_true under our sign convention).
+        // = a1_true under the crate's `1 − Σ a` convention).
         let a1 = 0.6f64;
         let a2 = -0.3f64;
         let n = LPC_ANALYSIS_WINDOW_LEN + 50;
@@ -395,18 +411,18 @@ mod tests {
         let buf = &x[50..];
         let c = analyse(buf).unwrap();
         // The recovered predictor's leading two coefficients should be
-        // close to -a1, -a2 (the AR coefficients enter A(z) negated).
+        // close to a1, a2 (`A(z) = 1 − Σ a[i] z⁻⁽ⁱ⁺¹⁾`).
         assert!(
-            (c.a[0] + a1).abs() < 0.2,
+            (c.a[0] - a1).abs() < 0.2,
             "a[0]={} should be near {}",
             c.a[0],
-            -a1
+            a1
         );
         assert!(
-            (c.a[1] + a2).abs() < 0.2,
+            (c.a[1] - a2).abs() < 0.2,
             "a[1]={} should be near {}",
             c.a[1],
-            -a2
+            a2
         );
     }
 
@@ -479,16 +495,16 @@ mod tests {
         }
         let c = analyse_hb(&x[50..]).unwrap();
         assert!(
-            (c.a[0] + a1).abs() < 0.2,
+            (c.a[0] - a1).abs() < 0.2,
             "a[0]={} should be near {}",
             c.a[0],
-            -a1
+            a1
         );
         assert!(
-            (c.a[1] + a2).abs() < 0.2,
+            (c.a[1] - a2).abs() < 0.2,
             "a[1]={} should be near {}",
             c.a[1],
-            -a2
+            a2
         );
     }
 

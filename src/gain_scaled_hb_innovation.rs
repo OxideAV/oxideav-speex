@@ -115,60 +115,69 @@ use crate::wideband::{WidebandHighBandBody, WidebandHighBandSubmode};
 /// all three innovation sub-modes.
 pub const HB_INNOVATION_POLARITY: f32 = 1.0;
 
-/// The crossover-anchored absolute high-band innovation gain for the
-/// gain-correction sub-modes (Table 10.1 modes 2/3/4), measured r450 by
-/// crafted-bitstream black-box probing (`tests/fixtures/hb-gain-probes/
-/// NOTES.md`): with the crate's own writers emitting wideband streams
-/// whose per-sub-frame gain index, innovation content, low-band level,
-/// low-band envelope, low-band innovation and high-band envelope were
-/// varied **one at a time**, the reference decode's per-sub-frame
-/// high-band gain is
+/// The `+0.01` regulariser added to both sides of the crossover ratio
+/// `R = (A_nb(−1) + 0.01) / (A_hb(−1) + 0.01)`
+/// (`docs/audio/speex/tracer-2026-09.md` §1.1 step 4 and §5). It is
+/// what the r440 "deep-envelope compression" residual actually was.
+pub const HB_CROSSOVER_REGULARISER: f64 = 0.01;
+
+/// The `+0.1` floor under the root of every per-sub-frame excitation
+/// RMS the high-band gain law reads: `e = sqrt(0.1 + mean(x²))`
+/// (`tracer-2026-09.md` §1.1 step 5, float build).
+pub const HB_RMS_FLOOR: f64 = 0.1;
+
+/// Floored per-sub-frame RMS `sqrt(0.1 + (1/N)·Σ x²)` — the `e_L` of
+/// `tracer-2026-09.md` §1.1 step 5 (and the encoder's `e_H` of §1.3).
+#[inline]
+pub fn floored_rms(x: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0f64;
+    let mut n = 0usize;
+    for v in x {
+        sum += v * v;
+        n += 1;
+    }
+    if n == 0 {
+        return HB_RMS_FLOOR.sqrt();
+    }
+    (HB_RMS_FLOOR + sum / n as f64).sqrt()
+}
+
+/// The exact absolute high-band innovation gain for the gain-correction
+/// sub-modes (Table 10.1 modes 2/3/4), `docs/audio/speex/tracer-2026-09.md`
+/// §1.1:
 ///
 /// ```text
-///   g_hb = gc_recon · |A_hb(π)| · rms(e_lb) / |A_lb(π)|
-///   gc_recon  = 0.87360 · gc_quant_bound[q]      (staged table + multiplier)
-///   rms(e_lb) = same sub-frame's low-band excitation RMS
-///   |A_lb(π)| = same sub-frame's interpolated low-band LPC analysis
-///               response at the 4 kHz QMF crossover (z = −1)
-///   |A_hb(π)| = same sub-frame's interpolated high-band LPC analysis
-///               response at its own π edge — the same 4 kHz crossover
-///               after the QMF fold
+///   S   = g_c · e_L / R
+///   g_c = 0.87360 · bound[q]                     (staged table + multiplier)
+///   e_L = sqrt(0.1 + mean e_nb²)                 (same sub-frame's NB excitation)
+///   R   = (A_nb(−1) + 0.01) / (A_hb(−1) + 0.01)  (sub-frame's interpolated
+///                                                 quantised LPC, signed)
 /// ```
 ///
-/// with **no further constant**: an eight-point sweep of the high-band
-/// LSP pair puts `g/(gc_bound·rms(e_lb)/|A_lb(π)|·|A_hb(π)|)` at
-/// 0.852…0.884 (mean ≈ 0.873) over a 66× `|A_hb(π)|` range — the staged
-/// `0.87360` reconstruction multiplier itself. Read as spectral
-/// continuity: since the synthesis filter divides by `A_hb`, the
-/// reconstructed high band's amplitude at the fold equals
-/// `gc_recon ·` (the low band's spectral amplitude at the crossover) —
-/// the transmitted 4-bit index codes the *ratio of the two bands at
-/// 4 kHz*, mirroring the mode-1 folded-gain law's crossover shaping
-/// (`crate::hb_fold`).
+/// with stage 2 of mode 4 added at `0.4·S` and **no gain memory**. The
+/// same law holds for modes 2, 3 and 4. Verified by
+/// `tests/hb_gain_trace_fixture.rs` against the staged per-sub-frame
+/// traces of five streams (`hb-mode4-wb-q10{,-lvl20,-tilt}`,
+/// `hb-mode2-wb-q6`, `hb-mode3-wb-q8`): this crate's decoder state
+/// reproduces the traced `S` to a few hundredths of a dB at the median.
+/// It supersedes the r450 probe reading `g_c·|A_hb(π)|·rms(e_lb)/|A_lb(π)|`
+/// (the same law without the two regularisers, which drifted by up to
+/// 22 dB on quiet sub-frames).
 ///
-/// Measured properties (each pinned by a dedicated probe family): the
-/// correction enters **linearly** (constant-gc grids give
-/// `g/gc_bound[q]` flat to 0.3 % over the full 4-bit range), the
-/// innovation energy does not enter (codebook-row sweeps move the
-/// fitted gain < 1 %), the response is instantaneous with **no
-/// backward-adaptive memory** (steps in any driver settle within the
-/// same sub-frame; 32 frames of all-zero innovation leave the gain
-/// unchanged on resumption), and one law with one constant fits modes
-/// 2, 3 and 4. The earlier r440 fixture-fitted `(gc·lb_rms)²` reading —
-/// and provenance/08's state-derivation direction — is superseded: the
-/// apparent squared law was natural-speech co-variation between the low
-/// band's level and its crossover response. Residual: the two deepest
-/// swept envelopes (`|A_hb(π)| ≤ 0.06`) sit 7…40 % off the law through
-/// this crate's `|A(π)|` — the same near-degenerate-envelope divergence
-/// `hb-folded-gain.md` §7.6 records for the fold path.
-///
-/// `lb_base` is the per-sub-frame low-band crossover amplitude
-/// `rms(e_lb)/|A_lb(π)|` (see
-/// [`crate::NarrowbandDecoder::last_crossover_response`]); `hb_api` is
-/// `|A_hb(π)|` from the same sub-frame's interpolated high-band LPC.
+/// `lb_base` is the low-band term `e_L / (A_nb(−1) + 0.01)`; `hb_api` is
+/// the signed `A_hb(−1)` of the same sub-frame's interpolated high-band
+/// LPC.
 #[inline]
 pub fn hb_gc_crossover_gain(gc_recon: f32, lb_base: f64, hb_api: f64) -> f64 {
-    f64::from(gc_recon) * hb_api * lb_base
+    f64::from(gc_recon) * lb_base * (hb_api + HB_CROSSOVER_REGULARISER)
+}
+
+/// Low-band term of [`hb_gc_crossover_gain`]: `e_L / (A_nb(−1) + 0.01)`
+/// for one 40-sample narrowband excitation sub-frame `seg` and its
+/// crossover response `nb_api`.
+#[inline]
+pub fn hb_gain_lb_base(seg: &[f32], nb_api: f64) -> f64 {
+    floored_rms(seg.iter().map(|&v| f64::from(v))) / (nb_api + HB_CROSSOVER_REGULARISER)
 }
 
 /// Number of gain-scaled high-band excitation samples per CELP
@@ -231,9 +240,8 @@ pub fn gain_scaled_hb_innovation_sample(c_raw: i16, gain: f32) -> f32 {
 ///   [`crate::reconstruct_hb_exc_gain`] — the per-sub-frame scalar gain.
 /// * [`gain_scaled_hb_innovation_subframe`] — the scaling.
 ///
-/// Returns [`HbInnovationError::Undocumented`] for high-band mode 4
-/// (whose codebook binding the staged inventory does not pin) and
-/// [`HbInnovationError::IndexOutOfRange`] for a malformed index. For a
+/// Returns [`HbInnovationError::IndexOutOfRange`] for a malformed index
+/// (mode 4 decodes through the two-stage `sv8-128` binding). For a
 /// hand-built non-conforming sub-mode gain budget (none of {0, 4, 5})
 /// the gain resolves to `0.0` and the excitation is all-zero — the same
 /// graceful degradation [`crate::HbExcitationGainIndex::from_body`]
@@ -250,11 +258,11 @@ pub fn gain_scaled_hb_innovation_from_body(
 /// **crossover-anchored gain base** wired.
 ///
 /// `hb_gain_base` is this sub-frame's
-/// `(rms(e_lb)/|A_lb(π)|, |A_hb(π)|)` pair — the low band's crossover
-/// amplitude and the high-band envelope's own crossover response, the
-/// decoder state the r450 crafted-stream probes identify as the base of
-/// the modes-2/3/4 absolute innovation gain (see
-/// [`hb_gc_crossover_gain`]). When `Some`, the gain-correction
+/// `(e_L/(A_nb(−1)+0.01), A_hb(−1))` pair — the low-band term
+/// ([`hb_gain_lb_base`]) and the high-band envelope's own signed
+/// crossover response, the inputs of the exact modes-2/3/4 absolute
+/// innovation gain law ([`hb_gc_crossover_gain`],
+/// `tracer-2026-09.md` §1.1). When `Some`, the gain-correction
 /// sub-modes scale their innovation by the measured absolute law; when
 /// `None`, the legacy correction-only scaling is preserved (the
 /// stateless single-frame entries keep their historical behaviour).

@@ -104,7 +104,7 @@ use crate::decoder::ControlMessage;
 use crate::frame::{NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
-use crate::hb_fold::folded_uwb_excitation_subframe_crossover;
+use crate::hb_fold::{fold_gain_from_index, folded_uwb_excitation_subframe_crossover};
 use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::hb_synthesis::HbSynthesisFilter;
 use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
@@ -249,6 +249,9 @@ pub struct UltraWidebandDecoder {
     /// pre-base) for the §9.1 interpolation, mirroring the wideband
     /// high-band convention.
     prev_layer2_lsp_delta_q10: Option<[i32; HB_LPC_ORDER]>,
+    /// Per-sub-frame signed `A_l2(−1)` of the most recent frame's
+    /// interpolated second-layer envelope.
+    last_layer2_api: [f64; UWB_HB_SUBFRAMES],
 }
 
 impl Default for UltraWidebandDecoder {
@@ -265,6 +268,7 @@ impl UltraWidebandDecoder {
             outer_qmf: QmfSynthesis::new(),
             layer2_filter: HbSynthesisFilter::new(),
             prev_layer2_lsp_delta_q10: None,
+            last_layer2_api: [1.0; UWB_HB_SUBFRAMES],
         }
     }
 
@@ -368,13 +372,12 @@ impl UltraWidebandDecoder {
             }
         }
 
-        // --- Second-layer fold (r450 crafted-stream law, see
+        // --- Second-layer fold (exact law, tracer-2026-09.md §5–§6;
         // `crate::hb_fold::UWB_FOLD_CROSSOVER_SCALE`): the fold source
         // is the embedded first high band's excitation **zero-stuffed**
         // to the 16 kHz half-band rate, scaled per sub-frame by
-        // `0.664·fold[g5]·|A_l2(π)|/|A_hb1(0)|` — spectral continuity
-        // at the 8 kHz join. Supersedes the r403 linear-interpolated
-        // source and its 1/16 flat constant. ---
+        // `0.7·exp((q−10)/8)·(A_l2(−1)+0.01)/(A_hb1(+1)+0.01)` —
+        // spectral continuity at the 8 kHz join. ---
         let exc_hb1 = *self.wideband.last_hb_excitation();
         let hb1_env = *self.wideband.last_hb_env();
 
@@ -396,11 +399,17 @@ impl UltraWidebandDecoder {
         let subframe_len = UWB_HALF_BAND_FRAME / UWB_HB_SUBFRAMES;
         let mut uwb_high_band = Box::new([0.0f64; UWB_HALF_BAND_FRAME]);
         for sf in 0..UWB_HB_SUBFRAMES {
+            let mut api = 1.0f64;
+            for (j, &aj) in lpc_sets[sf].iter().enumerate() {
+                let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
+                api -= aj * sgn;
+            }
+            self.last_layer2_api[sf] = api;
             let range = sf * subframe_len..(sf + 1) * subframe_len;
             let e = if submode.excitation_gain_bits > 0 {
                 folded_uwb_excitation_subframe_crossover(
                     &exc_hb1[sf * (subframe_len / 2)..(sf + 1) * (subframe_len / 2)],
-                    uwb_gains[sf],
+                    fold_gain_from_index(body.subframes[sf].excitation_gain_index) as f32,
                     &lpc_sets[sf],
                     hb1_env[sf].1,
                 )
@@ -431,6 +440,15 @@ impl UltraWidebandDecoder {
             uwb_high_band,
             uwb_pcm,
         })
+    }
+
+    /// Per-sub-frame signed `A_l2(−1)` of the most recently decoded
+    /// frame's interpolated second-layer (8–16 kHz) envelope — the
+    /// denominator side of the outer fold's crossover ratio
+    /// ([`crate::hb_fold::UWB_FOLD_CROSSOVER_SCALE`]). Diagnostics.
+    #[doc(hidden)]
+    pub fn last_layer2_api(&self) -> &[f64; UWB_HB_SUBFRAMES] {
+        &self.last_layer2_api
     }
 
     /// Read-only view of the embedded wideband decoder (diagnostics).

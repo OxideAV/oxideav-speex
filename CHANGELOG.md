@@ -6,8 +6,74 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every encoder transmitted a flat spectral envelope.** The LPC
+  analysis (`lpc_analyse` / `hb_lpc_analyse` / `levinson_durbin`)
+  returned its predictor in the `A(z) = 1 + Σ a z⁻ⁱ` form while its
+  docs, `lpc_to_lsp` and the decoder use `1 − Σ a z⁻ⁱ`; every
+  speech-like envelope then reached the LSP root-finder as a
+  non-minimum-phase polynomial, the root-find failed (100 % of frames
+  on the staged speech sources) and the narrowband, wideband and
+  ultra-wideband encoders silently fell back to the flat base
+  envelope. Voiced frames decoded 10–15 dB hot, unvoiced ones 7 dB
+  quiet, at every quality. The analysis now returns the documented
+  convention. Wideband q8 speech goes from 1.4 to 11.3 dB SNR
+  (black-box `speexdec --no-enh`; the reference encoder scores 11.1 dB
+  on the same input and metric).
+- Narrowband mode 7 (quality 10) estimated its frame gain without a
+  codebook (32× hot, pinned at the top OL-gain index); mode 1
+  (quality 0) did the same against its unit-variance noise innovation.
+- The ultra-wideband encoder still chose its second-layer gains against
+  the r403 linear-interpolated source and flat `1/16` constant the
+  decoder had dropped in r450 (8–16 kHz band 7 dB hot).
+
+### Added
+
+- **Wideband / ultra-wideband quality 10 through the registry**
+  (`make_encoder` with `quality = 10` at 16 / 32 kHz, issue #7: the
+  32 kHz 44 kbit/s default). The factory no longer rejects it; NB 7 +
+  HB mode 4 (+ the UWB mode-1 layer) encode end to end. Measured
+  encode → decode against the input (`tests/encoder_fidelity_e2e.rs`):
+  WB 13.0 dB on speech, UWB 12.1 dB below 7 kHz with every band level
+  within 1.5 dB; the reference `speexdec` decodes the same streams to
+  the same figures (±0.2 dB), stereo pans included.
+- `hb_encoder_gain_index` — the reference encoder's 4-bit high-band
+  gain rule (`tracer-2026-09.md` §1.3), now what the wideband encoder
+  transmits; it reproduces all 1 216 decisions of the staged
+  `hb-encoder-gain-trace.csv` files.
+- Tracer-round gates (`tests/hb_gain_trace_fixture.rs`,
+  `tests/fold_gain_trace_fixture.rs`, fixtures mirrored from
+  `docs/audio/speex/fixtures/`): the decoder's per-sub-frame crossover
+  ratios and gains against the staged traces of
+  `hb-mode4-wb-q10{,-lvl20,-tilt}`, `hb-mode4-uwb-q10`, `hb-mode2-wb-q6`,
+  `hb-mode3-wb-q8`, `wb-mode1-folded` and `uwb-speech-3layer`.
+- `floored_rms`, `hb_gain_lb_base`, `HB_CROSSOVER_REGULARISER`,
+  `HB_RMS_FLOOR` (the law's building blocks).
+
 ### Changed
 
+- **Every high-band gain is now the exact Tracer-round law**
+  (`docs/audio/speex/tracer-2026-09.md`), decode and encode:
+  modes 2/3/4 `S = 0.8736·bound[q]·e_L/R` with
+  `e_L = sqrt(0.1 + mean e_nb²)` and
+  `R = (A_nb(−1)+0.01)/(A_hb(−1)+0.01)`; the WB fold
+  `0.9·exp((q−10)/8)/R`; the UWB fold `0.7·exp((q−10)/8)/R` with the
+  inner band's `A(+1)`. The r450 probe readings lacked the two
+  regularisers (up to 22 dB off on quiet sub-frames) and read the fold
+  constants through the boundary table (`0.8518 = 0.9/1.0645`,
+  `0.664 = 0.7/1.0645`). `HB_FOLD_CROSSOVER_SCALE` /
+  `UWB_FOLD_CROSSOVER_SCALE` are now the `φ` constants 0.9 / 0.7 and
+  the `*_crossover` fold helpers take `exp((q−10)/8)` as their gain.
+  Conformance: `hb-mode4-wb-q10` sub-bands 13.7 / 21.1 → **25.6 /
+  28.6 dB** (energy 1.119 → 1.002); `hb-mode4-uwb-q10` 20.2 →
+  **25.0 dB**; the mode-1 tone oracle's folded band 44.1 → 57.4 dB,
+  the UWB tone fixture's outer band 46.8 → 73.4 dB. Floors raised.
+- The wideband high-band shape search now runs at the single gain the
+  reference rule selects (it previously searched all 16 levels for the
+  minimum residual error, which under-shot energy on noise-like bands).
+- The ultra-wideband encoder interpolates its second-layer envelope per
+  sub-frame (§9.1) exactly as the decoder does.
 - edition 2024, MSRV 1.95
 
 ## [0.0.10](https://github.com/OxideAV/oxideav-speex/compare/v0.0.9...v0.0.10) - 2026-08-23

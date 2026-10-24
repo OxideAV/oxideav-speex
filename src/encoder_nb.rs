@@ -591,11 +591,15 @@ impl NarrowbandEncoder {
         // The decode law scales codebook rows by INNOVATION_CODEBOOK_SCALE
         // (Q5 signed-char rows, see `gain_scaled_innovation`), so the
         // transmitted-gain domain divides the row RMS by the same factor.
-        let cb_rms = InnovationMapping::for_mode(submode)
-            .documented_codebook()
-            .map(codebook_rms)
-            .unwrap_or(1.0)
-            * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        // No innovation codebook (mode 1, the vocoder): the decoder's
+        // innovation is unit-variance noise times the frame gain
+        // (`tracer-2026-09.md` §4), so the gain targets the residual RMS
+        // directly.
+        let Some(cb) = InnovationMapping::for_mode(submode).documented_codebook() else {
+            return rms;
+        };
+        let cb_rms =
+            codebook_rms(cb) * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
         if cb_rms > 0.0 { rms / cb_rms } else { rms }
     }
 
@@ -978,10 +982,12 @@ fn codebook_rms(codebook: InnovationCodebook) -> f64 {
 }
 
 impl InnovationMapping {
-    /// The documented codebook shape, if this mapping is documented.
+    /// The documented codebook shape, if this mapping is documented
+    /// (single- or two-stage; mode 7's stages share one codebook).
     fn documented_codebook(self) -> Option<InnovationCodebook> {
         match self {
-            InnovationMapping::Documented { codebook, .. } => Some(codebook),
+            InnovationMapping::Documented { codebook, .. }
+            | InnovationMapping::DocumentedTwoStage { codebook, .. } => Some(codebook),
             _ => None,
         }
     }

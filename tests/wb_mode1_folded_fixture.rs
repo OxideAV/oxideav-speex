@@ -171,11 +171,12 @@ fn folded_high_band_decode_matches_reference() {
 
     let (hsnr, hcorr) = score(&our_high, &ref_high, REF_LEAD_HALF);
     println!("WB high: {hsnr:.2} dB corr {hcorr:.5}");
-    // r450 crossover-anchored fold law: measured 44.1 dB / corr
-    // 1.00000 (was 38.9 dB under the fitted ceiling law).
+    // r480 exact fold law (tracer-2026-09.md §5): measured 57.4 dB /
+    // corr 1.00000 (r450 crossover reading 44.1 dB; fitted ceiling law
+    // 38.9 dB).
     assert!(
-        hsnr >= 40.0,
-        "high-band (folded) absolute SNR {hsnr:.2} dB < 40 dB"
+        hsnr >= 52.0,
+        "high-band (folded) absolute SNR {hsnr:.2} dB < 52 dB"
     );
     assert!(hcorr >= 0.999, "high-band correlation {hcorr:.4} < 0.999");
 

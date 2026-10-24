@@ -64,10 +64,11 @@
 //! wideband, 32000 → ultra-wideband; §2.2), the `quality` option (0..=10,
 //! default 8) selects the sub-mode ladder ([`crate::quality`]), and each
 //! 20 ms frame is emitted as one self-contained packet
-//! (`frames_per_packet = 1`, mode-15 terminated). Wideband /
-//! ultra-wideband quality 10 needs high-band mode 4, whose
-//! innovation-codebook binding is the remaining recorded docs gap — the
-//! factory rejects it up front. [`Encoder::output_params`] carries the
+//! (`frames_per_packet = 1`, mode-15 terminated). Every quality 0..=10
+//! encodes in every rate class — wideband / ultra-wideband quality 10
+//! (44 kbit/s at 32 kHz) is high-band mode 4, the two-stage `sv8-128`
+//! innovation of `docs/audio/speex/hb-innovation-binding.md` under the
+//! exact gain law of `tracer-2026-09.md` §1. [`Encoder::output_params`] carries the
 //! 80-byte stream header as `extradata` (every numeric field mirrored
 //! from the staged real-capture headers, e.g. `mode_bitstream_version =
 //! 4`).
@@ -497,17 +498,6 @@ impl SpeexFrameworkEncoder {
             )));
         }
         let opts: SpeexEncoderOptions = parse_options(&params.options)?;
-        if opts.quality == 10 && class != RateClass::Narrowband {
-            // WB/UWB quality 10 selects high-band mode 4. Its codebook
-            // binding now *decodes* (crate::hb_innovation two-stage law),
-            // but the encoder mode-4 codebook search + the absolute
-            // per-frame HB-innovation gain law are not yet pinned, so the
-            // factory still declines to *emit* quality 10.
-            return Err(Error::unsupported(
-                "speex: wideband/ultra-wideband quality 10 (high-band mode 4) decodes but \
-                 encoding it is not yet supported; use quality <= 9",
-            ));
-        }
         let inner = match class {
             RateClass::Narrowband => EncoderInner::Nb(Box::default()),
             RateClass::Wideband => EncoderInner::Wb(Box::default()),
@@ -1025,22 +1015,57 @@ mod tests {
     }
 
     #[test]
-    fn nb_quality_10_encodes_and_wb_uwb_quality_10_reports_docs_gap() {
-        // NB quality 10 = the r438-bound two-stage mode 7.
-        let mut nb = audio_params(8_000, 1);
-        nb.options.insert("quality", "10");
-        let mut enc = make_encoder(&nb).unwrap();
-        enc.send_frame(&tone_frame(160, 8_000.0, 1, 0)).unwrap();
-        assert_eq!(drain_packets(enc.as_mut()).len(), 1);
-
-        // WB/UWB quality 10 needs the docs-gapped high-band mode 4.
-        for rate in [16_000u32, 32_000] {
+    fn quality_10_encodes_and_decodes_in_every_rate_class() {
+        // NB q10 = two-stage mode 7; WB/UWB q10 = NB 7 + HB mode 4
+        // (+ the UWB mode-1 layer) — the reporter's 32 kHz 44 kbit/s
+        // default among them (issue #7).
+        for (rate, kbps) in [(8_000u32, 24_600u64), (16_000, 42_200), (32_000, 44_000)] {
             let mut p = audio_params(rate, 1);
             p.options.insert("quality", "10");
-            let err = make_encoder(&p).err().expect("factory must reject");
+            let mut enc = make_encoder(&p).unwrap_or_else(|e| panic!("rate {rate}: {e}"));
+            assert_eq!(enc.output_params().bit_rate, Some(kbps), "rate {rate}");
+            let frame_len = (rate / 50) as usize;
+            for k in 0..4 {
+                enc.send_frame(&tone_frame(
+                    frame_len,
+                    f64::from(rate),
+                    1,
+                    k * frame_len as i64,
+                ))
+                .unwrap();
+            }
+            let packets = drain_packets(enc.as_mut());
+            assert_eq!(packets.len(), 4, "rate {rate}");
+            // Each self-contained packet carries one frame at the
+            // nominal rate's bit budget (+ terminator / byte padding).
+            let frame_bits = kbps / 50;
+            for pkt in &packets {
+                let bits = pkt.data.len() as u64 * 8;
+                assert!(
+                    bits >= frame_bits && bits < frame_bits + 16,
+                    "rate {rate}: {bits} bits vs {frame_bits}"
+                );
+            }
+            let mut dec = make_decoder(enc.output_params()).unwrap();
+            let mut energy = 0.0f64;
+            let mut total = 0usize;
+            for pkt in &packets {
+                dec.send_packet(pkt).unwrap();
+                match dec.receive_frame().unwrap() {
+                    Frame::Audio(a) => {
+                        total += a.samples as usize;
+                        for c in a.data[0].as_chunks::<2>().0 {
+                            let v = f64::from(i16::from_le_bytes(*c));
+                            energy += v * v;
+                        }
+                    }
+                    _ => panic!("expected audio"),
+                }
+            }
+            assert_eq!(total, 4 * frame_len, "rate {rate}");
             assert!(
-                err.to_string().contains("not yet supported"),
-                "rate {rate}: {err}"
+                energy / total as f64 > 1e5,
+                "rate {rate}: decoded output is silent"
             );
         }
     }

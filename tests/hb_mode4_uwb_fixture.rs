@@ -377,9 +377,10 @@ fn decode_tracks_reference() {
     //   source normalisation is the recorded `hb-folded-gain.md` §7.4
     //   docs gap.
     //
-    // r450 (crossover-anchored laws through all three layers):
-    // measured full 20.16 dB, bands 0.10 / 0.49 / 0.70 dB.
-    assert!(snr > 17.0, "full-signal SNR {snr:.2} dB < 17 (was 20.16)");
+    // r480 (exact tracer-2026-09.md laws through all three layers):
+    // measured full 25.04 dB, bands 0.09 / 0.30 / 0.45 dB (r450: 20.16 dB,
+    // 0.10 / 0.49 / 0.70 dB).
+    assert!(snr > 23.0, "full-signal SNR {snr:.2} dB < 23 (was 25.04)");
     assert!(
         m[0] < 0.5,
         "0-4 kHz mean |err| {:.2} dB ≥ 0.5 (was 0.10)",

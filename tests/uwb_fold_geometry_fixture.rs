@@ -189,10 +189,11 @@ fn uwb_three_layer_decode_matches_reference() {
     // r450: measured 46.8 dB / corr 1.00000 — the fixture's
     // "independent" outer tones are the zero-stuffed source's spectral
     // images, which the r403 linear-interp source suppressed (the
-    // "structurally cannot reproduce" reading is superseded).
+    // "structurally cannot reproduce" reading is superseded). r480:
+    // 73.4 dB under the exact tracer-2026-09.md §5–§6 outer law.
     assert!(
-        hsnr >= 40.0,
-        "second-layer (folded) SNR {hsnr:.2} dB < 40 dB"
+        hsnr >= 65.0,
+        "second-layer (folded) SNR {hsnr:.2} dB < 65 dB"
     );
     assert!(
         hcorr >= 0.999,

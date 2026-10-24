@@ -29,32 +29,33 @@
 //!    [`crate::hb_subframe_lpc_set_with_base`]), exactly as the decoder
 //!    reconstructs them, so encoder and decoder share one envelope.
 //! 4. **High-band excitation** — per sub-frame: the order-8 LPC residual
-//!    `r[n] = A_hb(z)·x_hb` (continuous analysis history), then the
-//!    open-loop gain quantised against the staged HB gain grid
-//!    ([`crate::gain_reconstruction::quantise_hb_exc_gain`]) and — for
-//!    the modes that carry an excitation-VQ field — the fixed-codebook
-//!    search ([`crate::hb_innovation_search`]) at the *reconstructed*
-//!    gain, so the chosen indices decode to the matched magnitude.
+//!    `r[n] = A_hb(z)·x_hb` (continuous analysis history). For the
+//!    gain-correction modes 2/3/4 the 4-bit field is the reference rule of
+//!    `docs/audio/speex/tracer-2026-09.md` §1.3
+//!    ([`hb_encoder_gain_index`]: the smallest `q` with
+//!    `R·(1+e_H)/(1+e_L) ≤ bound[q]`), and the fixed-codebook search
+//!    ([`crate::hb_innovation_search`]) runs at the gain the decoder will
+//!    apply, `S = 0.8736·bound[q]·e_L/R` (two-stage at `0.4·S` for mode 4).
+//!    For the gain-only mode 1 the 5-bit field is the log-domain match of
+//!    the exact fold law (`x = 0.9·exp((q−10)/8)/R·(−1)ⁿ·c_lb`, §5).
 //! 5. **Pack** — [`crate::hb_encode::encode_wideband_frame`] emits the
 //!    §10.4 embedded layout the [`crate::WidebandDecoder`] walks.
 //!
 //! ## Fidelity
 //!
 //! Functional, not bit-exact — the same posture as the r382 narrowband
-//! encoder: the reference gain normalisation is part of the documented
-//! gain-Q-format gap, so gains are chosen by direct magnitude matching
-//! against the staged reconstruction levels. Supported high-band modes:
-//! 0 (silence), 1 (gain-only), 2 and 3 (documented innovation). Mode 4's
-//! innovation-codebook binding is fully pinned as of r450 (it encodes),
-//! as are the reserved high-rate IDs 5..=7.
+//! encoder. The high-band gain decisions follow the reference rules the
+//! Tracer round staged; the shape searches are this crate's own
+//! (residual-domain, greedy per slot). Every Table 10.1 mode encodes:
+//! 0 (silence), 1 (gain-only) and the innovation modes 2, 3 and 4 (the
+//! quality-10 two-stage `sv8-128` binding of `hb-innovation-binding.md`);
+//! the reserved high-rate IDs 5..=7 are rejected.
 
 use crate::encoder_nb::{EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
 use crate::frame::FrameError;
-use crate::gain_reconstruction::{quantise_hb_exc_gain, reconstruct_hb_exc_gain};
+use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_encode::encode_wideband_frame;
-use crate::hb_innovation::{
-    HB_SUBFRAME_SAMPLES, HbInnovationCodebook, HbInnovationMapping, decode_hb_subframe,
-};
+use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationCodebook, HbInnovationMapping};
 use crate::hb_innovation_search::search_hb_innovation;
 use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
 use crate::hb_lsp_interp::HbSubFrameLsp;
@@ -334,7 +335,6 @@ impl WidebandEncoder {
         let lpc_sets = hb_subframe_lpc_set_with_base(&sub_lsp);
 
         // --- Excitation: per sub-frame gain (+ innovation). ---
-        let gain_bits = submode.excitation_gain_bits;
         let mut subframes = [HighBandSubFrameIndices::default(); HB_SUBFRAMES];
         for (sf, slot) in subframes.iter_mut().enumerate() {
             let block: &[f64] = &hb[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
@@ -343,67 +343,55 @@ impl WidebandEncoder {
             let r_rms =
                 (residual.iter().map(|&x| x * x).sum::<f64>() / HB_SUBFRAME_SAMPLES as f64).sqrt();
 
+            // Crossover ratio R = (A_nb(−1)+0.01)/(A_hb(−1)+0.01) of this
+            // sub-frame's quantised envelopes (tracer-2026-09.md §1.1),
+            // computed from the embedded encoder's own decoded low band.
+            let lb_api = self.low_band.last_crossover_response()[sf];
+            let inv_ratio = crate::hb_fold::hb_fold_ratio_inv(&lpc_sets[sf], lb_api);
+
             match codebook {
                 Some(cb) => {
-                    // Joint gain + shape selection over the staged gain
-                    // grid: per candidate level, greedy shape search at
-                    // the reconstructed gain; the pair minimising the
-                    // decoded error wins. The decode-side gain law for
-                    // the 4-bit correction modes is crossover-anchored
-                    // (r450): g = gc_recon·|A_hb(π)|·rms(e_lb)/|A_lb(π)|,
-                    // so the search scores at that per-sub-frame base.
-                    let base = {
-                        let exc = self.low_band.last_frame_excitation();
-                        let seg = &exc[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
-                        let rms = (seg.iter().map(|&v| v * v).sum::<f64>()
-                            / HB_SUBFRAME_SAMPLES as f64)
-                            .sqrt();
-                        let lb_api = self.low_band.last_crossover_response()[sf];
-                        let mut hb_api = 1.0f64;
-                        for (j, &aj) in lpc_sets[sf].iter().enumerate() {
-                            let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-                            hb_api -= aj * sgn;
-                        }
-                        (hb_api.abs() * rms / lb_api.max(1e-9)).max(1e-9)
-                    };
-                    let (raw_gain, packed) = hb_quantise_gain_and_search(
-                        &residual, gain_bits, submode, cb, count, two_stage, base,
+                    // Exact reference gain rule (tracer-2026-09.md §1.3):
+                    // gain_target = R·(1+e_H)/(1+e_L), the field is the
+                    // smallest q with gain_target ≤ bound[q], and the
+                    // decoder then applies S = 0.8736·bound[q]·e_L/R.
+                    // The shape search runs at that S.
+                    let exc = self.low_band.last_frame_excitation();
+                    let e_l = crate::gain_scaled_hb_innovation::floored_rms(
+                        exc[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES]
+                            .iter()
+                            .copied(),
                     );
+                    let e_h =
+                        crate::gain_scaled_hb_innovation::floored_rms(residual.iter().copied());
+                    let raw_gain = hb_encoder_gain_index(1.0 / inv_ratio, e_h, e_l);
+                    let base = (e_l * inv_ratio).max(1e-9);
+                    let packed =
+                        hb_search_at_gain(&residual, raw_gain, submode, cb, count, two_stage, base);
                     slot.excitation_gain_index = raw_gain;
                     slot.excitation_vq_index = packed;
                 }
                 None => {
-                    // Mode 1: gain-only — the decoder reconstructs by
-                    // folding the low band's **innovation-only**
-                    // excitation with the r450 crossover-anchored law
-                    // (e = 0.8518·g·(|A_hb(π)|/|A_lb(π)|)·(−1)ⁿ·c_lb,
-                    // crate::hb_fold docs), so the transmitted gain is
-                    // the fold-consistent target
-                    // g = rms(residual)·|A_lb(π)| /
-                    //     (0.8518·|A_hb(π)|·rms(c_lb))
-                    // against the embedded narrowband encoder's local
-                    // innovation track (the analysis-by-synthesis
-                    // mirror of the decoder's fold source).
+                    // Mode 1: gain-only — the decoder folds the low band's
+                    // innovation-only excitation under the exact law
+                    // x = 0.9·exp((q−10)/8)/R·(−1)ⁿ·c_lb
+                    // (tracer-2026-09.md §5), so the field is the q whose
+                    // exp((q−10)/8) best matches
+                    // rms(residual)·R / (0.9·rms(c_lb)) in the log domain,
+                    // against the embedded encoder's local innovation
+                    // track (the decoder's fold source).
                     let src = self.low_band.last_frame_innovation();
                     let sf_src = &src[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
                     let src_rms = (sf_src.iter().map(|&v| v * v).sum::<f64>()
                         / HB_SUBFRAME_SAMPLES as f64)
                         .sqrt();
-                    let lb_api = self.low_band.last_crossover_response()[sf];
-                    let mut hb_api = 1.0f64;
-                    for (j, &aj) in lpc_sets[sf].iter().enumerate() {
-                        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-                        hb_api -= aj * sgn;
-                    }
-                    let unit_scale =
-                        crate::hb_fold::HB_FOLD_CROSSOVER_SCALE * hb_api.abs() / lb_api.max(1e-9);
+                    let unit_scale = crate::hb_fold::HB_FOLD_CROSSOVER_SCALE * inv_ratio;
                     let target = if src_rms > 1e-9 && unit_scale > 1e-12 {
                         r_rms / (unit_scale * src_rms)
                     } else {
                         0.0
                     };
-                    let gain_idx = quantise_hb_exc_gain(target as f32, gain_bits);
-                    slot.excitation_gain_index = gain_idx.and_then(|i| i.raw_index()).unwrap_or(0);
+                    slot.excitation_gain_index = crate::hb_fold::fold_index_for_gain(target);
                     slot.excitation_vq_index = 0;
                 }
             }
@@ -480,86 +468,66 @@ impl WidebandEncoder {
     }
 }
 
-/// Closed-loop high-band gain + innovation selection — **exhaustive
-/// over the staged gain grid**.
+/// The reference encoder's 4-bit high-band gain field for the
+/// gain-correction sub-modes 2/3/4 (`docs/audio/speex/tracer-2026-09.md`
+/// §1.3): `gain_target = ratio·(1 + e_h)/(1 + e_l)` and the field is the
+/// smallest `q ≤ 15` with `gain_target ≤ bound[q]`
+/// (`tables/hb-gc-quant-bound-float.csv`), else 15.
 ///
-/// The high-band gain field is only 4 or 5 bits wide (16 / 32 levels,
-/// Table 10.1), so the encoder can afford to try every level: for each
-/// candidate reconstructed gain it runs the greedy shape search
-/// ([`search_hb_innovation`]) at that gain — the §10.3 "gain chosen
-/// before the search" structure, applied per level — then measures the
-/// **decoded** error of the `(gain, shape)` pair through the exact
-/// decoder path (`decode_hb_subframe` + `reconstruct_hb_exc_gain`) and
-/// keeps the argmin. The winner is therefore jointly optimal over the
-/// gain grid given the per-level greedy shape — never worse than any
-/// single open-loop pass (pinned by the module tests).
-fn hb_quantise_gain_and_search(
+/// `ratio` is the sub-frame's crossover ratio
+/// `(A_nb(−1)+0.01)/(A_hb(−1)+0.01)`, `e_h` the floored RMS of the
+/// high-band LPC residual and `e_l` the floored RMS of the (locally
+/// decoded) narrowband excitation. Reproduces the staged
+/// `hb-encoder-gain-trace.csv` indices on every traced sub-frame
+/// (`tests/hb_gain_trace_fixture.rs`).
+pub fn hb_encoder_gain_index(ratio: f64, e_h: f64, e_l: f64) -> u8 {
+    let target = ratio * (1.0 + e_h) / (1.0 + e_l);
+    let bound = crate::gain_reconstruction::hb_gc_quant_bound();
+    bound
+        .iter()
+        .position(|&b| target <= f64::from(b))
+        .unwrap_or(bound.len() - 1) as u8
+}
+
+/// High-band innovation shape search at the decoded gain of field
+/// `raw_gain`: `S = 0.8736·bound[raw_gain]·base` with
+/// `base = e_L/R` (the exact decode law,
+/// [`crate::hb_gc_crossover_gain`]). Single-stage modes run one greedy
+/// pass; mode 4 searches stage 1 at `S`, then stage 2 over the stage-1
+/// residual at `0.4·S` (`hb-innovation-binding.md` §1). Returns the
+/// packed excitation-VQ field.
+fn hb_search_at_gain(
     residual: &[f64; HB_SUBFRAME_SAMPLES],
-    gain_bits: u8,
+    raw_gain: u8,
     submode: &WidebandHighBandSubmode,
     codebook: HbInnovationCodebook,
     count: u8,
     two_stage: bool,
     base: f64,
-) -> (u8, u128) {
-    let levels = 1u32 << gain_bits;
-    let mut best: Option<(f64, u8, u128)> = None;
-    for raw in 0..levels {
-        let Some(idx) =
-            crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw as u8, submode)
-        else {
-            continue;
-        };
-        let g = f64::from(reconstruct_hb_exc_gain(idx));
-        if g <= 0.0 || !g.is_finite() {
-            continue;
-        }
-        // Effective per-row multiplier: the r450 crossover-anchored
-        // decode law times the shared Q5 row normalisation.
-        let ge = g * base * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
-        let (packed, model): (u128, [f64; HB_SUBFRAME_SAMPLES]) = if two_stage {
-            // Stage 1 greedy at ge; stage 2 on the residual at
-            // HB_MODE4_STAGE2_WEIGHT·ge; decode through the exact
-            // mode-4 f32 shape.
-            let c1 = search_hb_innovation(residual, ge, codebook, count);
-            let mut r2 = [0.0f64; HB_SUBFRAME_SAMPLES];
-            let stage_bits = u32::from(codebook.slot_bits()) * u32::from(count);
-            let shape1 = crate::hb_innovation::decode_hb_subframe_mode4_f32(
-                (c1.packed << stage_bits) | zero_stage2_mask(),
-            );
-            for n in 0..HB_SUBFRAME_SAMPLES {
-                r2[n] = residual[n] - ge * f64::from(shape1[n]);
-            }
-            let w2 = f64::from(crate::hb_innovation::HB_MODE4_STAGE2_WEIGHT);
-            let c2 = search_hb_innovation(&r2, ge * w2, codebook, count);
-            let packed = (c1.packed << stage_bits) | c2.packed;
-            let shape = crate::hb_innovation::decode_hb_subframe_mode4_f32(packed);
-            let mut model = [0.0f64; HB_SUBFRAME_SAMPLES];
-            for n in 0..HB_SUBFRAME_SAMPLES {
-                model[n] = ge * f64::from(shape[n]);
-            }
-            (packed, model)
-        } else {
-            let choice = search_hb_innovation(residual, ge, codebook, count);
-            let Ok(c) = decode_hb_subframe(submode, choice.packed) else {
-                continue;
-            };
-            let mut model = [0.0f64; HB_SUBFRAME_SAMPLES];
-            for n in 0..HB_SUBFRAME_SAMPLES {
-                model[n] = ge * f64::from(c[n]);
-            }
-            (choice.packed, model)
-        };
-        let mut err = 0.0f64;
-        for (n, &r) in residual.iter().enumerate() {
-            let d = r - model[n];
-            err += d * d;
-        }
-        if best.is_none_or(|(e, _, _)| err < e) {
-            best = Some((err, raw as u8, packed));
-        }
+) -> u128 {
+    let Some(idx) = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, submode)
+    else {
+        return 0;
+    };
+    let g = f64::from(reconstruct_hb_exc_gain(idx));
+    // Effective per-row multiplier: the decode law times the shared Q5
+    // row normalisation.
+    let ge = g * base * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+    if !two_stage {
+        return search_hb_innovation(residual, ge, codebook, count).packed;
     }
-    best.map(|(_, raw, packed)| (raw, packed)).unwrap_or((0, 0))
+    let c1 = search_hb_innovation(residual, ge, codebook, count);
+    let stage_bits = u32::from(codebook.slot_bits()) * u32::from(count);
+    let shape1 = crate::hb_innovation::decode_hb_subframe_mode4_f32(
+        (c1.packed << stage_bits) | zero_stage2_mask(),
+    );
+    let mut r2 = [0.0f64; HB_SUBFRAME_SAMPLES];
+    for n in 0..HB_SUBFRAME_SAMPLES {
+        r2[n] = residual[n] - ge * f64::from(shape1[n]);
+    }
+    let w2 = f64::from(crate::hb_innovation::HB_MODE4_STAGE2_WEIGHT);
+    let c2 = search_hb_innovation(&r2, ge * w2, codebook, count);
+    (c1.packed << stage_bits) | c2.packed
 }
 
 /// Stage-2 field filled with the all-zero codebook row (index 43,
@@ -579,6 +547,7 @@ mod tests {
     use super::*;
     use crate::bitreader::BitReader;
     use crate::frame::NarrowbandFrameHeader;
+    use crate::hb_innovation::decode_hb_subframe;
     use crate::wideband::WidebandHighBandFrameHeader;
 
     /// A 16 kHz test frame mixing a voiced low-band structure with a
@@ -698,28 +667,38 @@ mod tests {
 
     #[test]
     fn folded_mode1_high_band_tracks_energy_through_decode() {
-        // HB mode 1 (gain-only): with the r393 fold-consistent gain law
-        // the decoded 4–8 kHz half-band's RMS should track the
-        // encoder-side high half's RMS within a modest factor — the
-        // fold reconstructs the transmitted energy envelope rather than
-        // silence.
+        // HB mode 1 (gain-only): with the exact fold law the decoded
+        // 4–8 kHz half-band's RMS should track the encoder-side high
+        // half's RMS within a modest factor — the fold reconstructs the
+        // transmitted energy envelope rather than silence. The fold
+        // borrows the narrowband *innovation*, so the low band carries a
+        // noise component (a pure tone is fully pitch-predicted and
+        // leaves the fold nothing to borrow at any of the 32 gains).
         use crate::qmf::QmfAnalysis;
         use crate::wideband_decoder::WidebandDecoder;
 
-        let frame = wideband_frame(6000.0);
         let mut enc = WidebandEncoder::new();
         let mut dec = WidebandDecoder::new();
         let mut probe = QmfAnalysis::new();
 
-        let mut input = [0.0f64; QMF_WIDEBAND_FRAME];
-        for (slot, &v) in input.iter_mut().zip(frame.iter()) {
-            *slot = f64::from(v);
-        }
+        let mut seed = 0x5EED_u64;
         let mut low = [0.0f64; 160];
         let mut high = [0.0f64; 160];
         let mut hb_energy = 0.0f64;
         let mut dec_energy = 0.0f64;
         for i in 0..6 {
+            let mut frame = wideband_frame(6000.0);
+            for s in frame.iter_mut() {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let noise = ((seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5) * 3000.0;
+                *s = (f64::from(*s) + noise).round().clamp(-32768.0, 32767.0) as i16;
+            }
+            let mut input = [0.0f64; QMF_WIDEBAND_FRAME];
+            for (slot, &v) in input.iter_mut().zip(frame.iter()) {
+                *slot = f64::from(v);
+            }
             probe.split_slices(&input, &mut low, &mut high);
             let bytes = enc.encode_frame(&frame, 3, 1).expect("encodes");
             let f = dec.decode_packet(&bytes).expect("decodes");
@@ -753,110 +732,67 @@ mod tests {
     }
 
     #[test]
-    fn gain_refinement_recovers_exact_level_scaled_rows() {
-        // Build a residual that is exactly (reconstructable gain level) ×
-        // (concatenated codebook rows). The RMS-ratio first guess lands
-        // on a *different* level (the planted rows' RMS differs from the
-        // whole-codebook RMS), but the α-refinement pass must recover the
-        // planted level exactly — the decoded error collapses to ~0.
+    fn search_at_gain_recovers_exact_level_scaled_rows() {
+        // A residual that is exactly (decoded gain of field 9) ×
+        // (concatenated codebook rows) must be recovered row-for-row by
+        // the shape search at that field's gain.
         use crate::hb_excitation_gain::HbExcitationGainIndex;
 
         let submode = WidebandHighBandSubmode::for_id(2).unwrap();
         let cb = HbInnovationCodebook::HbSv10_32;
-        let planted_idx = HbExcitationGainIndex::FourBit(9);
-        let g_level = f64::from(reconstruct_hb_exc_gain(planted_idx));
-        assert!(g_level > 0.0);
-
+        let g_level = f64::from(reconstruct_hb_exc_gain(HbExcitationGainIndex::FourBit(9)));
         let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
         let rows = [3u32, 17, 8, 25];
         let mut residual = [0.0f64; HB_SUBFRAME_SAMPLES];
         for (sv, &idx) in rows.iter().enumerate() {
             let row = crate::hb_innovation::hb_innovation_sub_vector(cb, idx).unwrap();
             for (k, &v) in row.iter().enumerate() {
-                // Plant the residual in the decode-law domain (Q5 rows).
                 residual[sv * 10 + k] = g_level * scale * f64::from(v);
             }
         }
-
-        let (raw_gain, packed) =
-            hb_quantise_gain_and_search(&residual, 4, &submode, cb, 4, false, 1.0);
-
-        // Decode back through the exact decoder path.
-        let idx = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, &submode)
-            .expect("gain index resolves");
-        let g = f64::from(reconstruct_hb_exc_gain(idx)) * scale;
+        let packed = hb_search_at_gain(&residual, 9, &submode, cb, 4, false, 1.0);
         let c = decode_hb_subframe(&submode, packed).unwrap();
         let mut err = 0.0f64;
         let mut energy = 0.0f64;
         for (n, &r) in residual.iter().enumerate() {
-            let d = r - g * f64::from(c[n]);
+            let d = r - g_level * scale * f64::from(c[n]);
             err += d * d;
             energy += r * r;
         }
-        assert!(
-            err < 1e-9 * energy.max(1.0),
-            "refined decode error {err} should be ~0 (energy {energy})"
-        );
+        assert!(err < 1e-9 * energy, "decode error {err} (energy {energy})");
     }
 
     #[test]
-    fn gain_refinement_never_worse_than_single_pass() {
-        // For arbitrary residuals the exhaustive grid selection must
-        // never decode worse than a single open-loop pass at an
-        // arbitrary gain guess (the grid contains that pass's level).
-        let submode = WidebandHighBandSubmode::for_id(3).unwrap();
-        let cb = HbInnovationCodebook::HbSv8_128;
-        for seed in 1u64..=6 {
-            let mut s = seed;
-            let mut residual = [0.0f64; HB_SUBFRAME_SAMPLES];
-            for slot in residual.iter_mut() {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-                *slot = (((s >> 40) as f64 / (1u64 << 24) as f64) - 0.5) * 400.0;
-            }
-            let g_guess = 1.7;
-            let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
-
-            // Single-pass baseline (replicates pass 1 exactly: the
-            // search + scoring run at the effective Q5-normalised gain).
-            let idx0 = quantise_hb_exc_gain(g_guess as f32, 4).unwrap();
-            let g0 = f64::from(reconstruct_hb_exc_gain(idx0)) * scale;
-            let choice0 = search_hb_innovation(&residual, g0.max(1e-12), cb, 5);
-            let c0 = decode_hb_subframe(&submode, choice0.packed).unwrap();
-            let mut err0 = 0.0f64;
-            for (n, &r) in residual.iter().enumerate() {
-                let d = r - g0 * f64::from(c0[n]);
-                err0 += d * d;
-            }
-
-            // Exhaustive grid result.
-            let (raw_gain, packed) =
-                hb_quantise_gain_and_search(&residual, 4, &submode, cb, 5, false, 1.0);
-            let idx = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, &submode)
-                .unwrap();
-            let g = f64::from(reconstruct_hb_exc_gain(idx)) * scale;
-            let c = decode_hb_subframe(&submode, packed).unwrap();
-            let mut err = 0.0f64;
-            for (n, &r) in residual.iter().enumerate() {
-                let d = r - g * f64::from(c[n]);
-                err += d * d;
-            }
-
-            assert!(
-                err <= err0 + 1e-9,
-                "seed {seed}: refined {err} worse than single-pass {err0}"
-            );
+    fn encoder_gain_index_is_the_smallest_bound_at_or_above_target() {
+        // tracer-2026-09.md §1.3: q = min{ i : R(1+e_H)/(1+e_L) <= bound[i] }.
+        let bound = crate::gain_reconstruction::hb_gc_quant_bound();
+        for (i, &b) in bound.iter().enumerate() {
+            let b = f64::from(b);
+            // target exactly on the bound -> that index; just above -> next.
+            assert_eq!(hb_encoder_gain_index(b, 0.0, 0.0), i as u8);
+            let next = (i + 1).min(15) as u8;
+            assert_eq!(hb_encoder_gain_index(b * 1.0001, 0.0, 0.0), next);
         }
+        assert_eq!(hb_encoder_gain_index(0.0, 0.0, 0.0), 0);
+        assert_eq!(hb_encoder_gain_index(1e9, 0.0, 0.0), 15);
+        // The staged trace's first row: R 2.910819, e_H 0.316228,
+        // e_L 0.317213 -> target 2.908643 -> field 5.
+        assert_eq!(hb_encoder_gain_index(2.910819, 0.316228, 0.317213), 5);
     }
 
     #[test]
-    fn silent_input_encodes_zero_gain_indices() {
-        // A silent frame's high-band residual is zero → the quantiser
-        // drives every excitation-gain field to its floor (raw 0).
+    fn silent_input_decodes_to_a_silent_high_band() {
+        // A silent frame's high-band residual and low-band excitation are
+        // both at the `sqrt(0.1)` floor, so the reference rule picks a
+        // small field and the decoded scale `S = g_c·e_L/R` is tiny.
         let frame = [0i16; QMF_WIDEBAND_FRAME];
         let mut enc = WidebandEncoder::new();
-        let bodies = enc.encode_frame_bodies(&frame, 3, 2).unwrap();
-        for sf in &bodies.hb_body.subframes {
-            assert_eq!(sf.excitation_gain_index, 0);
+        let mut dec = crate::wideband_decoder::WidebandDecoder::new();
+        for _ in 0..3 {
+            let bytes = enc.encode_frame(&frame, 3, 2).unwrap();
+            let f = dec.decode_packet(&bytes).unwrap();
+            let e: f64 = f.high_band.iter().map(|v| v * v).sum::<f64>() / 160.0;
+            assert!(e < 1.0, "silent input decoded a high band of power {e}");
         }
     }
 }
