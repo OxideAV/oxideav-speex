@@ -6,6 +6,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-speex/compare/v0.0.10...v0.0.11) - 2026-10-24
+
+### Other
+
+- exact Tracer-round high-band gain laws + WB/UWB quality 10 through the registry; LPC sign fix revives every encoder envelope
+- edition 2024, MSRV 1.95
+
 ### Fixed
 
 - **Every encoder transmitted a flat spectral envelope.** The LPC
