@@ -86,6 +86,7 @@ pub const HIGH_BAND_SUBFRAMES_PER_FRAME: u32 = 4;
 
 /// Errors returned from [`WidebandHighBandBody::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WidebandBodyError {
     /// The bit-stream ran out mid-field. Carries the underlying
     /// [`BitError`] for diagnostics.

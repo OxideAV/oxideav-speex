@@ -89,6 +89,7 @@ pub const PITCH_PERIOD_MAX: u16 = 144;
 
 /// Errors returned from [`NarrowbandFrameBody::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NarrowbandBodyError {
     /// The bit-stream ran out while consuming one of the per-field
     /// budgets. Carries the underlying [`BitError`] for diagnostics.

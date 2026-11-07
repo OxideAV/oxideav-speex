@@ -462,10 +462,19 @@ impl Decoder for SpeexFrameworkDecoder {
 
 /// Typed options accepted by the Speex encoder factory.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SpeexEncoderOptions {
     /// §2.1 quality knob, 0..=10 (Table 9.2 / Table 10.2 / RFC 5574
     /// Table 2 ladders). Default 8.
     pub quality: u8,
+}
+
+impl SpeexEncoderOptions {
+    /// Set `quality`.
+    pub fn with_quality(mut self, v: u8) -> Self {
+        self.quality = v;
+        self
+    }
 }
 
 impl Default for SpeexEncoderOptions {

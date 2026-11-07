@@ -84,6 +84,7 @@ const HB_ANALYSIS_LOOKBACK: usize = 40;
 
 /// Errors from [`WidebandEncoder::encode_frame`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WbEncodeError {
     /// The embedded narrowband encode failed (unknown / undocumented NB
     /// mode, or packing).

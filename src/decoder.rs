@@ -49,6 +49,7 @@ use core::fmt;
 
 /// One decoded unit produced from a packet frame.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DecodedFrame {
     /// A narrowband frame decoded to 160 samples of 8 kHz PCM.
     Narrowband(Box<[f64; NARROWBAND_FRAME_SAMPLES]>),
@@ -82,6 +83,7 @@ pub enum DecodedFrame {
 /// This enum distinguishes the two and carries the in-band message's
 /// fully-interpreted [`InbandRequest`] for the former.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ControlMessage {
     /// A mode-14 in-band signalling request, already interpreted per
     /// Table 5.1 (the typed [`InbandRequest`]) alongside the raw parsed
@@ -164,6 +166,7 @@ impl DecodedFrame {
 
 /// Errors from [`SpeexDecoder::decode_packet`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// The packet bit-stream could not be walked — see [`PacketError`].
     Packet(PacketError),

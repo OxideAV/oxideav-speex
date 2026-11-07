@@ -6,6 +6,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `SpeexEncoderOptions::with_quality`.
+
+### Changed
+
+- API hygiene: `#[non_exhaustive]` on the crate `Error` and every
+  public error enum (`DecodeError`, `StreamDecodeError`,
+  `WidebandDecodeError`, `UwbDecodeError`, `NarrowbandDecodeError`,
+  `EncodeError`, `WbEncodeError`, `UwbEncodeError`, `PacketError`,
+  `FrameError`, `HeaderError`, `SignallingError`, `NarrowbandBodyError`,
+  `WidebandBodyError`, `InnovationError`, `HbInnovationError`,
+  `BitError`), on the decoder output enums `DecodedFrame`,
+  `UwbDecodedFrame` and `ControlMessage`, and on `SpeexEncoderOptions`,
+  `WidebandFrame`, `UltraWidebandFrame` and `PacketSummary`. Enums and
+  records whose layout the Speex bitstream fixes (frame kinds, submodes,
+  in-band codes, quantiser / gain-index shapes, the 80-byte header and
+  the per-frame index records) stay exhaustive. No behaviour change.
+
 ## [0.0.11](https://github.com/OxideAV/oxideav-speex/compare/v0.0.10...v0.0.11) - 2026-11-07
 
 ### Other

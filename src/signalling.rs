@@ -56,6 +56,7 @@ pub const INBAND_CODE_BITS: u32 = 4;
 
 /// Errors produced while parsing a §5.5 signalling body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignallingError {
     /// The bit-reader ran out of bits mid-field.
     Underflow(BitError),

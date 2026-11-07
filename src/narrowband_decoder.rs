@@ -120,6 +120,7 @@ pub const NB_MODE1_NOISE_SCALE: f32 = 1.0;
 
 /// Errors from [`NarrowbandDecoder::decode_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NarrowbandDecodeError {
     /// A sub-mode that transmits an LSP field produced no reconstructed
     /// LSP vector — should not happen for the nine documented modes.

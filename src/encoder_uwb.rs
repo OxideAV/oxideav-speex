@@ -83,6 +83,7 @@ const UWB_ANALYSIS_WINDOW: usize = 200;
 
 /// Errors from [`UltraWidebandEncoder::encode_frame`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UwbEncodeError {
     /// The embedded wideband encode failed.
     Wideband(WbEncodeError),

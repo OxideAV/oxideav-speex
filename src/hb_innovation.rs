@@ -341,6 +341,7 @@ impl HbInnovationMapping {
 
 /// Errors from [`decode_hb_subframe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HbInnovationError {
     /// The per-mode codebook binding is not documented in the staged
     /// material. See [`HbInnovationMapping::Undocumented`].

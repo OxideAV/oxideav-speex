@@ -192,6 +192,7 @@ impl PacketFrame {
 /// cross-check (manual §7.3: the stream header advertises the constant
 /// frames-per-packet a conformant CBR stream uses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct PacketSummary {
     /// Number of standalone narrowband audio frames.
     pub narrowband: u32,
@@ -254,6 +255,7 @@ impl PacketSummary {
 /// to so a caller can match on the underlying cause without unwrapping
 /// nested layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PacketError {
     /// The 5-bit narrowband prefix failed to parse — see [`FrameError`].
     Frame(FrameError),

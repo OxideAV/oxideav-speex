@@ -91,6 +91,7 @@ const EXC_HIST_LEN: usize = PITCH_PERIOD_MAX as usize + SUBFRAME_SAMPLES;
 
 /// Errors from [`NarrowbandEncoder::encode_frame`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncodeError {
     /// The requested mode ID is not a documented narrowband sub-mode.
     UnknownMode(u8),

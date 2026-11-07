@@ -22,6 +22,7 @@ use core::fmt;
 
 /// Errors from [`SpeexStreamDecoder`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamDecodeError {
     /// The header's `mode` field is not one of the three documented
     /// rate classes (§7.3).

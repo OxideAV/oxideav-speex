@@ -67,6 +67,7 @@ use core::fmt;
 /// diagnostics. `wideband_pcm` is the [`crate::QmfSynthesis`]-recombined
 /// 320-sample 16 kHz full-band output (the §10 final stage).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WidebandFrame {
     /// Low-band (0–4 kHz) reconstructed signal `x_lb[n]` — the embedded
     /// narrowband synthesis output.
@@ -98,6 +99,7 @@ impl WidebandFrame {
 
 /// Errors from [`WidebandDecoder::decode_packet`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WidebandDecodeError {
     /// The embedded narrowband prefix did not parse, or its mode was not
     /// a CELP sub-mode (an in-band-signalling / terminator pseudo-frame

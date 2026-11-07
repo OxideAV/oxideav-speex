@@ -778,6 +778,7 @@ pub use wideband_decoder::{WidebandDecodeError, WidebandDecoder, WidebandFrame};
 /// [`make_decoder`] / [`make_encoder`] surface maps everything into
 /// `oxideav_core::Error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The Ogg/Speex stream header failed to parse — see [`HeaderError`].
     Header(HeaderError),

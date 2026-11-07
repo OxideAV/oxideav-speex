@@ -301,6 +301,7 @@ impl InnovationMapping {
 
 /// Errors from [`decode_subframe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InnovationError {
     /// The per-mode codebook binding is not documented in the staged
     /// material. See [`InnovationMapping::Undocumented`].

@@ -34,6 +34,7 @@ use core::fmt;
 
 /// Error type for [`BitReader::read`] and [`BitReader::read_bit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BitError {
     /// The reader was asked for more bits than the backing slice held.
     ///

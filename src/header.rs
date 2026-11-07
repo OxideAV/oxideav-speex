@@ -56,6 +56,7 @@ pub const SPEEX_MODE_ULTRAWIDEBAND: u32 = 2;
 
 /// Errors produced when parsing an Ogg/Speex stream header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeaderError {
     /// The input buffer is shorter than [`SPEEX_HEADER_LEN`].
     ///

@@ -131,6 +131,7 @@ pub const UWB_HB_SUBFRAMES: usize = HIGH_BAND_SUBFRAMES_PER_FRAME as usize;
 
 /// One decoded ultra-wideband audio frame.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UltraWidebandFrame {
     /// The embedded wideband layers (narrowband + first high band),
     /// including the recombined 16 kHz PCM that becomes the outer QMF's
@@ -171,6 +172,7 @@ impl UltraWidebandFrame {
 /// §5.5 control pseudo-frame (the same [`ControlMessage`] the top-level
 /// [`crate::SpeexDecoder`] surfaces).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum UwbDecodedFrame {
     /// A decoded 640-sample 32 kHz audio frame.
     Audio(Box<UltraWidebandFrame>),
@@ -180,6 +182,7 @@ pub enum UwbDecodedFrame {
 
 /// Errors from [`UltraWidebandDecoder::decode_packet`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UwbDecodeError {
     /// The embedded wideband layers failed to decode.
     Wideband(WidebandDecodeError),

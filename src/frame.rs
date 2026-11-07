@@ -40,6 +40,7 @@ pub const NARROWBAND_FRAME_PREFIX_BITS: u32 = 5;
 
 /// Errors produced when parsing the narrowband frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// The packet was shorter than 5 bits — couldn't even decode the
     /// leading wideband-flag + mode-ID prefix.
