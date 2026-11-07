@@ -91,14 +91,15 @@ What is implemented and tested:
   quality 0) carries no innovation codebook — its four 1-bit
   innovation-gain fields are read and discarded (inert in the
   reference decoder, §4 of the binding doc) and its excitation is the
-  frame-level forced pitch path (r450: an **unbounded float
-  centre-tap recursion**, coefficients `0.066667·quant` capped at
-  0.99 — probe grids at `T = 50` recover the reference's taps to
-  ≤ 0.04 %); mode 7 (24.6 kbps, quality 10) is two 48-bit innovation
-  stages of eight 6-bit `sv5-64` lookups, **stage 2 at the measured
-  0.455 weight** (`NB_MODE7_STAGE2_WEIGHT`, r450 — the unweighted sum
-  ran every quality-10 low band ≈ +1.6 dB hot), stage 2 searched on
-  stage 1's residual by the encoder at that weight. Narrowband, wideband and
+  tracer §4 vocoder (r483): the seed-1000 noise generator times the
+  frame gain mixed with a pulse train at the open-loop period, the
+  decoded adaptive contribution discarded; mode 8's forced gain is an
+  **unbounded float centre-tap recursion** (coefficients
+  `0.066667·quant` capped at 0.99); mode 7 (24.6 kbps, quality 10) is
+  two 48-bit innovation stages of eight 6-bit `sv5-64` lookups,
+  **stage 2 at weight `1/2.2`** (`NB_MODE7_STAGE2_WEIGHT`, r483 — the
+  r450 probe's 0.455 cost 5 dB of exactness), stage 2 searched on
+  stage 1's remainder by the encoder at that weight. Narrowband, wideband and
   ultra-wideband qualities **0..=10 all encode** (r450 — the mode-4
   two-stage search + the measured gain laws unlocked the 44 kbit/s
   ladder tops).
