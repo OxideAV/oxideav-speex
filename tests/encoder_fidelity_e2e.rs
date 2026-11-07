@@ -14,9 +14,12 @@
 //!   including wideband / ultra-wideband **quality 10** — high-band
 //!   mode 4, the reporter's 32 kHz 44 kbit/s default in issue #7.
 //!
-//! Black-box cross-check (recorded in the CHANGELOG, not run here): the
-//! same streams decoded by the reference `speexdec --no-enh` give the
-//! same figures to within ±0.2 dB.
+//! The registry decoder is the reference decoder to ±1 LSB (r483,
+//! `tests/decode_exactness.rs`), so these figures are what the
+//! reference `speexdec --no-enh` produces from the same streams
+//! (black-box cross-check: identical to two decimals on the narrowband
+//! ladder). The narrowband rows score against the input through the
+//! decoder's own output high-pass, which no conforming decode can undo.
 
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat, TimeBase,
@@ -64,7 +67,13 @@ fn round_trip(pcm: &[i16], rate: u32, quality: u8) -> Vec<i16> {
             Err(e) => panic!("{e}"),
         }
     }
-    let mut dec = oxideav_speex::make_decoder(enc.output_params()).expect("decoder");
+    // Waveform fidelity is scored without the perceptual enhancer (a
+    // decoder-side post filter, on by default), as `speexdec --no-enh`.
+    let mut dp = enc.output_params().clone();
+    if std::env::var("SPEEX_E2E_ENH").is_err() {
+        dp.options.insert("enhancer", "false");
+    }
+    let mut dec = oxideav_speex::make_decoder(&dp).expect("decoder");
     let mut out = Vec::new();
     for pk in &packets {
         dec.send_packet(&Packet::new(0, TimeBase::from_rate(rate), pk.data.clone()))
@@ -136,12 +145,37 @@ fn band_offsets_wb(x: &[i16], y: &[i16], lag: i64) -> (f64, f64) {
     (yl - xl, yh - xh)
 }
 
+/// The input through the decoder's own built-in 8 kHz output high-pass
+/// ([`oxideav_speex::NB_OUTPUT_HIGHPASS`]): the part of the input a
+/// conforming decode can reproduce at all (the speech fixture's 40–
+/// 180 Hz pitch glide sits right on the high-pass corner).
+fn highpassed(x: &[i16]) -> Vec<i16> {
+    let c = oxideav_speex::NB_OUTPUT_HIGHPASS;
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    x.iter()
+        .map(|&v| {
+            let v = f64::from(v);
+            let y = c[0] * v + c[1] * x1 + c[2] * x2 - c[3] * y1 - c[4] * y2;
+            (x2, x1, y2, y1) = (x1, v, y1, y);
+            y.round().clamp(-32768.0, 32767.0) as i16
+        })
+        .collect()
+}
+
 #[test]
 fn narrowband_speech_round_trip() {
     let x = raw_pcm(include_bytes!("fixtures/nb-conformance/speechy8k.raw"));
-    for (q, floor) in [(4u8, 5.0f64), (8, 8.0), (10, 8.0)] {
+    let xh = highpassed(&x);
+    // r483 measured (vs the high-passed input; the decode itself is the
+    // reference decoder's to ±1 LSB): 15.46 / 21.07 / 25.53 dB at
+    // q4 / q8 / q10 with the analysis-by-synthesis searches (7.88 /
+    // 15.55 / 16.96 dB on the excitation-domain match). The reference
+    // encoder on the same input and metric: 8.49 / 9.66 / 9.80 dB
+    // (black-box `speexenc` + `speexdec --no-enh`; it optimises a
+    // perceptually weighted error, not waveform SNR).
+    for (q, floor) in [(4u8, 14.0f64), (8, 19.5), (10, 23.5)] {
         let y = round_trip(&x, 8_000, q);
-        let (snr, lag) = measure(&x, &y);
+        let (snr, lag) = measure(&xh, &y);
         println!("NB speechy8k q{q}: snr {snr:.2} dB (lag {lag})");
         assert!(snr > floor, "NB q{q}: snr {snr:.2} dB <= {floor}");
     }
@@ -166,10 +200,16 @@ fn wideband_quality_10_round_trip() {
             println!(
                 "WB {name} q{q}: snr {snr:.2} dB (lag {lag}) band offsets {dl:+.2} / {dh:+.2} dB"
             );
-            // r480 measured: speechy16k 11.63 / 13.00 dB, hb-mode4 source
-            // 5.23 / 8.95 dB (q8 / q10); the reference encoder on the
-            // latter gives 9.25 dB at q10 through the same metric.
-            let floor = if q == 10 { 7.5 } else { 4.5 };
+            // r483 measured: speechy16k 14.06 / 16.08 dB (r480: 11.63 /
+            // 13.00), hb-mode4 source 5.10 / 8.86 dB (q8 / q10); the
+            // reference encoder on the latter gives 9.25 dB at q10
+            // through the same metric.
+            let floor = match (name, q) {
+                ("speechy16k", 8) => 13.0,
+                ("speechy16k", _) => 15.0,
+                (_, 10) => 7.5,
+                _ => 4.5,
+            };
             assert!(snr > floor, "WB {name} q{q}: snr {snr:.2} dB <= {floor}");
             assert!(
                 dl.abs() < 1.5 && dh.abs() < 3.0,

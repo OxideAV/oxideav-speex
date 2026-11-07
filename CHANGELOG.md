@@ -42,6 +42,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     a neutral start; the one-sub-frame mono carry is gone (the decoder
     now provides that lag itself).
 
+- **Narrowband encoder: analysis-by-synthesis searches** (r483). The
+  pitch (lag pre-selection + full 3-tap VQ) and innovation (greedy
+  sub-vector, two gain passes, both mode-7 stages) searches now
+  minimise the synthesis-domain error against the input through the
+  decoder's own sub-frame LPC (its float path) and a mirror of its
+  transposed synthesis state, instead of matching the LPC residual; the
+  pitch basis uses the decoder's fold-once short-lag rule and the
+  forced-gain modes its float centre-tap recursion. Measured through
+  the reference decoder (black-box `speexdec --no-enh`, SNR against the
+  high-passed input, the pitch-glide speech fixture): q1 3.05 → 5.83,
+  q2 5.55 → 10.22, q3/4 7.88 → 15.46, q5/6 8.66 → 18.17, q7/8
+  15.55 → 21.07, q9 16.72 → 22.41, q10 16.96 → 25.53 dB (the reference
+  encoder: 4.69 / 7.79 / 8.49 / 9.50 / 9.66 / 9.81 / 9.80 dB on the same
+  metric — it optimises a perceptually weighted error). The embedded
+  low band lifts wideband speech q8 / q10 11.6 / 13.0 → 14.1 / 16.1 dB
+  and ultra-wideband q10 12.1 → 13.3 dB below 7 kHz.
+
 ### Added
 
 - **Perceptual enhancer** (tracer §2): the narrowband pitch comb, on by

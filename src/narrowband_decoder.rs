@@ -371,17 +371,9 @@ impl NarrowbandDecoder {
         let Some(lsp) = nb_lsp_radians(body, submode) else {
             return Ok(self.decode_null_frame());
         };
-        let prev = self.prev_lsp.unwrap_or(lsp);
-        let mut lpcs = [[0.0f64; LPC_ORDER]; SUBFRAMES_PER_FRAME];
-        for (sf, lpc) in lpcs.iter_mut().enumerate() {
-            let w = (sf as f64 + 1.0) / 4.0;
-            let mut l = [0.0f64; LPC_ORDER];
-            for i in 0..LPC_ORDER {
-                l[i] = (1.0 - w) * prev[i] + w * lsp[i];
-            }
-            enforce_interpolated_margin(&mut l, NB_LSP_MARGIN);
-            *lpc = lsp_to_lpc_poly(&l);
-            self.last_crossover_response[sf] = lpc_at_minus_one(lpc).abs();
+        let lpcs = nb_subframe_lpcs(self.prev_lsp, &lsp);
+        for (slot, lpc) in self.last_crossover_response.iter_mut().zip(lpcs.iter()) {
+            *slot = lpc_at_minus_one(lpc).abs();
         }
 
         let mut enh_taps = [(40i32, [0.0f64; 3]); 4];
@@ -600,7 +592,7 @@ impl NarrowbandDecoder {
 /// One sample of the transposed-direct-form all-pole synthesis
 /// `y = x − Σ a_k y[n−k]`.
 #[inline]
-fn synth_step(mem: &mut [f64; LPC_ORDER], a: &[f64; LPC_ORDER], x: f64) -> f64 {
+pub(crate) fn synth_step(mem: &mut [f64; LPC_ORDER], a: &[f64; LPC_ORDER], x: f64) -> f64 {
     let y = x + mem[0];
     for j in 0..LPC_ORDER - 1 {
         mem[j] = mem[j + 1] - a[j] * y;
@@ -613,7 +605,12 @@ fn synth_step(mem: &mut [f64; LPC_ORDER], a: &[f64; LPC_ORDER], x: f64) -> f64 {
 /// `0.25·(i+1)` plus the scaled VQ stages), or `None` for a frame that
 /// carries no LSP field.
 fn nb_lsp_radians(body: &NarrowbandFrameBody, submode: &NarrowbandSubmode) -> Option<[f64; 10]> {
-    let st = body.lsp_stages(submode)?;
+    nb_lsp_radians_from_stages(body.lsp_stages(submode)?)
+}
+
+/// [`nb_lsp_radians`] from already-split VQ stage indices (the encoder's
+/// decoder mirror).
+pub(crate) fn nb_lsp_radians_from_stages(st: crate::lsp::NbLspStages) -> Option<[f64; 10]> {
     let mut l = [0.0f64; 10];
     for (i, v) in l.iter_mut().enumerate() {
         *v = 0.25 * i as f64 + 0.25;
@@ -647,6 +644,28 @@ fn nb_lsp_radians(body: &NarrowbandFrameBody, submode: &NarrowbandSubmode) -> Op
         }
     }
     Some(l)
+}
+
+/// The decoder's four per-sub-frame LPC sets (`A(z) = 1 + Σ a_k z^{−k}`)
+/// for a frame's decoded LSPs and the previous frame's (`None` = stream
+/// start / interpolation restart) — shared with the encoder's decoder
+/// mirror so both run the same synthesis.
+pub(crate) fn nb_subframe_lpcs(
+    prev: Option<[f64; LPC_ORDER]>,
+    lsp: &[f64; LPC_ORDER],
+) -> [[f64; LPC_ORDER]; SUBFRAMES_PER_FRAME] {
+    let prev = prev.unwrap_or(*lsp);
+    let mut lpcs = [[0.0f64; LPC_ORDER]; SUBFRAMES_PER_FRAME];
+    for (sf, lpc) in lpcs.iter_mut().enumerate() {
+        let w = (sf as f64 + 1.0) / 4.0;
+        let mut l = [0.0f64; LPC_ORDER];
+        for i in 0..LPC_ORDER {
+            l[i] = (1.0 - w) * prev[i] + w * lsp[i];
+        }
+        enforce_interpolated_margin(&mut l, NB_LSP_MARGIN);
+        *lpc = lsp_to_lpc_poly(&l);
+    }
+    lpcs
 }
 
 /// The stability margin of the interpolated LSPs, in index order
