@@ -6,6 +6,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-speex/compare/v0.0.10...v0.0.11) - 2026-11-07
+
+### Other
+
+- mode-1 vocoder and mode-7 weight bullets reflect the exact decode
+- high-band shape search by analysis-by-synthesis through a decoder mirror
+- narrowband encoder searches by analysis-by-synthesis through a decoder mirror
+- the staged fixed-point primitives, exact against every fixed-point trace
+- reference-exact float decode (±1 LSB) in every rate class + the perceptual enhancer
+- exact Tracer-round high-band gain laws + WB/UWB quality 10 through the registry; LPC sign fix revives every encoder envelope
+- edition 2024, MSRV 1.95
+
 ### Changed
 
 - **Decode is reference-exact to ±1 LSB** (r483). Narrowband, wideband
