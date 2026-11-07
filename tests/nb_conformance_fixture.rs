@@ -24,24 +24,25 @@
 //!   (r450: the single-substitution repeat rule for the VQ modes and
 //!   the unbounded centre-tap recursion for the forced OL modes —
 //!   `gain_scaled_pitch_subframe_repeat` / `_forced`);
-//! * the alignment: the reference decode leads by exactly its
-//!   40-sample look-ahead padding — a delay regression fails loudly.
+//! * the alignment: the decode lines up with the reference sample for
+//!   sample — a delay regression fails loudly.
 //!
-//! The reference decodes carry the codec's **default output
-//! high-pass** (the `--no-enh` flag disables only the enhancer), so
-//! the raw floors are intrinsically limited by the crate's unfiltered
-//! output at the very bottom of the band; the gate also scores the
-//! decode through the fitted opt-in [`oxideav_speex::OutputHighpass`]
-//! and asserts the improvement.
+//! r483: the reference decodes carry the codec's **default output
+//! high-pass** (the `--no-enh` flag disables only the enhancer), and so
+//! does [`NarrowbandDecoder`] now (`NB_OUTPUT_HIGHPASS`, measured); with
+//! the transposed synthesis form, the float excitation memory and the
+//! float-path LSP constants the decode is within ±1 LSB of the
+//! reference on ≥ 98 % of samples.
 
 use oxideav_speex::{
     NARROWBAND_FRAME_SAMPLES, NarrowbandDecoder, NarrowbandFrameBody, NarrowbandFrameHeader,
-    OutputHighpass, Submode,
+    Submode, saturate_i16,
 };
 
-/// Fixed alignment: reference decode leads ours by 40 samples at 8 kHz
-/// (the reference codec's look-ahead padding, `NOTES.md`).
-const REF_LEAD: usize = 40;
+/// Fixed alignment: none — r483 reproduces the reference decoder's
+/// one-sub-frame synthesis lag, so the decode lines up with the
+/// reference sample for sample (r410–r480: the reference led by 40).
+const REF_LEAD: usize = 0;
 
 struct Fixture {
     name: &'static str,
@@ -51,13 +52,21 @@ struct Fixture {
     /// Floor on the absolute (unfitted) SNR of the raw decode, dB.
     /// Measured r410 values are ~1.5 dB above each floor.
     min_snr_db: f64,
-    /// Floor on the absolute SNR of the high-passed decode, dB.
-    min_hp_snr_db: f64,
+    /// Floor on the share of output samples within ±1 LSB.
+    min_within1: f64,
     /// Floor on the normalised correlation of the raw decode.
     min_corr: f64,
     /// Bounds on the decode/reference energy ratio.
     energy: (f64, f64),
 }
+
+/// r483 floors, every fixture: the exact float path measures 76.9–
+/// 80.9 dB, ≥ 98.4 % of samples within ±1 LSB (tone fixtures ≥ 98.8 %,
+/// speech ≥ 98.4 %, the max deviation 5 LSB on the pitch glide's loudest
+/// pulses). r410 measured 10.5–14.4 dB raw / 13.1–19.5 dB through the
+/// then-fitted output high-pass.
+const MIN_SNR_DB: f64 = 74.0;
+const MIN_WITHIN1: f64 = 0.98;
 
 const FIXTURES: &[Fixture] = &[
     // --- tone-mix matrix (measured r410: raw SNR / hp SNR / corr / energy) ---
@@ -67,10 +76,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 8,
         spx: include_bytes!("fixtures/nb-conformance/nb_q1.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q1.noenh.pcm"),
-        min_snr_db: 11.0,
-        min_hp_snr_db: 29.5,
-        min_corr: 0.96,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 13.4 / 14.3 / 0.979 / 1.08
@@ -78,10 +87,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 2,
         spx: include_bytes!("fixtures/nb-conformance/nb_q2.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q2.noenh.pcm"),
-        min_snr_db: 11.5,
-        min_hp_snr_db: 29.0,
-        min_corr: 0.97,
-        energy: (0.9, 1.2),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 13.8 / 18.9 / 0.979 / 0.98
@@ -89,10 +98,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 3,
         spx: include_bytes!("fixtures/nb-conformance/nb_q3.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q3.noenh.pcm"),
-        min_snr_db: 12.0,
-        min_hp_snr_db: 29.0,
-        min_corr: 0.97,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 14.2 / 19.1 / 0.981 / 0.97
@@ -100,10 +109,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 4,
         spx: include_bytes!("fixtures/nb-conformance/nb_q5.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q5.noenh.pcm"),
-        min_snr_db: 12.5,
-        min_hp_snr_db: 29.0,
-        min_corr: 0.97,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 14.4 / 19.5 / 0.982 / 0.98
@@ -111,10 +120,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 5,
         spx: include_bytes!("fixtures/nb-conformance/nb_q7.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q7.noenh.pcm"),
-        min_snr_db: 12.5,
-        min_hp_snr_db: 30.0,
-        min_corr: 0.97,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 14.4 / 19.5 / 0.982 / 0.98
@@ -122,10 +131,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 6,
         spx: include_bytes!("fixtures/nb-conformance/nb_q9.spx"),
         reference: include_bytes!("fixtures/nb-conformance/nb_q9.noenh.pcm"),
-        min_snr_db: 12.5,
-        min_hp_snr_db: 30.0,
-        min_corr: 0.97,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     // --- speech-like pitch-glide matrix ---
     Fixture {
@@ -134,10 +143,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 8,
         spx: include_bytes!("fixtures/nb-conformance/sp_q1.spx"),
         reference: include_bytes!("fixtures/nb-conformance/sp_q1.noenh.pcm"),
-        min_snr_db: 11.0,
-        min_hp_snr_db: 24.0,
-        min_corr: 0.96,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 10.5 / 13.1 / 0.955 / 1.00
@@ -145,10 +154,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 2,
         spx: include_bytes!("fixtures/nb-conformance/sp_q2.spx"),
         reference: include_bytes!("fixtures/nb-conformance/sp_q2.noenh.pcm"),
-        min_snr_db: 9.0,
-        min_hp_snr_db: 22.5,
-        min_corr: 0.94,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 12.1 / 16.1 / 0.969 / 0.98
@@ -156,10 +165,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 3,
         spx: include_bytes!("fixtures/nb-conformance/sp_q3.spx"),
         reference: include_bytes!("fixtures/nb-conformance/sp_q3.noenh.pcm"),
-        min_snr_db: 10.5,
-        min_hp_snr_db: 22.5,
-        min_corr: 0.95,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
     Fixture {
         // 11.4 / 15.4 / 0.963 / 0.98
@@ -167,10 +176,10 @@ const FIXTURES: &[Fixture] = &[
         nb_mode: 5,
         spx: include_bytes!("fixtures/nb-conformance/sp_q7.spx"),
         reference: include_bytes!("fixtures/nb-conformance/sp_q7.noenh.pcm"),
-        min_snr_db: 10.0,
-        min_hp_snr_db: 22.5,
-        min_corr: 0.95,
-        energy: (0.85, 1.15),
+        min_snr_db: MIN_SNR_DB,
+        min_within1: MIN_WITHIN1,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
     },
 ];
 
@@ -222,6 +231,8 @@ fn decode_fixture(fx: &Fixture) -> Vec<f64> {
     assert!(packets.len() > 2, "{}: no audio packets", fx.name);
 
     let mut decoder = NarrowbandDecoder::new();
+
+    decoder.set_enhancer(false);
     let mut pcm = Vec::new();
     for (i, pkt) in packets[2..].iter().enumerate() {
         let (h, mut r) = NarrowbandFrameHeader::parse_bytes(pkt)
@@ -279,8 +290,8 @@ fn narrowband_conformance_matrix() {
         let reference = reference_pcm(fx.reference);
         assert_eq!(
             reference.len() % NARROWBAND_FRAME_SAMPLES,
-            REF_LEAD,
-            "{}: reference geometry (decode + look-ahead lead)",
+            40,
+            "{}: reference geometry (whole frames + one sub-frame)",
             fx.name
         );
         let ours = decode_fixture(fx);
@@ -291,15 +302,18 @@ fn narrowband_conformance_matrix() {
         assert!(ours.len() + REF_LEAD >= reference.len(), "{}", fx.name);
 
         let (snr, corr, ratio) = score(&ours, &reference, REF_LEAD);
-
-        let mut hp_pcm = ours.clone();
-        let mut hp = OutputHighpass::for_sample_rate(8_000);
-        hp.process_slice(&mut hp_pcm);
-        let (hp_snr, hp_corr, _) = score(&hp_pcm, &reference, REF_LEAD);
+        // Sample exactness of the rounded output.
+        let n = reference.len().min(ours.len());
+        let within1 = (0..n)
+            .filter(|&i| (reference[i] - f64::from(saturate_i16(ours[i]))).abs() <= 1.0)
+            .count() as f64
+            / n as f64;
 
         println!(
-            "{} (mode {}): raw {snr:.2} dB corr {corr:.4} energy {ratio:.4} | hp {hp_snr:.2} dB corr {hp_corr:.4}",
-            fx.name, fx.nb_mode
+            "{} (mode {}): {snr:.2} dB corr {corr:.6} energy {ratio:.5} | ±1 LSB {:.3} %",
+            fx.name,
+            fx.nb_mode,
+            100.0 * within1
         );
 
         if snr < fx.min_snr_db {
@@ -320,19 +334,12 @@ fn narrowband_conformance_matrix() {
                 fx.name, fx.energy.0, fx.energy.1
             ));
         }
-        if hp_snr < fx.min_hp_snr_db {
+        if within1 < fx.min_within1 {
             failures.push(format!(
-                "{}: high-passed SNR {hp_snr:.2} dB < {} dB",
-                fx.name, fx.min_hp_snr_db
+                "{}: ±1 LSB share {within1:.4} < {}",
+                fx.name, fx.min_within1
             ));
         }
-        // The reference has the default output high-pass active, so the
-        // fitted high-pass must move every decode closer to it.
-        assert!(
-            hp_snr > snr,
-            "{}: high-pass should improve the match ({snr:.2} → {hp_snr:.2})",
-            fx.name
-        );
     }
     assert!(
         failures.is_empty(),
@@ -341,9 +348,8 @@ fn narrowband_conformance_matrix() {
     );
 }
 
-/// The r410 arbitration is only meaningful at the fixed look-ahead
-/// alignment: verify the fixed-lead score is the best integer lag in a
-/// ±40-sample window, so a delay-convention regression fails loudly.
+/// The fixed alignment is the best integer lag in a 40-sample window,
+/// so a delay-convention regression fails loudly.
 #[test]
 fn reference_lead_is_the_best_alignment() {
     for fx in FIXTURES {
@@ -351,19 +357,14 @@ fn reference_lead_is_the_best_alignment() {
         let ours = decode_fixture(fx);
         let (at_lead, _, _) = score(&ours, &reference, REF_LEAD);
         let mut best = (f64::MIN, 0usize);
-        for lead in 0..=(2 * REF_LEAD) {
+        for lead in 0..=40 {
             let (s, _, _) = score(&ours, &reference, lead);
             if s > best.0 {
                 best = (s, lead);
             }
         }
-        // Allow a 1-sample / 0.8 dB grace: this RAW comparison holds
-        // our un-high-passed decode against the reference's default
-        // high-passed output, whose ≈0.08 rad phase lead at 440 Hz can
-        // make a pure-tone fixture score a hair higher one sample off
-        // (the hp rows of the matrix are the phase-consistent metric).
         assert!(
-            best.1.abs_diff(REF_LEAD) <= 1 && at_lead >= best.0 - 0.8,
+            best.1 == REF_LEAD && at_lead >= best.0,
             "{}: best lag {} ({:.2} dB) vs fixed lead {REF_LEAD} ({at_lead:.2} dB)",
             fx.name,
             best.1,

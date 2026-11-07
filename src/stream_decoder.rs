@@ -113,6 +113,15 @@ impl SpeexStreamDecoder {
         })
     }
 
+    /// Turn the narrowband perceptual enhancer on or off (on by default,
+    /// as in the reference decoder).
+    pub fn set_enhancer(&mut self, on: bool) {
+        match &mut self.inner {
+            Inner::NarrowOrWide(d) => d.set_enhancer(on),
+            Inner::Ultra(d) => d.set_enhancer(on),
+        }
+    }
+
     /// The stream's nominal output sampling rate in Hz (8000 / 16000 /
     /// 32000 per the header's rate class).
     pub fn output_rate_hz(&self) -> u32 {

@@ -356,7 +356,13 @@ impl std::error::Error for InnovationError {}
 /// analogous measurement for the high-band mode-4 pair confirms its
 /// staged `0.4` (stage-2-only crafted streams fit at 1.0006 of the
 /// stage-1-only gain through the 0.4-weighted decode, i.e. 0.4002).
-pub const NB_MODE7_STAGE2_WEIGHT: f32 = 0.455;
+///
+/// The exact value is `1/2.2` (r483): sweeping the weight on a q10
+/// speech stream decoded through the exact float synthesis path peaks
+/// sharply there (76.7 dB / ±1 LSB on 97.5 % of samples, against
+/// 71.4 dB at 0.455 and ≤ 54 dB at 0.45 / 0.46) — the reciprocal of
+/// the stage-2 target scaling, as the high band's `0.4 = 1/2.5`.
+pub const NB_MODE7_STAGE2_WEIGHT: f32 = 1.0 / 2.2;
 
 /// Decode the innovation sub-frame **shape** in `f32`, applying the
 /// exact mode-7 stage-2 weight [`NB_MODE7_STAGE2_WEIGHT`] (the `i16`

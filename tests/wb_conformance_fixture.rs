@@ -45,7 +45,10 @@ struct Fixture {
 }
 
 const FIXTURES: &[Fixture] = &[
-    // Measured r410 (full snr / corr / energy | low snr | high snr):
+    // r483: the exact float path aligns every fixture with the
+    // reference sample for sample (q6/q8's reference files trim the
+    // first 223 decoded samples). Measured r410 (full snr / corr /
+    // energy | low snr | high snr):
     Fixture {
         // 15.6 / 0.986 / 1.01 | low 19.6 | high −6.9 (folded band —
         // residual overshoot on peaky envelopes, recorded follow-up)
@@ -54,12 +57,12 @@ const FIXTURES: &[Fixture] = &[
         hb_mode: 1,
         spx: include_bytes!("fixtures/wb-conformance/wb_q4.spx"),
         reference: include_bytes!("fixtures/wb-conformance/wb_q4.noenh.pcm"),
-        ref_lead: 80,
-        min_snr_db: 18.5,
-        min_corr: 0.993,
-        energy: (0.9, 1.15),
-        min_hb_snr_db: -9.0,
-        min_hb_corr: 0.4,
+        ref_lead: 0,
+        min_snr_db: 70.0,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
+        min_hb_snr_db: 50.0,
+        min_hb_corr: 0.9999,
     },
     Fixture {
         // 18.3 / 0.9926 / 0.99
@@ -68,12 +71,12 @@ const FIXTURES: &[Fixture] = &[
         hb_mode: 2,
         spx: include_bytes!("fixtures/wb-conformance/wb_q6.spx"),
         reference: include_bytes!("fixtures/wb-conformance/wb_q6.noenh.pcm"),
-        ref_lead: -143,
-        min_snr_db: 18.5,
-        min_corr: 0.993,
-        energy: (0.9, 1.1),
-        min_hb_snr_db: 5.0,
-        min_hb_corr: 0.85,
+        ref_lead: -223,
+        min_snr_db: 70.0,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
+        min_hb_snr_db: 50.0,
+        min_hb_corr: 0.9999,
     },
     Fixture {
         // 18.2 / 0.9925 / 0.99
@@ -82,12 +85,12 @@ const FIXTURES: &[Fixture] = &[
         hb_mode: 3,
         spx: include_bytes!("fixtures/wb-conformance/wb_q8.spx"),
         reference: include_bytes!("fixtures/wb-conformance/wb_q8.noenh.pcm"),
-        ref_lead: -143,
-        min_snr_db: 18.5,
-        min_corr: 0.993,
-        energy: (0.9, 1.1),
-        min_hb_snr_db: 5.0,
-        min_hb_corr: 0.85,
+        ref_lead: -223,
+        min_snr_db: 70.0,
+        min_corr: 0.99999,
+        energy: (0.999, 1.001),
+        min_hb_snr_db: 50.0,
+        min_hb_corr: 0.9999,
     },
 ];
 
@@ -163,6 +166,8 @@ fn decode_fixture(fx: &Fixture) -> Vec<f64> {
     }
 
     let mut dec = WidebandDecoder::new();
+
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for (i, pkt) in packets[2..].iter().enumerate() {
         let frame = dec

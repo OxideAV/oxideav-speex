@@ -76,9 +76,9 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    Decoder, Encoder, Error, Frame, OptionField, OptionKind, OptionValue, Packet, Result,
-    RuntimeContext, SampleFormat, TimeBase, parse_options,
+    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptions, CodecOptionsStruct,
+    CodecParameters, Decoder, Encoder, Error, Frame, OptionField, OptionKind, OptionValue, Packet,
+    Result, RuntimeContext, SampleFormat, TimeBase, parse_options,
 };
 
 use crate::encoder_nb::{NB_FRAME_SAMPLES, NarrowbandEncoder};
@@ -213,10 +213,67 @@ pub struct SpeexFrameworkDecoder {
     /// Intensity-stereo reconstruction state (used only when
     /// `channels == 2`); carries the per-frame gain interpolation.
     stereo: StereoDecoder,
+    /// Perceptual enhancer setting from the `enhancer` option (an
+    /// in-band code-0 message overrides it mid-stream).
+    enhancer: bool,
+}
+
+/// Typed options accepted by the Speex decoder factory.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct SpeexDecoderOptions {
+    /// The narrowband perceptual enhancer (`docs` tracer §2) — on by
+    /// default, as in the reference decoder.
+    pub enhancer: bool,
+}
+
+impl Default for SpeexDecoderOptions {
+    fn default() -> Self {
+        Self { enhancer: true }
+    }
+}
+
+impl SpeexDecoderOptions {
+    /// The defaults (enhancer on).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the perceptual enhancer.
+    pub fn with_enhancer(mut self, on: bool) -> Self {
+        self.enhancer = on;
+        self
+    }
+}
+
+impl CodecOptionsStruct for SpeexDecoderOptions {
+    const SCHEMA: &'static [OptionField] = &[OptionField {
+        name: "enhancer",
+        kind: OptionKind::Bool,
+        default: OptionValue::Bool(true),
+        help: "Speex perceptual enhancer (narrowband pitch comb), default on",
+    }];
+
+    fn apply(&mut self, key: &str, value: &OptionValue) -> Result<()> {
+        match key {
+            "enhancer" => self.enhancer = value.as_bool()?,
+            other => return Err(Error::invalid(format!("speex: unknown option '{other}'"))),
+        }
+        Ok(())
+    }
 }
 
 impl SpeexFrameworkDecoder {
     fn from_params(params: &CodecParameters) -> Result<Self> {
+        // Only this decoder's own keys are parsed (strictly); other keys
+        // in a shared parameter bag are not this decoder's business.
+        let mut own = CodecOptions::new();
+        for (k, v) in params.options.iter() {
+            if SpeexDecoderOptions::SCHEMA.iter().any(|f| f.name == k) {
+                own.insert(k, v);
+            }
+        }
+        let opts: SpeexDecoderOptions = parse_options(&own)?;
         let mut dec = Self {
             codec_id: params.codec_id.clone(),
             stream: None,
@@ -227,6 +284,7 @@ impl SpeexFrameworkDecoder {
             pending: VecDeque::new(),
             flushed: false,
             stereo: StereoDecoder::new(),
+            enhancer: opts.enhancer,
         };
         if params.channels.is_some_and(|c| c > 2) {
             return Err(Error::unsupported(
@@ -246,8 +304,9 @@ impl SpeexFrameworkDecoder {
     /// Configure from a parsed stream header. `in_band` schedules the
     /// following `1 + extra_headers` metadata packets to be swallowed.
     fn install_header(&mut self, header: SpeexHeader, in_band: bool) -> Result<()> {
-        let stream = SpeexStreamDecoder::for_header(&header)
+        let mut stream = SpeexStreamDecoder::for_header(&header)
             .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+        stream.set_enhancer(self.enhancer);
         self.meta_skip = if in_band {
             1 + header.extra_headers.min(15)
         } else {
@@ -271,8 +330,9 @@ impl SpeexFrameworkDecoder {
         // A synthetic header carries exactly the mode field the stream
         // decoder dispatches on.
         let header = class.stream_header(MAX_QUALITY, false);
-        let stream = SpeexStreamDecoder::for_header(&header)
+        let mut stream = SpeexStreamDecoder::for_header(&header)
             .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+        stream.set_enhancer(self.enhancer);
         self.header = Some(header);
         self.stream = Some(stream);
         Ok(())
@@ -387,10 +447,10 @@ impl Decoder for SpeexFrameworkDecoder {
         // Rebuild the rate-class state fresh (zero IIR / excitation /
         // QMF history) so post-seek decode starts clean.
         if let Some(header) = &self.header {
-            self.stream = Some(
-                SpeexStreamDecoder::for_header(header)
-                    .map_err(|e| Error::invalid(format!("speex: {e}")))?,
-            );
+            let mut stream = SpeexStreamDecoder::for_header(header)
+                .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+            stream.set_enhancer(self.enhancer);
+            self.stream = Some(stream);
         } else if let Some(rate) = self.param_rate {
             self.install_rate(rate)?;
         }
@@ -740,6 +800,7 @@ pub fn register(ctx: &mut RuntimeContext) {
             .decoder(make_decoder)
             .encoder(make_encoder)
             .encoder_options::<SpeexEncoderOptions>()
+            .decoder_options::<SpeexDecoderOptions>()
             .payload_magic(SPEEX_MAGIC.as_slice()),
     );
 }
@@ -933,6 +994,61 @@ mod tests {
             pts: Some(pts),
             data: vec![data],
         })
+    }
+
+    #[test]
+    fn decoder_enhancer_option_is_parsed_and_registered() {
+        // Encode two seconds of a voiced-ish tone at the default quality
+        // (submode 5, comb strength 0.25), decode with the enhancer on
+        // and off. A key that is not the decoder's ("quality") is left
+        // alone rather than rejected.
+        let enc_params = audio_params(8_000, 1);
+        let mut enc = make_encoder(&enc_params).unwrap();
+        for i in 0..100 {
+            let mut pcm = Vec::with_capacity(320);
+            for n in 0..160 {
+                let t = (i * 160 + n) as f64 / 8_000.0;
+                let v = 6000.0 * (2.0 * std::f64::consts::PI * 150.0 * t).sin().powi(7);
+                pcm.extend_from_slice(&(v as i16).to_le_bytes());
+            }
+            let frame = AudioFrame {
+                samples: 160,
+                pts: Some((i * 160) as i64),
+                data: vec![pcm],
+            };
+            enc.send_frame(&Frame::Audio(frame)).unwrap();
+        }
+        enc.flush().unwrap();
+        let packets = drain_packets(enc.as_mut());
+        let decode = |on: Option<&str>| {
+            let mut p = enc.output_params().clone();
+            if let Some(v) = on {
+                p.options = CodecOptions::new().set("enhancer", v).set("quality", "4");
+            }
+            let mut dec = make_decoder(&p).unwrap();
+            for pk in &packets {
+                dec.send_packet(pk).unwrap();
+            }
+            dec.flush().unwrap();
+            let mut out = Vec::new();
+            while let Ok(Frame::Audio(a)) = dec.receive_frame() {
+                out.extend_from_slice(&a.data[0]);
+            }
+            out
+        };
+        let default = decode(None);
+        let on = decode(Some("true"));
+        let off = decode(Some("off"));
+        assert_eq!(default, on, "the enhancer is on by default");
+        assert_ne!(on, off, "the option reaches the decoder");
+
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        let schema = ctx
+            .codecs
+            .decoder_options_schema(&CodecId::new(CODEC_NAME))
+            .unwrap();
+        assert_eq!(schema[0].name, "enhancer");
     }
 
     #[test]

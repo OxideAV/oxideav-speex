@@ -24,19 +24,18 @@
 //! * the full 32 kHz reconstruction (measured 19.1 dB / corr 0.994).
 //!
 //! Reference geometry: `expected.pcm` is 64 160 samples s16le mono
-//! 32 kHz and leads the decode by 160 samples (double the wideband
-//! fixture's 80-sample QMF/look-ahead padding — the extra sub-band
-//! stage); the gate aligns at that fixed lag.
+//! 32 kHz, aligned with the decode sample for sample (r483: every layer
+//! now runs the reference's one-sub-frame synthesis lag; until r480 the
+//! reference led by 160 samples).
 
 use oxideav_speex::{QmfAnalysis, UltraWidebandDecoder, UwbDecodedFrame};
 
 const INPUT: &[u8] = include_bytes!("fixtures/uwb-fold-geometry/input.spx");
 const EXPECTED: &[u8] = include_bytes!("fixtures/uwb-fold-geometry/expected.pcm");
 
-/// Fixed alignment: the reference decode leads ours by 160 samples at
-/// 32 kHz (80 per 16 kHz half-band) — twice the wideband fixture's lead.
-const REF_LEAD_FULL: usize = 160;
-const REF_LEAD_HALF: usize = 80;
+/// Fixed alignment: none (module docs).
+const REF_LEAD_FULL: usize = 0;
+const REF_LEAD_HALF: usize = 0;
 
 fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut packets = Vec::new();
@@ -84,6 +83,8 @@ fn decode_fixture() -> Vec<f64> {
     assert_eq!(audio.len(), 101, "fixture carries 101 audio frames");
 
     let mut dec = UltraWidebandDecoder::new();
+
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for (i, pkt) in audio.iter().enumerate() {
         for f in dec
@@ -151,19 +152,25 @@ fn uwb_three_layer_decode_matches_reference() {
     // corr 0.994; floors leave margin for platform float variance). ---
     let (snr, corr) = score(&ours, &reference, REF_LEAD_FULL);
     println!("UWB full: {snr:.2} dB corr {corr:.5}");
-    // r450 outer crossover-anchored fold law: measured 22.63 dB /
-    // 0.99728 (was 19.1 / 0.994 under the r403 flat law).
-    assert!(snr >= 20.0, "full-signal absolute SNR {snr:.2} dB < 20 dB");
-    assert!(corr >= 0.995, "full-signal correlation {corr:.4} < 0.995");
+    // r483 exact float path: measured ≈ 75 dB (r450: 22.63 dB /
+    // 0.99728; r403: 19.1 / 0.994).
+    assert!(snr >= 70.0, "full-signal absolute SNR {snr:.2} dB < 70 dB");
+    assert!(
+        corr >= 0.99999,
+        "full-signal correlation {corr:.6} < 0.99999"
+    );
 
     // --- Absolute energy calibration (no scale freedom): the 25×
     // overshoot of the pre-r403 fold source fails here immediately. ---
-    let e_ours: f64 = ours.iter().map(|v| v * v).sum();
-    let e_ref: f64 = reference.iter().map(|v| v * v).sum();
+    // Over the common window (the reference file stops 480 samples
+    // before the decode's last frame ends).
+    let common = reference.len().min(ours.len());
+    let e_ours: f64 = ours[..common].iter().map(|v| v * v).sum();
+    let e_ref: f64 = reference[..common].iter().map(|v| v * v).sum();
     let ratio = e_ours / e_ref;
     assert!(
-        (0.85..=1.15).contains(&ratio),
-        "decode/reference energy ratio {ratio:.4} outside [0.85, 1.15]"
+        (0.999..=1.001).contains(&ratio),
+        "decode/reference energy ratio {ratio:.4} outside [0.999, 1.001]"
     );
 
     // --- Per-band conformance. ---
@@ -175,12 +182,12 @@ fn uwb_three_layer_decode_matches_reference() {
     let (lsnr, lcorr) = score(&our_low, &ref_low, REF_LEAD_HALF);
     println!("UWB low(0-8k WB layers): {lsnr:.2} dB corr {lcorr:.5}");
     assert!(
-        lsnr >= 18.0,
-        "embedded wideband (low 16 kHz) SNR {lsnr:.2} dB < 18 dB"
+        lsnr >= 70.0,
+        "embedded wideband (low 16 kHz) SNR {lsnr:.2} dB < 70 dB"
     );
     assert!(
-        lcorr >= 0.99,
-        "embedded wideband correlation {lcorr:.4} < 0.99"
+        lcorr >= 0.99999,
+        "embedded wideband correlation {lcorr:.6} < 0.99999"
     );
 
     // Second folded layer (8–16 kHz) — the r403 fold-source gate proper.
@@ -203,20 +210,19 @@ fn uwb_three_layer_decode_matches_reference() {
     let he_ref: f64 = ref_high.iter().map(|v| v * v).sum();
     let hratio = he_ours / he_ref;
     assert!(
-        (0.75..=1.25).contains(&hratio),
-        "second-layer energy ratio {hratio:.4} outside [0.75, 1.25]"
+        (0.99..=1.01).contains(&hratio),
+        "second-layer energy ratio {hratio:.4} outside [0.99, 1.01]"
     );
 }
 
-/// The reference decode carries the codec's **default output high-pass**
-/// (`--no-enh` disables only the perceptual enhancer). Applying the
-/// crate's fitted [`OutputHighpass`] at the 32 kHz output rate must move
-/// the decode *closer* to the reference — pinning both the filter fit at
-/// the ultra-wideband rate and the pipeline reading (measured: 19.1 dB
-/// raw → 21.3 dB high-passed, mirroring the wideband fixture's
-/// +1.6 dB). See `docs/audio/speex/decoder-output-empirical.md`.
+/// The reference decode carries the codec's **default output
+/// high-pass**, and so does this decoder (r483: the measured 8 kHz
+/// biquad on the narrowband layer, `WB_LOW_BAND_OUTPUT_HIGHPASS`). The
+/// decode therefore already matches without any post filter: applying
+/// the older fitted [`OutputHighpass`] on top now moves it *away* from
+/// the reference.
 #[test]
-fn output_highpass_improves_reference_match() {
+fn output_highpass_is_built_in() {
     use oxideav_speex::OutputHighpass;
 
     let reference = reference_pcm();
@@ -225,15 +231,10 @@ fn output_highpass_improves_reference_match() {
 
     let mut hp = OutputHighpass::for_sample_rate(32_000);
     hp.process_slice(&mut ours);
-    let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
-    println!("UWB hp: raw {raw_snr:.2} -> {hp_snr:.2} dB corr {hp_corr:.5}");
-
-    assert!(
-        hp_snr > raw_snr + 1.0,
-        "high-pass should improve the match: raw {raw_snr:.2} dB vs {hp_snr:.2} dB"
-    );
-    assert!(hp_snr >= 20.0, "high-passed SNR {hp_snr:.2} dB < 20 dB");
-    assert!(hp_corr >= 0.99, "high-passed correlation {hp_corr:.4}");
+    let (hp_snr, _) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("UWB: built-in {raw_snr:.2} dB; extra post filter {hp_snr:.2} dB");
+    assert!(raw_snr >= 70.0, "built-in high-pass decode {raw_snr:.2} dB");
+    assert!(hp_snr < raw_snr - 10.0, "a second high-pass must hurt");
 }
 
 /// The header-driven top-level path ([`SpeexStreamDecoder`]) decodes the
@@ -247,6 +248,8 @@ fn stream_decoder_path_matches_direct_uwb_decode() {
     assert!(header.is_ultrawideband(), "fixture is an UWB stream");
 
     let mut stream = SpeexStreamDecoder::for_header(&header).expect("uwb dispatch");
+
+    stream.set_enhancer(false);
     assert_eq!(stream.output_rate_hz(), 32_000);
     assert_eq!(stream.frame_samples(), 640);
 
@@ -256,6 +259,8 @@ fn stream_decoder_path_matches_direct_uwb_decode() {
     }
 
     let mut direct = UltraWidebandDecoder::new();
+
+    direct.set_enhancer(false);
     let mut via_direct: Vec<i16> = Vec::new();
     for pkt in &packets[2..] {
         via_direct.extend(direct.decode_packet_pcm_i16(pkt).expect("direct decode"));

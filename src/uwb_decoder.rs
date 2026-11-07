@@ -99,18 +99,17 @@
 //! envelopes) is a **docs gap** — see the crate README.
 
 use crate::bitreader::BitReader;
-use crate::codebooks::HB_LPC_ORDER;
 use crate::decoder::ControlMessage;
 use crate::frame::{NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
 use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_excitation_gain::HbExcitationGainIndex;
-use crate::hb_fold::{fold_gain_from_index, folded_uwb_excitation_subframe_crossover};
-use crate::hb_lsp_interp::HbSubFrameLsp;
-use crate::hb_synthesis::HbSynthesisFilter;
-use crate::lsp_to_lpc::hb_subframe_lpc_set_with_base;
+use crate::hb_fold::fold_gain_from_index;
 use crate::qmf::{QMF_WIDEBAND_FRAME, QmfSynthesis};
 use crate::signalling::{CustomInbandMessage, InbandMessage};
 use crate::submode::Submode;
+use crate::wb_synthesis::{
+    HbLayerState, hb_lsp_radians, hb_subframe_lpcs, hb_synth_step, lpc_band_edges,
+};
 use crate::wideband::{
     HIGH_BAND_SUBFRAMES_PER_FRAME, WidebandHighBandBody, WidebandHighBandFrameHeader,
     WidebandSubmode,
@@ -244,14 +243,14 @@ pub struct UltraWidebandDecoder {
     outer_qmf: QmfSynthesis,
     /// Second-layer order-8 synthesis filter (8–16 kHz half-band IIR
     /// memory, carried across frames).
-    layer2_filter: HbSynthesisFilter,
-    /// Previous frame's second-layer LSP codebook-delta vector (Q10,
-    /// pre-base) for the §9.1 interpolation, mirroring the wideband
-    /// high-band convention.
-    prev_layer2_lsp_delta_q10: Option<[i32; HB_LPC_ORDER]>,
+    layer2: HbLayerState,
     /// Per-sub-frame signed `A_l2(−1)` of the most recent frame's
     /// interpolated second-layer envelope.
     last_layer2_api: [f64; UWB_HB_SUBFRAMES],
+    /// The last 80-sample sub-frame of the previous frame's second-layer
+    /// synthesis: the layer is output one sub-frame behind, like the
+    /// inner layers.
+    layer2_pending: [f64; UWB_HALF_BAND_FRAME / UWB_HB_SUBFRAMES],
 }
 
 impl Default for UltraWidebandDecoder {
@@ -266,10 +265,16 @@ impl UltraWidebandDecoder {
         Self {
             wideband: WidebandDecoder::new(),
             outer_qmf: QmfSynthesis::new(),
-            layer2_filter: HbSynthesisFilter::new(),
-            prev_layer2_lsp_delta_q10: None,
+            layer2: HbLayerState::new(),
             last_layer2_api: [1.0; UWB_HB_SUBFRAMES],
+            layer2_pending: [0.0; UWB_HALF_BAND_FRAME / UWB_HB_SUBFRAMES],
         }
+    }
+
+    /// Turn the narrowband layer's perceptual enhancer on or off (on by
+    /// default; see [`crate::NarrowbandDecoder::set_enhancer`]).
+    pub fn set_enhancer(&mut self, on: bool) {
+        self.wideband.set_enhancer(on);
     }
 
     /// Decode every frame in an ultra-wideband packet.
@@ -294,6 +299,9 @@ impl UltraWidebandDecoder {
                     let message =
                         InbandMessage::parse(&mut reader).map_err(|_| UwbDecodeError::Framing)?;
                     let request = message.interpret();
+                    if let crate::signalling::InbandRequest::PerceptualEnhancement(on) = request {
+                        self.set_enhancer(on);
+                    }
                     out.push(UwbDecodedFrame::Control(ControlMessage::Inband {
                         message,
                         request,
@@ -383,45 +391,48 @@ impl UltraWidebandDecoder {
 
         // --- Second-layer synthesis: per-sub-frame interpolated LPC +
         // folded excitation through the order-8 half-band filter. ---
-        let curr_lsp = body.reconstructed_lsp_q10(&submode);
-        let lpc_sets = match curr_lsp {
-            Some(curr) => {
-                let sub_lsp = match self.prev_layer2_lsp_delta_q10 {
-                    Some(prev) => HbSubFrameLsp::new(&prev, &curr),
-                    None => HbSubFrameLsp::first_frame(&curr),
-                };
-                hb_subframe_lpc_set_with_base(&sub_lsp)
-            }
-            // Silence (mode 0, no LSP field): absent-envelope
-            // convention, A(z) = 1.
-            None => [[0.0; HB_LPC_ORDER]; UWB_HB_SUBFRAMES],
-        };
+        // The layer's LSP quantiser and mean are the wideband high
+        // band's (tracer §6); same float path, own state.
+        let lpc_sets = hb_subframe_lpcs(&mut self.layer2.prev_lsp, hb_lsp_radians(&body, &submode));
         let subframe_len = UWB_HALF_BAND_FRAME / UWB_HB_SUBFRAMES;
         let mut uwb_high_band = Box::new([0.0f64; UWB_HALF_BAND_FRAME]);
-        for sf in 0..UWB_HB_SUBFRAMES {
-            let mut api = 1.0f64;
-            for (j, &aj) in lpc_sets[sf].iter().enumerate() {
-                let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-                api -= aj * sgn;
+        if let Some(lpc_sets) = lpc_sets {
+            for sf in 0..UWB_HB_SUBFRAMES {
+                let a = &lpc_sets[sf];
+                let (l2_pi, _) = lpc_band_edges(a);
+                self.last_layer2_api[sf] = l2_pi;
+                let e: Vec<f64> = if submode.excitation_gain_bits > 0 {
+                    // Fold (tracer §5–§6): 0.7·exp((q−10)/8)/R over the
+                    // zero-stuffed inner high-band excitation,
+                    // R = (A_hb(+1)+0.01)/(A_l2(−1)+0.01).
+                    let q = body.subframes[sf].excitation_gain_index;
+                    let reg = crate::gain_scaled_hb_innovation::HB_CROSSOVER_REGULARISER;
+                    let g = crate::hb_fold::UWB_FOLD_CROSSOVER_SCALE
+                        * fold_gain_from_index(q)
+                        * (l2_pi + reg)
+                        / (hb1_env[sf].1 + reg);
+                    let half = subframe_len / 2;
+                    let mut v = vec![0.0f64; subframe_len];
+                    for (m, &x) in exc_hb1[sf * half..(sf + 1) * half].iter().enumerate() {
+                        v[2 * m] = g * f64::from(x);
+                    }
+                    v
+                } else {
+                    vec![0.0f64; subframe_len]
+                };
+                for (n, &x) in e.iter().enumerate() {
+                    uwb_high_band[sf * subframe_len + n] =
+                        hb_synth_step(&mut self.layer2.synth, a, x);
+                }
             }
-            self.last_layer2_api[sf] = api;
-            let range = sf * subframe_len..(sf + 1) * subframe_len;
-            let e = if submode.excitation_gain_bits > 0 {
-                folded_uwb_excitation_subframe_crossover(
-                    &exc_hb1[sf * (subframe_len / 2)..(sf + 1) * (subframe_len / 2)],
-                    fold_gain_from_index(body.subframes[sf].excitation_gain_index) as f32,
-                    &lpc_sets[sf],
-                    hb1_env[sf].1,
-                )
-            } else {
-                vec![0.0f64; subframe_len]
-            };
-            self.layer2_filter
-                .process(&lpc_sets[sf], &e, &mut uwb_high_band[range]);
         }
-        if let Some(curr) = curr_lsp {
-            self.prev_layer2_lsp_delta_q10 = Some(curr);
-        }
+        // One sub-frame behind, as the inner layers.
+        let lag = self.layer2_pending.len();
+        let pending = self.layer2_pending;
+        self.layer2_pending
+            .copy_from_slice(&uwb_high_band[UWB_HALF_BAND_FRAME - lag..]);
+        uwb_high_band.copy_within(..UWB_HALF_BAND_FRAME - lag, lag);
+        uwb_high_band[..lag].copy_from_slice(&pending);
 
         // Outer QMF: 16 kHz wideband PCM (low half) + 8–16 kHz band
         // (high half) → 640-sample 32 kHz PCM.

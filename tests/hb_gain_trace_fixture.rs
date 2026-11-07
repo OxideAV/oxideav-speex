@@ -83,6 +83,7 @@ type State = (f64, f64, f64);
 
 fn wb_state(spx: &[u8]) -> Vec<State> {
     let mut dec = WidebandDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for p in &lift(spx)[2..] {
         dec.decode_packet(p).expect("stream decodes");
@@ -93,6 +94,7 @@ fn wb_state(spx: &[u8]) -> Vec<State> {
 
 fn uwb_state(spx: &[u8]) -> Vec<State> {
     let mut dec = UltraWidebandDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for p in &lift(spx)[2..] {
         dec.decode_packet(p).expect("stream decodes");

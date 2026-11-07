@@ -93,6 +93,7 @@ fn mode4_q10_decodes_with_documented_residual() {
         .collect();
     let packets = lift(INPUT);
     let mut dec = SpeexDecoder::new();
+    dec.set_enhancer(false);
     let mut ours: Vec<f64> = Vec::new();
     let mut frames = 0usize;
     for pkt in &packets[2..] {
@@ -105,13 +106,14 @@ fn mode4_q10_decodes_with_documented_residual() {
     assert!(frames >= 70, "≈76 wideband frames, got {frames}");
     assert_eq!(ours.len() % 320, 0, "whole 320-sample WB frames");
 
-    // Per-frame magnitude band error (reference leads by 138 samples,
-    // the WB double-QMF look-ahead).
-    let lead = 138usize;
+    // Per-frame magnitude band error. The reference file trimmed the
+    // first 223 decoded samples (r483: this decoder's output is aligned
+    // with the reference decoder's, so that trim is the whole offset).
+    let lead = 223usize;
     let (mut slo, mut shi, mut c) = (0.0f64, 0.0f64, 0usize);
     for f in 0..75usize {
-        let ro = lead + f * 320;
-        let oo = f * 320;
+        let ro = f * 320;
+        let oo = lead + f * 320;
         if ro + 320 > reference.len() || oo + 320 > ours.len() {
             break;
         }
@@ -124,13 +126,16 @@ fn mode4_q10_decodes_with_documented_residual() {
     let (lo, hi) = (slo / c as f64, shi / c as f64);
     println!("hb-mode4-wb-q10 band mean|err| dB: 0-4k={lo:.2} 4-8k={hi:.2}");
 
-    // Low band (NB 7) tracks the reference (r450 measured 1.74 dB).
-    assert!(lo < 2.5, "0-4 kHz mean |err| {lo:.2} dB ≥ 2.5 (regression)");
-    // Mode-4 high band through the r450 crossover-anchored gain law
-    // (r480 measured 3.03 dB on this crude per-frame DFT metric; was
-    // ~6.1 dB under the r440 fitted law and ~13.1 dB correction-only —
-    // the QMF sub-band gate below is the precise one).
-    assert!(hi < 4.5, "4-8 kHz mean |err| {hi:.2} dB ≥ 4.5 (regression)");
+    // r483: both bands on the exact float path (r480: 1.74 / 3.03 dB on
+    // this crude per-frame DFT metric).
+    assert!(
+        lo < 0.05,
+        "0-4 kHz mean |err| {lo:.3} dB ≥ 0.05 (regression)"
+    );
+    assert!(
+        hi < 0.05,
+        "4-8 kHz mean |err| {hi:.3} dB ≥ 0.05 (regression)"
+    );
 }
 
 /// Split a 16 kHz signal into its two 8 kHz sub-bands with the crate's
@@ -192,6 +197,7 @@ fn mode4_q10_qmf_subband_gate() {
         .collect();
     let packets = lift(INPUT);
     let mut dec = SpeexDecoder::new();
+    dec.set_enhancer(false);
     let mut ours: Vec<f64> = Vec::new();
     for pkt in &packets[2..] {
         let pcm = dec.decode_packet_pcm_i16(pkt).expect("q10 stream decodes");
@@ -213,7 +219,7 @@ fn mode4_q10_qmf_subband_gate() {
     let (rlb_probe, _) = qmf_split(&reference[..n0]);
     let mut best_delay = 0usize;
     let mut best_corr = f64::NEG_INFINITY;
-    for delay in 100..200usize {
+    for delay in 180..280usize {
         let oa = &ours[delay..];
         let n = ((n0 - delay).min(rlb_probe.len() * 2) / 320) * 320;
         let (olb, _) = qmf_split(&oa[..n]);
@@ -225,8 +231,11 @@ fn mode4_q10_qmf_subband_gate() {
         }
     }
     println!("full-rate best our-delay {best_delay} (lb corr {best_corr:.4})");
+    // r483: the narrowband (and with it the high band) is now output
+    // one sub-frame behind the excitation decode, exactly as the
+    // reference: 143 + 80 = 223, the reference file's own trimmed lead.
     assert_eq!(
-        best_delay, 143,
+        best_delay, 223,
         "decoder delay vs the trimmed reference moved"
     );
 
@@ -246,19 +255,19 @@ fn mode4_q10_qmf_subband_gate() {
          high {hb_snr:.2} dB corr {hb_corr:.4} energy ratio {hb_energy_ratio:.3}"
     );
 
-    // r480 measured: low 25.60 dB / 0.9986; high 28.64 dB / 0.9993 /
-    // energy 1.002 — the exact tracer-2026-09.md §1 gain law
-    // (S = g_c·e_L/R, both +0.01 / +0.1 regularisers) replaced the r450
-    // reading (low 13.72 / high 21.13 dB, energy 1.119).
-    assert!(lb_corr > 0.995, "low sub-band corr {lb_corr:.4} ≤ 0.995");
-    assert!(lb_snr > 22.0, "low sub-band snr {lb_snr:.2} dB ≤ 22");
+    // r483 measured: low 75.80 dB, high 82.80 dB, energy 1.000 — the
+    // exact float path in both bands (transposed synthesis, float LSPs,
+    // polynomial cosine, the measured output high-pass); r480: low
+    // 25.60 dB / high 28.64 dB.
+    assert!(lb_corr > 0.9999, "low sub-band corr {lb_corr:.5} ≤ 0.9999");
+    assert!(lb_snr > 70.0, "low sub-band snr {lb_snr:.2} dB ≤ 70");
     assert!(
-        hb_corr > 0.998,
-        "high sub-band corr {hb_corr:.4} ≤ 0.998 (shape/sign/gain regression)"
+        hb_corr > 0.9999,
+        "high sub-band corr {hb_corr:.5} ≤ 0.9999 (shape/sign/gain regression)"
     );
-    assert!(hb_snr > 25.0, "high sub-band snr {hb_snr:.2} dB ≤ 25");
+    assert!(hb_snr > 75.0, "high sub-band snr {hb_snr:.2} dB ≤ 75");
     assert!(
-        hb_energy_ratio > 0.97 && hb_energy_ratio < 1.03,
-        "high sub-band energy ratio {hb_energy_ratio:.3} outside [0.97, 1.03]"
+        hb_energy_ratio > 0.999 && hb_energy_ratio < 1.001,
+        "high sub-band energy ratio {hb_energy_ratio:.4} outside [0.999, 1.001]"
     );
 }

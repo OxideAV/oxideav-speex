@@ -6,6 +6,56 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Decode is reference-exact to ±1 LSB** (r483). Narrowband, wideband
+  and ultra-wideband decodes now match the reference float decoder's
+  PCM sample for sample within ±1 LSB on every staged fixture (93–99 %
+  of samples identical; `tests/decode_exactness.rs`), up from
+  15–33 dB SNR. The decode path was rebuilt on the reference float
+  structure:
+  - the synthesis filter is the transposed direct form (its state
+    carries partial sums formed with the previous sub-frame's
+    coefficients across an LPC change — 28 → 73 dB on its own);
+  - the adaptive codebook reads the float excitation, not a 16-bit
+    rounding of it;
+  - LSPs use the float path's decimal stage scalings (`0.0039062`,
+    `0.0019531`, `0.00097656`), the staged polynomial cosine, and the
+    tracer §1.1 interpolation margin rule, in both bands;
+  - the output high-pass is applied by default, with the measured
+    coefficients (`NB_OUTPUT_HIGHPASS` at 8 kHz; the wideband stream's
+    narrowband layer uses a different design,
+    `WB_LOW_BAND_OUTPUT_HIGHPASS`), identified by output-error fits of
+    crafted constant-envelope streams against the black-box reference;
+  - every layer is output one sub-frame behind its excitation decode,
+    as the reference does: **decoded PCM is now 40 samples later at
+    8 kHz (80 at 16 kHz, 160 at 32 kHz) and aligned with the reference
+    decoder's output**;
+  - narrowband submode 7's second stage is weighted `1/2.2` (was the
+    probed 0.455);
+  - submode 1 is the exact noise-generator + pulse-train vocoder
+    (tracer §4, seed 1000), and null (submode-0) frames decode to the
+    reference comfort noise through the bandwidth-expanded last LPC
+    instead of silence;
+  - intensity stereo: the gain blend is the reference's one-pole
+    smoother run backwards over each frame, truncating to 16 bits, from
+    a neutral start; the one-sub-frame mono carry is gone (the decoder
+    now provides that lag itself).
+
+### Added
+
+- **Perceptual enhancer** (tracer §2): the narrowband pitch comb, on by
+  default as in the reference decoder. `NarrowbandDecoder` /
+  `WidebandDecoder` / `UltraWidebandDecoder` / `SpeexDecoder` /
+  `SpeexStreamDecoder::set_enhancer`, the framework decoder option
+  `enhancer` (`SpeexDecoderOptions`, registered), and in-band
+  code-0 requests toggle it. All 152 blocks of the staged
+  `nb-enhancer-q4` trace reproduce (period, lags, phases, gains to
+  2.4e-6); the enhanced decode is within ±1 LSB of the reference on
+  every sample.
+- `enhance_block` / `enhancer_period` / `enhancer_comb_gain` /
+  `EnhancerBlock`, `NarrowbandDecoder::set_output_highpass`.
+
 ### Fixed
 
 - **Every encoder transmitted a flat spectral envelope.** The LPC

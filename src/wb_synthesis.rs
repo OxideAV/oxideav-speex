@@ -441,6 +441,182 @@ pub fn synthesise_high_band_frame_leveled_env(
     Ok(out)
 }
 
+/// High-band layer state of the exact float decode path
+/// ([`decode_high_band_frame`]): the previous frame's LSPs and the
+/// transposed-form synthesis memory.
+#[derive(Debug, Clone, Default)]
+#[doc(hidden)]
+pub struct HbLayerState {
+    pub(crate) prev_lsp: Option<[f64; HB_LPC_ORDER]>,
+    pub(crate) synth: [f64; HB_LPC_ORDER],
+}
+
+impl HbLayerState {
+    /// Stream-start state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// High-band LSP stability margin in radians (tracer §1.1 step 1).
+pub(crate) const HB_LSP_MARGIN: f64 = 0.05;
+
+/// The frame's eight decoded high-band LSPs in radians: the linear base
+/// `0.3125·i + 0.75` plus the two MSVQ stages at the reference float
+/// path's stage scalings (`0.0039062`, `0.0019531`). `None` for a
+/// sub-mode that carries no LSP field.
+pub(crate) fn hb_lsp_radians(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+) -> Option<[f64; HB_LPC_ORDER]> {
+    let st = body.lsp_stages(submode)?;
+    let s1 = crate::codebooks::hb_lsp_stage1().get(usize::from(st.stage1))?;
+    let s2 = crate::codebooks::hb_lsp_stage2().get(usize::from(st.stage2))?;
+    let mut l = [0.0f64; HB_LPC_ORDER];
+    for (i, v) in l.iter_mut().enumerate() {
+        *v = 0.3125 * i as f64 + 0.75 + f64::from(s1[i]) * 0.0039062 + f64::from(s2[i]) * 0.0019531;
+    }
+    Some(l)
+}
+
+/// The four per-sub-frame interpolated LPC sets `a₁..a₈` of
+/// `A(z) = 1 + Σ a_k z^{−k}` (tracer §1.1 steps 1–2), advancing the
+/// layer's previous-LSP state. `None` when the frame carries no LSPs.
+pub(crate) fn hb_subframe_lpcs(
+    state_prev: &mut Option<[f64; HB_LPC_ORDER]>,
+    lsp: Option<[f64; HB_LPC_ORDER]>,
+) -> Option<[[f64; HB_LPC_ORDER]; HB_SUBFRAMES_PER_FRAME]> {
+    let lsp = lsp?;
+    let prev = state_prev.unwrap_or(lsp);
+    let mut out = [[0.0f64; HB_LPC_ORDER]; HB_SUBFRAMES_PER_FRAME];
+    for (sf, a) in out.iter_mut().enumerate() {
+        let w = (sf as f64 + 1.0) / 4.0;
+        let mut l = [0.0f64; HB_LPC_ORDER];
+        for i in 0..HB_LPC_ORDER {
+            l[i] = (1.0 - w) * prev[i] + w * lsp[i];
+        }
+        crate::narrowband_decoder::enforce_interpolated_margin(&mut l, HB_LSP_MARGIN);
+        *a = crate::narrowband_decoder::lsp_to_lpc_poly(&l);
+    }
+    *state_prev = Some(lsp);
+    Some(out)
+}
+
+/// `A(∓1) = 1 + Σ (∓1)^k a_k` of an `A(z) = 1 + Σ a_k z^{−k}` set:
+/// `(A(−1), A(+1))`.
+pub(crate) fn lpc_band_edges(a: &[f64]) -> (f64, f64) {
+    let (mut at_pi, mut at_0) = (1.0f64, 1.0f64);
+    for (k, &ak) in a.iter().enumerate() {
+        at_0 += ak;
+        if k % 2 == 0 {
+            at_pi -= ak;
+        } else {
+            at_pi += ak;
+        }
+    }
+    (at_pi, at_0)
+}
+
+/// One sample of the transposed-direct-form all-pole synthesis
+/// `y = x − Σ a_k y[n−k]` (the same form as the narrowband layer).
+#[inline]
+pub(crate) fn hb_synth_step(mem: &mut [f64; HB_LPC_ORDER], a: &[f64; HB_LPC_ORDER], x: f64) -> f64 {
+    let y = x + mem[0];
+    for j in 0..HB_LPC_ORDER - 1 {
+        mem[j] = mem[j + 1] - a[j] * y;
+    }
+    mem[HB_LPC_ORDER - 1] = -a[HB_LPC_ORDER - 1] * y;
+    y
+}
+
+/// Decode one wideband high-band frame on the exact float path
+/// (`tracer-2026-09.md` §1, §5):
+///
+/// * LSPs and per-sub-frame LPC as [`hb_subframe_lpcs`];
+/// * submode 1 (fold): `x[n] = 0.9·exp((q−10)/8)/R·(−1)ⁿ·c_nb[n]` over
+///   the narrowband fixed-codebook innovation `c_nb`;
+/// * submodes 2/3/4: `x = S·c₁ + 0.4·S·c₂`,
+///   `S = 0.8736·bound[q]·e_L/R`, `e_L = sqrt(0.1 + mean e_nb²)`;
+/// * `R = (A_nb(−1) + 0.01)/(A_hb(−1) + 0.01)`, signed;
+/// * transposed-form synthesis carried across sub-frames and frames.
+///
+/// `lb_excitation` / `lb_innovation` / `lb_api` are the same frame's
+/// narrowband excitation, innovation and per-sub-frame `A_nb(−1)`.
+/// Writes the high-band excitation to `exc_out` and each sub-frame's
+/// `(|A_hb(−1)|, |A_hb(+1)|)` to `env_out`; returns the synthesised
+/// 8 kHz half-band signal (not yet delayed).
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn decode_high_band_frame(
+    body: &WidebandHighBandBody,
+    submode: &WidebandHighBandSubmode,
+    state: &mut HbLayerState,
+    lb_excitation: &[f32; HB_FRAME_SAMPLES],
+    lb_innovation: &[f32; HB_FRAME_SAMPLES],
+    lb_api: &[f64; HB_SUBFRAMES_PER_FRAME],
+    exc_out: &mut [f32; HB_FRAME_SAMPLES],
+    env_out: &mut [(f64, f64); HB_SUBFRAMES_PER_FRAME],
+) -> Result<[f64; HB_FRAME_SAMPLES], HbInnovationError> {
+    let reg = crate::gain_scaled_hb_innovation::HB_CROSSOVER_REGULARISER;
+    let mut out = [0.0f64; HB_FRAME_SAMPLES];
+    let Some(lpcs) = hb_subframe_lpcs(&mut state.prev_lsp, hb_lsp_radians(body, submode)) else {
+        // Submode 0: no high band this frame.
+        *exc_out = [0.0; HB_FRAME_SAMPLES];
+        return Ok(out);
+    };
+    for sf in 0..HB_SUBFRAMES_PER_FRAME {
+        let a = &lpcs[sf];
+        let (hb_pi, hb_0) = lpc_band_edges(a);
+        env_out[sf] = (hb_pi.abs(), hb_0.abs());
+        let r = (lb_api[sf] + reg) / (hb_pi + reg);
+        let range = sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES;
+        let mut x = [0.0f64; HB_SUBFRAME_SAMPLES];
+        if submode.excitation_vq_bits == 0 {
+            if submode.excitation_gain_bits > 0 {
+                let q = body.subframes[sf].excitation_gain_index;
+                let g = crate::hb_fold::HB_FOLD_CROSSOVER_SCALE
+                    * crate::hb_fold::fold_gain_from_index(q)
+                    / r;
+                for (n, (v, &c)) in x.iter_mut().zip(&lb_innovation[range.clone()]).enumerate() {
+                    let s = g * f64::from(c);
+                    *v = if n % 2 == 0 { s } else { -s };
+                }
+            }
+        } else {
+            let e_l = crate::gain_scaled_hb_innovation::floored_rms(
+                lb_excitation[range.clone()].iter().map(|&v| f64::from(v)),
+            );
+            let gc = crate::hb_excitation_gain::HbExcitationGainIndex::from_body(body, submode, sf)
+                .map(crate::gain_reconstruction::reconstruct_hb_exc_gain)
+                .unwrap_or(0.0);
+            let s = f64::from(gc) * e_l / r;
+            let shape: [f32; HB_SUBFRAME_SAMPLES] = if submode.excitation_vq_bits == 80 {
+                crate::hb_innovation::decode_hb_subframe_mode4_f32(
+                    body.subframes[sf].excitation_vq_index,
+                )
+            } else {
+                let raw = crate::hb_innovation::decode_hb_subframe(
+                    submode,
+                    body.subframes[sf].excitation_vq_index,
+                )?;
+                let mut f = [0.0f32; HB_SUBFRAME_SAMPLES];
+                for (o, &v) in f.iter_mut().zip(raw.iter()) {
+                    *o = f32::from(v);
+                }
+                f
+            };
+            for (v, &c) in x.iter_mut().zip(shape.iter()) {
+                *v = s * f64::from(c) / 32.0;
+            }
+        }
+        for (n, &v) in x.iter().enumerate() {
+            exc_out[sf * HB_SUBFRAME_SAMPLES + n] = v as f32;
+            out[sf * HB_SUBFRAME_SAMPLES + n] = hb_synth_step(&mut state.synth, a, v);
+        }
+    }
+    Ok(out)
+}
+
 /// Sampling-rate class of one embedded sub-band layer in the Speex
 /// scalable bit-stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

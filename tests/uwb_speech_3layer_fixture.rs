@@ -58,9 +58,10 @@ const INPUT: &[u8] = include_bytes!("fixtures/uwb-speech-3layer/input.spx");
 const EXPECTED: &[u8] = include_bytes!("fixtures/uwb-speech-3layer/expected.pcm");
 const TRACE: &str = include_str!("fixtures/uwb-speech-3layer/frame-trace.txt");
 
-/// The reference decode leads ours by 160 samples at 32 kHz (the
-/// double-QMF look-ahead padding, same as the tone fixture).
-const REF_LEAD: usize = 160;
+/// The reference decode is aligned with ours sample for sample (r483:
+/// every layer runs the reference's one-sub-frame synthesis lag; until
+/// r480 the reference led by 160 samples at 32 kHz).
+const REF_LEAD: usize = 0;
 
 fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut packets = Vec::new();
@@ -167,6 +168,7 @@ fn decode_fixture() -> Vec<f64> {
     let packets = lift_ogg_packets(INPUT);
     assert!(packets.len() > 2, "Ogg stream must carry audio packets");
     let mut dec = UltraWidebandDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for pkt in &packets[2..] {
         for f in dec.decode_packet(pkt).unwrap() {
@@ -272,7 +274,8 @@ fn decode_tracks_reference() {
     }
     let snr = 10.0 * (er / (err + 1e-12)).log10();
     println!("uwb-speech full: {snr:.2} dB");
-    assert!(snr >= 15.5, "full-signal SNR {snr:.2} dB < 15.5 dB");
+    // r483 exact float path: ≈ 74 dB (r480: 16.3 dB).
+    assert!(snr >= 70.0, "full-signal SNR {snr:.2} dB < 70 dB");
 
     // Per-frame per-band mean |error| over the non-silent frames.
     let mut sum = [0.0f64; 3];
@@ -302,26 +305,10 @@ fn decode_tracks_reference() {
         m[0], m[1], m[2]
     );
 
-    // Narrowband band is reference-accurate (r450 measured 0.85 dB).
-    assert!(m[0] < 1.3, "0-4 kHz mean |err| {:.2} dB ≥ 1.3", m[0]);
-    // High-band fold layers under the r450 crossover-anchored,
-    // innovation-only-source fold law (measured 0.92 / 3.17 dB; was
-    // 4.77 / 7.06 dB at campaign A). The 8–16 kHz tail is the outer
-    // (second-layer) fold, still on the r403 excitation-source law.
-    assert!(
-        m[1] < 1.3,
-        "4-8 kHz mean |err| {:.2} dB ≥ 1.3 (regression, was 0.84)",
-        m[1]
-    );
-    assert!(
-        m[2] < 1.7,
-        "8-16 kHz mean |err| {:.2} dB ≥ 1.7 (regression, was 1.12)",
-        m[2]
-    );
-
-    // If the high-band error ever drops below 3 dB the fold divergence
-    // is materially fixed — raise these floors and update the README.
-    if m[2] < 3.0 {
-        println!("NOTE: uwb outer-fold divergence appears fixed — raise floors");
+    // r483: every band on the exact float path, measured 0.01 / 0.02 /
+    // 0.05 dB (r450: 0.85 / 0.92 / 1.12 dB; campaign A: 1.1 / 4.8 /
+    // 7.1 dB).
+    for (b, v) in m.iter().enumerate() {
+        assert!(*v < 0.1, "band {b} mean |err| {v:.3} dB ≥ 0.1");
     }
 }

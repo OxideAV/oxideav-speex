@@ -226,15 +226,19 @@ mod tests {
         let pkt = enc.encode_packet_dtx(&frames, 5, &mut vad).unwrap();
         assert_eq!(pkt.len(), 4, "4 DTX frames + terminator in 4 bytes");
 
-        // The DTX frames still decode (as silent audio), preserving the
-        // frame count.
+        // The DTX frames still decode, preserving the frame count, to
+        // the null frame's comfort noise (tracer §4): at the stream
+        // start its level is the +0.1 floor, i.e. a sub-LSB hiss.
         let mut dec = SpeexDecoder::new();
         let decoded = dec.decode_packet(&pkt).unwrap();
         assert_eq!(decoded.len(), 4);
         for f in &decoded {
             match f {
                 DecodedFrame::Narrowband(pcm) => {
-                    assert!(pcm.iter().all(|&s| s == 0.0), "DTX decodes silent")
+                    assert!(
+                        pcm.iter().all(|&s| s.abs() < 2.0),
+                        "DTX decodes to faint hiss"
+                    )
                 }
                 other => panic!("expected Narrowband, got {other:?}"),
             }
@@ -299,7 +303,8 @@ mod tests {
         let mut dec = UltraWidebandDecoder::new();
         let pcm = dec.decode_packet_pcm_i16(&pkt).unwrap();
         assert_eq!(pcm.len(), 2 * 640, "two 32 kHz frames of (silent) audio");
-        assert!(pcm.iter().all(|&s| s == 0));
+        // Null-frame comfort noise at the stream-start floor level.
+        assert!(pcm.iter().all(|&s| s.abs() <= 2));
     }
 
     #[test]

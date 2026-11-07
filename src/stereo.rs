@@ -52,9 +52,10 @@
 //! exactly at `frame_start − N/4` in audio-aligned time). The steady
 //! laws confirm to 0.3 %: `ln(gL/gR) = bal/8` across the balance grid
 //! and `gL² + gR²` hits the staged `1/e_ratio` table on every index.
-//! [`StereoDecoder`] reproduces the lead by buffering the mono signal
-//! one sub-frame (matching the reference's own relative timing), so
-//! the interpolation lands on the measured phase.
+//! That one-sub-frame mono buffering is the narrowband synthesis lag
+//! itself, which [`crate::NarrowbandDecoder`] reproduces (r483): its
+//! output is already aligned with the reference's, so [`StereoDecoder`]
+//! applies each frame's gain block to the same frame's decoded mono.
 
 /// The `e_ratio` ladder (docs `intensity-stereo.md` §3.1): geometric,
 /// ratio ≈ 2^(1/3), fitting all three sampling modes uniformly.
@@ -120,14 +121,21 @@ pub fn pack_stereo_payload(sign: u8, bal: u8, e: u8) -> u8 {
 }
 
 /// Stateful intensity-stereo **decoder**: applies the per-frame gains
-/// with the §4 intra-frame interpolation, producing interleaved L/R.
+/// through the reference's one-pole gain smoother, producing interleaved
+/// L/R.
+///
+/// The smoother runs **backwards** over each frame — the in-place
+/// mono→stereo expansion order — so the measured §4 blend
+/// `g(i) = g_new·(1 − a^(N−i)) + g_prev·a^(N−i)` is
+/// `g ← a·g + (1 − a)·g_target` iterated from the frame's last sample to
+/// its first, its state carried to the next frame (r483: with the mono
+/// decode reference-aligned, this reproduces the staged two-channel
+/// decodes to the mono decode's own ±1 LSB). Each output sample is the
+/// smoothed gain times the 16-bit mono sample, **truncated** toward
+/// zero; the state starts at the neutral `1.0` (docs §3.1).
 #[derive(Debug, Clone)]
 pub struct StereoDecoder {
-    prev: StereoGains,
-    seeded: bool,
-    /// One-sub-frame mono carry implementing the measured block phase
-    /// (module docs): the gains lead the audio by `N/4` samples.
-    carry: Vec<i16>,
+    state: StereoGains,
 }
 
 impl Default for StereoDecoder {
@@ -137,60 +145,37 @@ impl Default for StereoDecoder {
 }
 
 impl StereoDecoder {
-    /// Fresh decoder; the pre-stream gains are the neutral `1.0` the
-    /// start-up transient pulls toward (docs §3.1).
+    /// Fresh decoder; the smoother starts at the neutral `1.0` the
+    /// start-up transient pulls from (docs §3.1).
     pub fn new() -> Self {
         Self {
-            prev: StereoGains { gl: 1.0, gr: 1.0 },
-            seeded: false,
-            carry: Vec::new(),
+            state: StereoGains { gl: 1.0, gr: 1.0 },
         }
     }
 
     /// Interleave one mono frame into L/R `i16` using the payload's
-    /// reconstructed gains, blended from the previous frame's gains over
-    /// the block (docs §4). Returns `2 * mono.len()` interleaved samples.
+    /// reconstructed gains (docs §3) through the smoother (§4). Returns
+    /// `2 * mono.len()` interleaved samples.
     pub fn interleave_frame(&mut self, mono: &[i16], payload: u8) -> Vec<i16> {
         let target = stereo_gains(payload);
-        // First frame: no transient, use the target directly as prev so
-        // the block starts at steady state; seed the one-sub-frame mono
-        // carry with silence (the reference's buffer starts zeroed).
         let n = mono.len();
-        let lead = n / 4;
-        if !self.seeded {
-            self.prev = target;
-            self.seeded = true;
-            self.carry = vec![0i16; lead];
+        let mut out = vec![0i16; n * 2];
+        let (a, b) = (STEREO_INTERP_A, 1.0 - STEREO_INTERP_A);
+        for i in (0..n).rev() {
+            self.state.gl = a * self.state.gl + b * target.gl;
+            self.state.gr = a * self.state.gr + b * target.gr;
+            let sv = f64::from(mono[i]);
+            out[2 * i] = truncate_i16(self.state.gl * sv);
+            out[2 * i + 1] = truncate_i16(self.state.gr * sv);
         }
-        // The gain block is aligned to the *delayed* mono (module docs:
-        // the reference's gains lead its audio by N/4): consume
-        // [carry, mono[..n-lead]] under this frame's block, keep the
-        // frame's tail for the next block.
-        let mut out = Vec::with_capacity(n * 2);
-        let delayed = self
-            .carry
-            .iter()
-            .copied()
-            .chain(mono[..n - lead].iter().copied());
-        for (i, s) in delayed.enumerate() {
-            // Weight on the previous frame's gains: a^(N-i).
-            let w_prev = STEREO_INTERP_A.powi((n - i) as i32);
-            let gl = target.gl * (1.0 - w_prev) + self.prev.gl * w_prev;
-            let gr = target.gr * (1.0 - w_prev) + self.prev.gr * w_prev;
-            let sv = f64::from(s);
-            out.push(clamp_i16(gl * sv));
-            out.push(clamp_i16(gr * sv));
-        }
-        self.carry.clear();
-        self.carry.extend_from_slice(&mono[n - lead..]);
-        self.prev = target;
         out
     }
 }
 
+/// Float → 16-bit by truncation toward zero, saturated.
 #[inline]
-fn clamp_i16(v: f64) -> i16 {
-    v.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
+fn truncate_i16(v: f64) -> i16 {
+    v.trunc().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 /// Encoder mono fold (docs §5): the transmitted signal is the plain
@@ -281,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn interpolation_starts_at_steady_state_on_first_frame() {
+    fn smoother_runs_backwards_from_neutral() {
         let mut d = StereoDecoder::new();
         let mono = vec![1000i16; 160];
         // bal=6 -> left louder.
@@ -289,13 +274,17 @@ mod tests {
         let out = d.interleave_frame(&mono, payload);
         assert_eq!(out.len(), 320);
         let g = stereo_gains(payload);
-        // First frame is steady (prev seeded to target) but the first
-        // N/4 samples are the zero-seeded one-sub-frame mono carry
-        // (r450 block phase); the block's steady gains show from there.
-        assert_eq!(out[0], 0);
-        assert_eq!(out[1], 0);
-        assert_eq!(out[80], (g.gl * 1000.0).round() as i16);
-        assert_eq!(out[81], (g.gr * 1000.0).round() as i16);
+        // The frame's LAST sample is one smoother step from 1.0; the
+        // first is 160 steps on (weight a^160 left on the start value).
+        let last = STEREO_INTERP_A + (1.0 - STEREO_INTERP_A) * g.gl;
+        assert_eq!(out[318], (last * 1000.0).trunc() as i16);
+        let w = STEREO_INTERP_A.powi(160);
+        let first = g.gl * (1.0 - w) + w;
+        assert!((f64::from(out[0]) - first * 1000.0).abs() <= 1.0);
+        // A second frame starts (at its end) from that state: steady.
+        let out2 = d.interleave_frame(&mono, payload);
+        assert!((f64::from(out2[318]) - g.gl * 1000.0).abs() <= 1.0 + 1000.0 * w);
+        assert!((f64::from(out2[1]) - g.gr * 1000.0).abs() <= 1.0);
     }
 
     #[test]

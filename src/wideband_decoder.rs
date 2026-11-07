@@ -47,14 +47,13 @@
 
 use crate::bitreader::BitReader;
 use crate::frame::NarrowbandFrameHeader;
-use crate::hb_synthesis::HbSynthesisFilter;
 use crate::narrowband_body::NarrowbandFrameBody;
 use crate::narrowband_decoder::{
     NARROWBAND_FRAME_SAMPLES, NarrowbandDecodeError, NarrowbandDecoder,
 };
 use crate::qmf::{QMF_WIDEBAND_FRAME, QmfSynthesis};
 use crate::submode::Submode;
-use crate::wb_synthesis::{HB_FRAME_SAMPLES, synthesise_high_band_frame_leveled_env};
+use crate::wb_synthesis::{HB_FRAME_SAMPLES, HbLayerState, decode_high_band_frame};
 use crate::wideband::{
     WidebandBodyError, WidebandHighBandBody, WidebandHighBandFrameHeader, WidebandSubmode,
 };
@@ -179,13 +178,8 @@ impl From<WidebandBodyError> for WidebandDecodeError {
 #[derive(Debug, Clone)]
 pub struct WidebandDecoder {
     low_band: NarrowbandDecoder,
-    high_band_filter: HbSynthesisFilter,
-    /// Previous wideband frame's reconstructed high-band LSP
-    /// codebook-delta vector (Q10, pre-base), carried so the per-frame
-    /// high-band LSP interpolation (§9.1 / §10.1) is continuous across
-    /// frames. `None` at stream start and after a high-band silence
-    /// frame that transmitted no LSP.
-    prev_hb_lsp_delta_q10: Option<[i32; crate::codebooks::HB_LPC_ORDER]>,
+    /// High-band layer state (previous LSPs, synthesis memory).
+    high_band: HbLayerState,
     /// QMF synthesis filterbank state (FIR band histories) for the final
     /// half-band → 16 kHz recombination, carried across frames.
     qmf: QmfSynthesis,
@@ -197,6 +191,11 @@ pub struct WidebandDecoder {
     /// Per-sub-frame high-band envelope band-edge responses (see
     /// [`Self::last_hb_env`]).
     last_hb_env: [(f64, f64); 4],
+    /// The last sub-frame of the previous frame's high-band synthesis:
+    /// the high band is output one 40-sample sub-frame behind, like the
+    /// narrowband low band (tracer §1.2 "Synthesis lag"), so the two
+    /// half-bands stay aligned.
+    hb_pending: [f64; 40],
 }
 
 impl Default for WidebandDecoder {
@@ -211,12 +210,18 @@ impl WidebandDecoder {
     pub fn new() -> Self {
         Self {
             low_band: NarrowbandDecoder::new(),
-            high_band_filter: HbSynthesisFilter::new(),
-            prev_hb_lsp_delta_q10: None,
+            high_band: HbLayerState::new(),
             qmf: QmfSynthesis::new(),
             last_hb_excitation: [0.0; HB_FRAME_SAMPLES],
             last_hb_env: [(1.0, 1.0); 4],
+            hb_pending: [0.0; 40],
         }
+    }
+
+    /// Turn the low band's perceptual enhancer on or off (on by default;
+    /// see [`NarrowbandDecoder::set_enhancer`]).
+    pub fn set_enhancer(&mut self, on: bool) {
+        self.low_band.set_enhancer(on);
     }
 
     /// The high-band excitation of the most recently decoded frame (160
@@ -310,44 +315,37 @@ impl WidebandDecoder {
         hb_body: &WidebandHighBandBody,
         hb_submode: &crate::wideband::WidebandHighBandSubmode,
     ) -> Result<WidebandFrame, WidebandDecodeError> {
+        self.low_band.set_highpass_layer(true);
         let low_band = self.low_band.decode_frame(nb_body, nb_submode)?;
 
-        // The gain-only sub-mode (Table 10.1 mode 1) folds the embedded
-        // narrowband frame's excitation into the high band (r393,
-        // fixture-arbitrated law — see `crate::hb_fold`); the fold
-        // source is the low-band decoder's just-composed excitation.
+        // The high band reads the same frame's narrowband excitation
+        // (gain base e_L), fixed-codebook innovation (fold source) and
+        // per-sub-frame A_nb(−1) (tracer-2026-09.md §1, §5).
         let lb_excitation = *self.low_band.last_frame_excitation();
-        // Both high-band absolute gain laws anchor on the embedded low
-        // band at the 4 kHz QMF crossover. Per sub-frame:
-        // (e_L/(A_nb(−1)+0.01), A_nb(−1)) — the low-band term of the
-        // exact modes-2/3/4 law (`hb_gc_crossover_gain`,
-        // tracer-2026-09.md §1.1) plus the crossover response the
-        // mode-1 fold reads (`HB_FOLD_CROSSOVER_SCALE`).
-        let api = self.low_band.last_crossover_response();
-        let mut hb_gain_base = [(0.0f64, 1.0f64); 4];
-        for (sf, slot) in hb_gain_base.iter_mut().enumerate() {
-            let seg = &lb_excitation[sf * 40..(sf + 1) * 40];
-            *slot = (
-                crate::gain_scaled_hb_innovation::hb_gain_lb_base(seg, api[sf]),
-                api[sf],
-            );
-        }
         let lb_innovation = *self.low_band.last_frame_innovation();
+        let lb_api = *self.low_band.last_crossover_response();
         let mut hb_excitation = [0.0f32; HB_FRAME_SAMPLES];
         let mut hb_env = [(1.0f64, 1.0f64); 4];
-        let high_band = synthesise_high_band_frame_leveled_env(
+        let high_band = decode_high_band_frame(
             hb_body,
             hb_submode,
-            &mut self.high_band_filter,
-            &mut self.prev_hb_lsp_delta_q10,
+            &mut self.high_band,
             &lb_excitation,
-            Some((&hb_gain_base, &lb_innovation)),
+            &lb_innovation,
+            &lb_api,
             &mut hb_excitation,
-            Some(&mut hb_env),
+            &mut hb_env,
         )
         .map_err(|_| WidebandDecodeError::HighBandUndocumented)?;
         self.last_hb_excitation = hb_excitation;
         self.last_hb_env = hb_env;
+        // One sub-frame behind, as the low band.
+        let mut high_band = high_band;
+        let pending = self.hb_pending;
+        self.hb_pending
+            .copy_from_slice(&high_band[HB_FRAME_SAMPLES - 40..]);
+        high_band.copy_within(..HB_FRAME_SAMPLES - 40, 40);
+        high_band[..40].copy_from_slice(&pending);
 
         // --- QMF synthesis: recombine the two half-bands → 16 kHz PCM ---
         let wideband_pcm = self.qmf.reconstruct_frame(&low_band, &high_band);

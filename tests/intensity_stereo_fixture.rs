@@ -85,6 +85,7 @@ fn decode() -> (Vec<f64>, Vec<f64>) {
     let packets = lift(INPUT);
     let header = SpeexHeader::parse(&packets[0]).unwrap();
     let mut dec = SpeexStreamDecoder::for_header(&header).unwrap();
+    dec.set_enhancer(false);
     let mut sd = StereoDecoder::new();
     let mut interleaved = Vec::new();
     let mut mono = Vec::new();
@@ -106,6 +107,7 @@ fn every_frame_carries_a_stereo_message() {
     let packets = lift(INPUT);
     let header = SpeexHeader::parse(&packets[0]).unwrap();
     let mut dec = SpeexStreamDecoder::for_header(&header).unwrap();
+    dec.set_enhancer(false);
     let mut frames = 0usize;
     let mut with_payload = 0usize;
     for pkt in &packets[2..] {
@@ -136,16 +138,16 @@ fn interleaved_tracks_mono_decode() {
     let (inter_snr, _) = best_snr(&reference, &interleaved, 2, 800);
     println!("stereo-nb-q4: mono {mono_snr:.2} dB, interleaved {inter_snr:.2} dB");
 
-    // The mono decode floor (r450: the NB fixes lifted this fixture's
-    // mono decode from 13.8 to ≈20.7 dB).
-    assert!(mono_snr > 18.0, "mono decode SNR {mono_snr:.2} dB < 18");
-    // The stereo law tracks the mono decode within 2 dB (r450 measured
-    // 19.25 vs 20.69 — the crafted stereo probes pinned the §4.1 block
-    // phase as a one-sub-frame gain lead, now reproduced by the
-    // decoder's mono carry, and confirmed the steady laws to 0.3 %).
+    // The mono decode floor (r483: the exact float path, 74.4 dB;
+    // r450 ≈20.7 dB).
+    assert!(mono_snr > 70.0, "mono decode SNR {mono_snr:.2} dB < 70");
+    // The stereo law tracks the mono decode (r483 measured 72.4 vs
+    // 74.4 dB: the per-channel gains up to 2× scale the mono decode's
+    // own ±1 LSB, and the smoother/truncation law is exact — see
+    // `tests/decode_exactness.rs`).
     assert!(
-        inter_snr > mono_snr - 2.0,
-        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 2 dB (stereo law regressed)"
+        inter_snr > mono_snr - 3.0,
+        "interleaved {inter_snr:.2} dB lags mono {mono_snr:.2} by > 3 dB (stereo law regressed)"
     );
-    assert!(inter_snr > 18.0, "interleaved {inter_snr:.2} dB < 18");
+    assert!(inter_snr > 68.0, "interleaved {inter_snr:.2} dB < 68");
 }

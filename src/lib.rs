@@ -413,6 +413,7 @@ mod decoder;
 mod encoder_nb;
 mod encoder_uwb;
 mod encoder_wb;
+mod enhancer;
 mod excitation;
 mod fixed_codebook_gain;
 mod forced_pitch_gain;
@@ -522,8 +523,8 @@ pub use forced_pitch_gain::{
 };
 pub use frame::{FrameError, NARROWBAND_FRAME_PREFIX_BITS, NarrowbandFrameHeader};
 pub use framework::{
-    SpeexEncoderOptions, SpeexFrameworkDecoder, SpeexFrameworkEncoder, make_decoder, make_encoder,
-    register,
+    SpeexDecoderOptions, SpeexEncoderOptions, SpeexFrameworkDecoder, SpeexFrameworkEncoder,
+    make_decoder, make_encoder, register,
 };
 // internal: scalar gain quantiser tables/helpers, exposed for tests only
 #[doc(hidden)]
@@ -677,6 +678,9 @@ pub use lsp_quant::{pack_lsp_index, quantise_lsp_q10};
 // [`NarrowbandDecoder::synthesis_history`] signature
 pub use lsp_to_lpc::LPC_ORDER;
 // internal: LSP->LPC conversion plumbing, exposed for tests only
+pub use enhancer::{
+    ENHANCER_BLOCK_SAMPLES, EnhancerBlock, enhance_block, enhancer_comb_gain, enhancer_period,
+};
 #[doc(hidden)]
 pub use lsp_to_lpc::{
     HB_LPC_ORDER_OUT, hb_lsp_q10_to_radians, hb_lsp_to_lpc, hb_lsp_with_base_q10,
@@ -691,9 +695,12 @@ pub use narrowband_body::{
     PITCH_PERIOD_MIN,
 };
 pub use narrowband_decoder::{
-    NARROWBAND_FRAME_SAMPLES, NB_MODE1_NOISE_SCALE, NarrowbandDecodeError, NarrowbandDecoder,
-    saturate_i16,
+    NARROWBAND_FRAME_SAMPLES, NB_MODE1_NOISE_SCALE, NB_OUTPUT_HIGHPASS, NarrowbandDecodeError,
+    NarrowbandDecoder, WB_LOW_BAND_OUTPUT_HIGHPASS, saturate_i16,
 };
+// internal: float LSP-path primitives shared with the high band, exposed for tests only
+#[doc(hidden)]
+pub use narrowband_decoder::{enforce_interpolated_margin, lsp_cos_poly, lsp_to_lpc_poly};
 // internal: narrowband frame-writer plumbing behind [`NarrowbandEncoder`], exposed for tests only
 #[doc(hidden)]
 pub use nb_encode::{encode_narrowband_frame, write_narrowband_body, write_packet_terminator};

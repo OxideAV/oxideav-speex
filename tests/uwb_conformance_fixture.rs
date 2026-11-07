@@ -5,31 +5,21 @@
 //! see `NOTES.md`), decoded through [`UltraWidebandDecoder`] and scored
 //! absolutely against the reference.
 //!
-//! **Status: known-divergent, tracking floors.** Where the staged tone
-//! fixture decodes at 19.1 dB (`uwb_fold_geometry_fixture.rs`), this
-//! speech fixture measures **2.0 dB / corr 0.78 / energy 1.66** (r410)
-//! — and the divergence is *not* the r410 crossover-shaped inner fold
-//! (which lifted the wideband speech fixture from −12.9 to 15.6 dB):
-//! the embedded 0–8 kHz half itself scores only 2.3 dB at 1.6× energy
-//! here, far below the 15.6 dB the same code path scores on the
-//! standalone wideband speech fixture, and the 8–16 kHz folded layer
-//! overshoots ≈10×. Shaping the *outer* fold with the inner law's
-//! crossover normalisation (slope scaled by analogy, ceiling 1/16)
-//! barely moves this fixture and *regresses* the tone fixture — so the
-//! outer-layer speech behaviour is a distinct, unpinned mechanism
-//! (recorded follow-up + docs ask). This gate pins today's measured
-//! level so the eventual fix shows up as a floor raise, and any
-//! regression fails loudly.
+//! **Status (r483): reference-exact.** The exact float decode path in
+//! all three layers reproduces this fixture at 78.5 dB on the float
+//! output, within ±1 LSB on every 16-bit sample (r410 measured 2.0 dB
+//! here; r450 21.9 dB).
 
 use oxideav_speex::{UltraWidebandDecoder, UwbDecodedFrame};
 
 const INPUT: &[u8] = include_bytes!("fixtures/uwb-conformance/uwb_q4.spx");
 const EXPECTED: &[u8] = include_bytes!("fixtures/uwb-conformance/uwb_q4.noenh.pcm");
 
-/// Fixed alignment: the reference decode leads ours by 160 samples at
-/// 32 kHz (the double-QMF look-ahead padding, same as the tone
-/// fixture).
-const REF_LEAD: usize = 160;
+/// Fixed alignment: none. r483 reproduces the reference decoder's
+/// one-sub-frame synthesis lag in every layer, so this decode lines up
+/// with the reference sample for sample (r410–r480: the reference led
+/// by 160 samples at 32 kHz).
+const REF_LEAD: usize = 0;
 
 fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut packets = Vec::new();
@@ -65,6 +55,7 @@ fn decode_fixture() -> Vec<f64> {
     let packets = lift_ogg_packets(INPUT);
     assert!(packets.len() > 2, "no audio packets");
     let mut dec = UltraWidebandDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for (i, pkt) in packets[2..].iter().enumerate() {
         for f in dec
@@ -116,18 +107,12 @@ fn uwb_speech_tracking_gate() {
     let (snr, corr, energy) = score(&ours, &reference, REF_LEAD);
     println!("uwb-speech-q4: {snr:.2} dB corr {corr:.4} energy {energy:.3}");
 
-    // r450: measured 21.91 dB / 0.9968 (was ≈2 dB under the r403 law).
-    assert!(snr >= 19.0, "tracking SNR {snr:.2} dB < 19 dB");
-    assert!(corr >= 0.99, "tracking correlation {corr:.4} < 0.99");
+    // r483: measured 78.5 dB on the float decode (85.5 dB on the
+    // rounded 16-bit output, ±1 LSB everywhere); r450: 21.91 dB / 0.9968.
+    assert!(snr >= 75.0, "tracking SNR {snr:.2} dB < 75 dB");
+    assert!(corr >= 0.99999, "tracking correlation {corr:.6} < 0.99999");
     assert!(
-        (0.8..=2.2).contains(&energy),
-        "tracking energy ratio {energy:.3} outside [0.8, 2.2]"
+        (0.999..=1.001).contains(&energy),
+        "tracking energy ratio {energy:.4} outside [0.999, 1.001]"
     );
-
-    // The known-divergence marker: if the decode ever clears 6 dB the
-    // divergence is materially fixed — raise the floors and drop the
-    // "known-divergent" status in the module docs + README.
-    if snr > 6.0 {
-        println!("NOTE: uwb speech divergence appears fixed ({snr:.2} dB) — raise these floors");
-    }
 }

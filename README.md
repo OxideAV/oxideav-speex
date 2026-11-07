@@ -11,43 +11,46 @@ material staged at
 
 ## Status
 
-**Clean-room rebuild — reference-tracking decoder and working encoders
-across all three rate classes and every quality 0..=10 (r480).** Every
-high-band gain is the exact law of the staged Tracer round
-(`docs/audio/speex/tracer-2026-09.md`): for HB modes 2/3/4
-`S = 0.8736·bound[q]·e_L/R`, for the mode-1 fold
-`0.9·exp((q−10)/8)/R` over the narrowband innovation, and for the UWB
-layer `0.7·exp((q−10)/8)/R` over the zero-stuffed inner excitation,
-with `R` the signed `(A(−1)+0.01)/(A(±1)+0.01)` crossover ratio of the
-interpolated quantised envelopes. The crate's decoder state reproduces
-the staged per-sub-frame traces (`tests/hb_gain_trace_fixture.rs`,
-`tests/fold_gain_trace_fixture.rs`: crossover ratios to < 0.2 %,
-applied scales to a median 0.01 dB over 6 × 304 innovation sub-frames
-and 1 716 folded ones). The encoders transmit real spectral envelopes
-(an LPC sign-convention bug had made every encoder send a flat one
-until r480) and pick high-band gains by the reference's own rule
-(1 216 / 1 216 staged encoder decisions reproduced). Measured, all
-CI-gated:
+**Reference-exact float decode (±1 LSB) in every rate class, with the
+perceptual enhancer; working encoders across qualities 0..=10 (r483).**
+The decoder reproduces the reference float decoder's PCM within ±1 LSB
+on every staged fixture — 93–99 % of samples identical, the rest one
+LSB off, aligned sample for sample (`tests/decode_exactness.rs`):
 
-* **Decode vs reference PCM** — narrowband 25.6–33.3 dB / corr
-  0.9986–0.9998 through the measured output high-pass
-  (`tests/nb_conformance_fixture.rs`); wideband speech q4/6/8 at
-  21.3 / 21.5 / 22.0 dB; the quality-10 (HB mode 4) oracle at
-  **25.6 dB low / 28.6 dB high sub-band, corr 0.9993, energy 1.002**
-  (`tests/hb_mode4_fixture.rs`); ultra-wideband quality 10 at
-  **25.0 dB** full-signal, per-band means 0.09 / 0.30 / 0.45 dB
-  (`tests/hb_mode4_uwb_fixture.rs`), the 3-layer speech oracle at band
-  means 0.85 / 0.75 / 1.02 dB.
-* **Encode → decode vs the input** (`tests/encoder_fidelity_e2e.rs`,
-  the registry factories end to end): narrowband speech 7.9 / 15.6 /
-  12.5 dB at q4 / q8 / q10; wideband 11.6 / 13.0 dB at q8 / q10;
-  ultra-wideband **quality 10 (44 kbit/s)** 12.1 dB below 7 kHz with
-  every band within 1.5 dB of the input level except where the
-  innovation-free 8–16 kHz fold under-reaches (−3.9 dB on speech; the
-  reference encoder itself loses 7.8 dB on the same material). The
-  reference `speexdec --no-enh` decodes every one of these streams
-  without error and to the same figures (±0.2 dB), and stereo input
-  survives both directions (±12 dB pans reproduced to 0.1 dB).
+| fixture | mode | identical | within ±1 |
+| --- | --- | --: | --: |
+| `nb-enhancer-q4` | NB submode 3 | 96.3 % | 100 % |
+| same, enhancer on | NB 3 + comb | 96.5 % | 100 % |
+| `nb-mode1-vocoder-q0` | NB 1 (vocoder) | 98.2 % | 100 % |
+| `nb-mode1-dtx-q0` | NB 1 + null frames | 96.4 % | 100 % |
+| `hb-mode4-wb-q10` | WB NB 7 + HB 4 | 93.6 % | 100 % |
+| `hb-mode2-wb-q6` / `hb-mode3-wb-q8` | WB HB 2 / 3 | 95.3 / 95.2 % | 100 % |
+| `wb-mode1-folded` | WB HB 1 (fold) | 74.6 % | 99.99 % |
+| `hb-mode4-uwb-q10` | UWB q10 | 91.4 % | 99.7 % |
+| `uwb-speech-3layer` | UWB q1 | 84.2 % | 97.6 % |
+| `stereo-*` (4 fixtures) | intensity stereo, NB/WB/UWB | 97–98.5 % L/R | ±2 (= mono ±1 × gain) |
+
+The float reference itself is reproducible only to ±2 LSB across hosts,
+so this is as exact as a float decode gets. The pieces that got it
+there (r483), each measured against the reference: the **transposed**
+synthesis form, the float excitation memory, the float path's decimal
+LSP stage scalings and polynomial cosine, the **output high-pass**
+(measured biquads, on by default), the one-sub-frame **synthesis lag**
+in every layer, the exact vocoder / comfort-noise generator, mode 7's
+`1/2.2` stage weight, and the backwards one-pole intensity-stereo
+smoother. The narrowband conformance matrix (tone + pitch-glide speech,
+qualities 1–9) sits at 77–82 dB, ≥ 98.4 % within ±1 LSB.
+
+The **perceptual enhancer** (tracer §2 pitch comb) is on by default, as
+in the reference, and switchable (`set_enhancer`, the framework option
+`enhancer`, in-band code 0). All 152 enhancer blocks of the staged trace
+reproduce; the enhanced decode is within ±1 LSB everywhere.
+
+Encode → decode vs the input (`tests/encoder_fidelity_e2e.rs`, the
+registry factories end to end): narrowband speech 7.9 / 15.6 / 12.5 dB
+at q4 / q8 / q10; wideband 11.6 / 13.0 dB at q8 / q10; ultra-wideband
+quality 10 (44 kbit/s) 12.1 dB below 7 kHz. The reference `speexdec`
+decodes every one of these streams without error.
 
 What is implemented and tested:
 
@@ -66,21 +69,18 @@ What is implemented and tested:
   `src/stereo.rs`, staged `intensity-stereo.md`). The 8-bit code-9
   payload (`[sign][5-bal][2-e_ratio]`) reconstructs an `(gL,gR)` gain
   pair (`b=exp(bal/8)`, `F=√(0.5/e_ratio)`,
-  `e_ratio={0.25,0.315,0.397,0.5}`) with the §4 intra-frame
-  interpolation (`a=0.980`), producing interleaved L/R from the single
-  mono decode; the encoder emits the `(L+R)/2` downmix with the
-  per-frame code-9 message prefixed and declares 2 channels. On the
-  staged `stereo-nb-ladder-q4` oracle the interleaved SNR tracks the
-  mono decode within 1.5 dB (19.3 vs 20.7 dB,
-  `tests/intensity_stereo_fixture.rs`). r450 crafted stereo probes
-  confirmed the steady laws to 0.3 % (`ln(gL/gR) = bal/8`;
-  `gL²+gR²` = the staged `1/e_ratio` table at every index) and pinned
-  the §4.1 block phase **sample-exactly**: the reference's gain block
-  leads its audio by one sub-frame, which `StereoDecoder` reproduces
-  with a one-sub-frame mono carry. The §4.1
-  sub-frame block-phase offset is a `speexdec`-pipeline detail this
-  decoder does not reproduce (bounds byte-exactness). The raw payload
-  also stays available via `InbandRequest::IntensityStereo`.
+  `e_ratio={0.25,0.315,0.397,0.5}`) through the reference's gain
+  smoother — `g ← 0.98·g + 0.02·g_target` run **backwards** over each
+  frame (the in-place mono→stereo expansion order, which is the §4
+  "weight on the current gains largest at the block's first sample"),
+  state carried across frames from a neutral 1.0, each sample
+  **truncated** to 16 bits (r483: a crafted 128-payload grid through
+  the black-box reference confirms the steady law to 5 × 10⁻⁵ once
+  the truncation is accounted for). The four staged two-channel decodes
+  reproduce to 97–98.5 % identical samples, ±2 LSB (the mono decode's
+  ±1 times gains up to 2). The encoder emits the `(L+R)/2` downmix with
+  the per-frame code-9 message prefixed and declares 2 channels. The
+  raw payload also stays available via `InbandRequest::IntensityStereo`.
 * **All nine Table 9.1 narrowband modes decode and encode** (round
   r438, staged `nb-innovation-binding.md`): mode 1 (2.15 kbps vocoder,
   quality 0) carries no innovation codebook — its four 1-bit
@@ -255,7 +255,8 @@ What is implemented and tested:
   wideband-flag recursion marker) per step, doubling the reconstructed
   sample rate (8 / 16 / 32 kHz).
 
-* **Closed narrowband decode loop** (`NarrowbandDecoder`) — the full
+* **Closed narrowband decode loop** (`NarrowbandDecoder`; rebuilt r483
+  on the reference float structure, see Status) — the full
   §8–§9 per-sub-frame recurrence with the **excitation feedback wired**:
   LSP reconstruct → interpolate → LSP→LPC, then per sub-frame
   `p[n]` = gain-scaled adaptive-codebook tap sum (reading the excitation
@@ -358,17 +359,16 @@ What is implemented and tested:
   absolute level (fixture full-signal energy ratio 0.97, previously
   32× hot). Mirrored into the encoder gain selection so transmitted
   indices live in the reference quantiser range.
-* **Opt-in output high-pass — measured transfer** (r450,
-  `OutputHighpass`). The manual documents the codec's default-on
-  output high-pass (`SPEEX_SET_HIGHPASS`) without its transfer; with
-  the narrowband innovation path verified reference-exact to 0.1 %,
-  the r450 cross-spectral measurement isolates it: 8 kHz — bilinear
-  biquad `fc ≈ 80.7 Hz, Q ≈ 0.87` (5.7 % peaking near 150 Hz);
-  16/32 kHz — third-order (biquad `fc ≈ 41.75 Hz, Q ≈ 1.38` ×
-  first-order ≈ 33 Hz; the 32 kHz response matches 16 kHz in absolute
-  Hz). Supersedes the r393 fitted 30 Hz Butterworth. Applying it is
-  what turns the NB matrix's 11–14 dB raw rows into 25.6–33.3 dB
-  like-for-like conformance.
+* **Output high-pass — built in** (r483). The manual documents the
+  codec's default-on output high-pass without its transfer. With the
+  rest of the path exact, output-error identification of crafted
+  constant-envelope streams against the reference pins it: at 8 kHz a
+  biquad with poles at 66.6 Hz (`NB_OUTPUT_HIGHPASS`); a wideband or
+  ultra-wideband stream instead runs a different biquad (poles at
+  38.2 Hz, `WB_LOW_BAND_OUTPUT_HIGHPASS`) on its **narrowband layer
+  before the QMF**, and nothing at 16 / 32 kHz. The decoders apply it
+  by default. The earlier fitted post filter (`OutputHighpass`, r450)
+  remains for API compatibility but must not be applied on top.
 * **On-wire layer-prefix grammar** (round r393, fixture-arbitrated) —
   every layer is introduced by the 1-bit wideband flag: `0` narrowband
   layer (a wideband frame's leading prefix starts `0`), `1` each
@@ -528,28 +528,20 @@ mode-1 fixture.
 
 ## Not yet supported
 
-* **Bit-exact decode.** Every gain law is now exact, and the decoder
-  state matches the staged float traces to < 0.2 % (crossover ratios)
-  and a few hundredths of a dB (gains); what remains is float-rounding
-  and evaluation-order territory in the narrowband excitation, which
-  `e_L` inherits (0.3 dB p90 on the −20 dB twin fixture). The staged
-  fixed-point schedule (`tracer-2026-09.md` §1.2 / §3, the
-  `expected-fixed.pcm` outputs) is the route to host-independent
-  bit-exactness and is not implemented.
-* **The perceptual enhancer.** All gates are `--no-enh`. The enhancer's
-  transfer function is now staged (`tracer-2026-09.md` §2, a two-tap
-  fractional-delay pitch comb on the narrowband excitation, with the
-  `nb-enhancer-q4` fixture) but not yet implemented.
-* **Mode-1 noise — statistical, not sample-exact.** The decoder injects
-  its own deterministic white sequence at the measured level
-  (`NB_MODE1_NOISE_SCALE`). The reference generator (LCG seeded 1000,
-  shared with null frames and concealment) is now staged
-  (`tracer-2026-09.md` §4) and not yet implemented.
+* **The fixed-point decode path.** The staged material covers the
+  fixed-point LSP cosine and LSP→LPC (tracer §3), the high-band gain
+  schedule (§1.2), the enhancer's fixed-point differences (§2) and the
+  noise generator (§4); the narrowband excitation, pitch, gain, synthesis,
+  QMF and high-pass arithmetic of the fixed-point build are not staged,
+  so the host-independent `expected-fixed.pcm` outputs are not
+  reproduced (the float decode is within a few LSB of them).
+* **Short pitch lags T ∈ {17, 18, 19}**: the sub-frame tail past `2T`
+  carries unpinned reference content (`nb-pitch-short-lag.md` §2.4).
 * **Encoder reference-equivalence.** The high-band gain decisions are
   the reference's; the narrowband and high-band *searches* are this
   crate's own (no perceptual weighting filter), and narrowband quality
-  10 (mode 7) currently scores below quality 9 on waveform SNR — its
-  two-stage search is greedy per stage.
+  10 (mode 7) scores below quality 9 on waveform SNR — its two-stage
+  search is greedy per stage.
 
 ## Usage
 

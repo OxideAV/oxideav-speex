@@ -238,6 +238,14 @@ impl SpeexDecoder {
         }
     }
 
+    /// Turn the narrowband perceptual enhancer on or off (on by default,
+    /// as in the reference decoder; see
+    /// [`NarrowbandDecoder::set_enhancer`]). An in-band code-0 message
+    /// (Manual Table 5.1) also sets it.
+    pub fn set_enhancer(&mut self, on: bool) {
+        self.wideband.set_enhancer(on);
+    }
+
     /// Decode every frame in a Speex packet, returning one
     /// [`DecodedFrame`] per CELP / control frame.
     ///
@@ -288,10 +296,9 @@ impl SpeexDecoder {
                     // PacketFrames only yields Narrowband for CELP modes.
                     _ => unreachable!("Narrowband frame carries a CELP sub-mode"),
                 };
-                let pcm = self
-                    .wideband
-                    .low_band_decoder_mut()
-                    .decode_frame(&body, &submode)?;
+                let nb = self.wideband.low_band_decoder_mut();
+                nb.set_highpass_layer(false);
+                let pcm = nb.decode_frame(&body, &submode)?;
                 Ok(DecodedFrame::Narrowband(Box::new(pcm)))
             }
             PacketFrame::Wideband {
@@ -334,6 +341,10 @@ impl SpeexDecoder {
             }
             PacketFrame::InbandSignalling { message, .. } => {
                 let request = message.interpret();
+                // Code 0: the encoder's perceptual-enhancement request.
+                if let crate::signalling::InbandRequest::PerceptualEnhancement(on) = request {
+                    self.set_enhancer(on);
+                }
                 Ok(DecodedFrame::Control(ControlMessage::Inband {
                     message,
                     request,

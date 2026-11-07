@@ -1,84 +1,122 @@
-//! **End-to-end narrowband CELP decode loop** — the closed excitation
-//! feedback path from a parsed [`crate::NarrowbandFrameBody`] to 160
-//! samples of `f64` / `i16` PCM.
-//!
-//! This module is the *composition* layer that threads the individual
-//! reconstruction primitives the earlier rounds landed into the single
-//! per-sub-frame recurrence *The Speex Codec Manual* §8–§9 describes:
+//! **Narrowband CELP decoder** — one parsed [`crate::NarrowbandFrameBody`]
+//! to 160 samples of PCM, structured the way the reference decoder's
+//! float path is (`docs/audio/speex/tracer-2026-09.md`, Manual §8–§9):
 //!
 //! ```text
 //!   for each 20 ms frame:
-//!     reconstruct LSPs                          (§9.1, crate::lsp)
-//!     interpolate per-sub-frame LSPs            (§9.1, crate::lsp_interp)
-//!     for each of the 4 sub-frames:
-//!       LSP → LPC                               (§9.1, crate::lsp_to_lpc)
-//!       p[n] = gain · adaptive-codebook tap sum (§9.2, crate::gain_scaled_pitch)
-//!       c[n] = gain · innovation sub-vector     (§9.2, crate::gain_scaled_innovation)
-//!       e[n] = p[n] + c[n]                       (§8.4, crate::gain_scaled_excitation)
-//!       push e[n] into the excitation history    (§9.2 long-term predictor)
-//!       x[n] = synth_filter(e[n], LPC)           (§9.4, crate::synthesis)
+//!     LSPs: linear base + staged VQ stages          (Manual §9.1)
+//!     per sub-frame s: ω_s = (1−w)·ω_{f−1} + w·ω_f,  w = (s+1)/4,
+//!                      0.002-rad margin, LSP→LPC     (tracer §1.1, §3)
+//!     per sub-frame:  e = p + c   (3-tap / forced pitch + innovation)
+//!                     or the submode-1 vocoder mix   (tracer §4)
+//!     enhancer on e[−40..119] (optional)             (tracer §2)
+//!     synthesis 1/A(z) of e[−40..119]                (one sub-frame behind)
+//!     output high-pass                               (on by default)
 //! ```
 //!
-//! ## What this round closes
+//! ## One sub-frame behind
 //!
-//! The earlier rounds landed every constituent primitive but never
-//! threaded them through the **closed feedback loop**: the adaptive
-//! codebook reads the *emitted excitation* `e[·]` of previous
-//! sub-frames, so `e[n] = p[n] + c[n]` for sub-frame `k` must be pushed
-//! into the [`crate::ExcitationBuffer`] *before* sub-frame `k + 1`'s
-//! pitch contribution `p[n]` is evaluated. Until that feedback is wired,
-//! the pitch contribution `p[n]` is always zero (the buffer never sees a
-//! non-zero sample), and the synthesis filter is driven by the
-//! innovation `c[n]` alone — which is exactly the limitation the
-//! `tests/synthesis_pcm_fixture.rs` integration test documented.
+//! The synthesis runs one 40-sample sub-frame behind the excitation
+//! decode: frame `f` outputs the synthesis of excitation samples
+//! `−40..119` (the previous frame's last sub-frame, then this frame's
+//! first three), each through its own sub-frame's LPC. That look-ahead
+//! is what lets the perceptual enhancer's 80-sample blocks straddle the
+//! frame boundary, and it is the reference's output alignment: this
+//! decoder's PCM lines up with the reference decode sample for sample.
 //!
-//! This module wires that feedback: the composed float excitation `e[n]`
-//! is rounded + saturated to `i16` and pushed into the history buffer at
-//! the end of each sub-frame, so the next sub-frame's adaptive codebook
-//! sees the real excitation. The §8.4 `e[n] = p[n] + c[n]` excitation
-//! the synthesis filter consumes is now the **full** excitation, not the
-//! innovation-only stand-in.
+//! ## Arithmetic
 //!
-//! ## Pitch period: frame-level OL vs per-sub-frame fine
+//! Float, in the reference float build's order where it matters:
 //!
-//! The pitch period for a sub-frame comes from one of two Table 9.1
-//! rows, never both:
+//! * the stage scalings are the decimal constants `0.0039062`,
+//!   `0.0019531`, `0.00097656` (not the exact powers of two) — measured,
+//!   +0.8 dB against the staged speech fixtures;
+//! * the LSP cosine is the staged even polynomial (tracer §3,
+//!   `tables/lsp-cos-poly.csv`), not `cos`;
+//! * the synthesis filter is the **transposed** direct form, whose
+//!   state carries partial sums formed with the *previous* sub-frame's
+//!   coefficients across an LPC change;
+//! * the excitation memory the adaptive codebook reads is the float
+//!   excitation, not a 16-bit rounding of it.
 //!
-//! * **Per-sub-frame fine pitch** (`fine_pitch_bits = 7`, modes 3..=7):
-//!   each sub-frame carries its own 7-bit period field, de-biased by
-//!   [`crate::PITCH_PERIOD_MIN`] = 17.
-//! * **Frame-level open-loop pitch** (`ol_pitch_bits = 7`, modes 1, 2,
-//!   8): a single 7-bit period applies to all four sub-frames, de-biased
-//!   the same way.
-//!
-//! Mode 0 (silence) carries neither and emits no pitch contribution.
-//!
-//! ## Q-format / bit-exactness caveat
-//!
-//! The float signal domain the contributions occupy is the one the
-//! r326/r331 gain-scaling rounds pinned (gain-scaled `c[n]` and the Q6
-//! pitch scaling). The LSP angular-unit pin for *reference-equivalent*
-//! output is still a recorded docs gap (see [`crate::lsp_to_lpc`]); this
-//! module produces magnitude-correct, input-responsive, stable PCM with
-//! the full excitation but is not yet asserted bit-exact against
-//! reference Speex output. The closed loop is the structural milestone;
-//! the final Q-format pin is the remaining gap.
+//! The float reference is itself not bit-exact across compilers and
+//! hosts (the fixtures' ±2 LSB note); this decoder reaches ±1 LSB on
+//! the staged narrowband fixtures.
 
-use crate::adaptive_codebook::ExcitationBuffer;
+use crate::codebooks::{nb_lsp_high1, nb_lsp_high2, nb_lsp_low1, nb_lsp_low2, nb_lsp_stage0};
+use crate::enhancer::{ENHANCER_BLOCK_SAMPLES, enhance_block, enhancer_comb_gain, enhancer_period};
 use crate::fixed_codebook_gain::FixedCodebookGainIndices;
-use crate::gain_scaled_excitation::gain_scaled_excitation_subframe;
-use crate::gain_scaled_pitch::gain_scaled_pitch_subframe_repeat;
 use crate::innovation::SUBFRAME_SAMPLES;
-use crate::lsp_to_lpc::{LPC_ORDER, subframe_lpc_set_with_base};
-use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MIN};
+use crate::lsp_to_lpc::LPC_ORDER;
+use crate::narrowband_body::{NarrowbandFrameBody, PITCH_PERIOD_MAX, PITCH_PERIOD_MIN};
 use crate::pitch_gain::PitchGainTaps;
 use crate::submode::{NarrowbandSubmode, PitchGainQuant, SUBFRAMES_PER_FRAME};
-use crate::synthesis::SynthesisFilter;
 use core::fmt;
 
 /// Number of PCM samples a narrowband frame decodes to
 /// (`SUBFRAMES_PER_FRAME × SUBFRAME_SAMPLES` = 4 × 40 = 160; §9.1).
 pub const NARROWBAND_FRAME_SAMPLES: usize = SUBFRAMES_PER_FRAME * SUBFRAME_SAMPLES;
+
+/// Past excitation kept ahead of the current frame: the deepest read is
+/// the enhancer's second tap (`2·144 + 3` lags, plus its 3-tap
+/// interpolator reach) from a block that starts 40 samples before the
+/// frame.
+const EXC_HISTORY: usize = 384;
+
+/// Narrowband LSP stage scalings of the reference float path (stage 0,
+/// the 1/512 split stages, the 1/1024 split stages).
+const LSP_STAGE_SCALE: [f64; 3] = [0.0039062, 0.0019531, 0.00097656];
+
+/// Narrowband LSP stability margin in radians (tracer §1.1 step 1).
+const NB_LSP_MARGIN: f64 = 0.002;
+
+/// Reference decoder **output high-pass** at 8 kHz, measured: a biquad
+/// `H(z) = (b₀ + b₁z⁻¹ + b₂z⁻²)/(1 + a₁z⁻¹ + a₂z⁻²)` with poles at
+/// 66.6 Hz (`r = 0.96474`), a zero pair near DC and unit gain at
+/// Nyquist. Recovered by output-error identification of crafted
+/// constant-envelope streams (pitch taps zero, random innovation —
+/// where the synthesis path is linear time-invariant) against the
+/// black-box reference decode: 81 dB fit, ±1 LSB, identical across
+/// submodes 2/3/4/5/6. Coefficients as `[b₀, b₁, b₂, a₁, a₂]`.
+pub const NB_OUTPUT_HIGHPASS: [f64; 5] = [
+    0.964_445_821,
+    -1.928_749_302,
+    0.964_433_377,
+    -1.926_831_997,
+    0.930_713_134,
+];
+
+/// The output high-pass the reference applies to the **wideband**
+/// stream's narrowband layer, at 8 kHz before the QMF synthesis — a
+/// different design from [`NB_OUTPUT_HIGHPASS`]: poles at 38.2 Hz
+/// (`r = 0.98657`), a near-DC zero pair, unit gain at Nyquist. Measured
+/// as [`NB_OUTPUT_HIGHPASS`] was, through the crate's QMF synthesis
+/// against the reference wideband decode of a crafted stream whose
+/// high band is mode 0 (silent): 85 dB, ±2 LSB on speech.
+pub const WB_LOW_BAND_OUTPUT_HIGHPASS: [f64; 5] = [
+    0.986_448_905,
+    -1.972_768_951,
+    0.986_450_153,
+    -1.972_261_770,
+    0.973_321_785,
+];
+
+/// Gain of the uniform unit-variance noise draw (tracer §4,
+/// `r = 3.4642·std·(u − 1.5)` for `u ∈ [1, 2)`).
+const NOISE_SCALE: f64 = 3.4642;
+
+/// Seed of the decoder's noise generator (tracer §4).
+const NOISE_SEED: u32 = 1000;
+
+/// Bandwidth expansion of the last LPC for null-frame comfort noise
+/// (`a_k · 0.93^k`, tracer §4).
+const NULL_FRAME_BANDWIDTH: f64 = 0.93;
+
+/// Level of the mode-1 comfort-noise excitation relative to the frame
+/// gain. Retained for API compatibility: the vocoder excitation is now
+/// the exact noise-generator + pulse-train law of tracer §4, whose
+/// unit-variance draw is scaled by the frame gain directly.
+pub const NB_MODE1_NOISE_SCALE: f32 = 1.0;
 
 /// Errors from [`NarrowbandDecoder::decode_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,9 +127,7 @@ pub enum NarrowbandDecodeError {
     /// The fixed-codebook gain index pair could not be composed (a
     /// non-conforming hand-built sub-mode).
     GainIndicesUnavailable,
-    /// The innovation sub-vector for a sub-frame could not be decoded:
-    /// its per-mode codebook binding is a recorded docs gap (narrowband
-    /// modes 1 / 7).
+    /// The innovation sub-vector for a sub-frame could not be decoded.
     InnovationUndocumented { mode_id: u8 },
     /// A resolved pitch period fell outside the §9.2 `[17, 144]` range
     /// (a corrupt stream or a non-conforming sub-mode).
@@ -122,48 +158,65 @@ impl fmt::Display for NarrowbandDecodeError {
 
 impl std::error::Error for NarrowbandDecodeError {}
 
-/// Stateful narrowband CELP decoder carrying the IIR + excitation
-/// feedback state across frames.
+/// Biquad state of the output high-pass.
+#[derive(Debug, Clone, Copy, Default)]
+struct Highpass {
+    x: [f64; 2],
+    y: [f64; 2],
+}
+
+impl Highpass {
+    #[inline]
+    fn step(&mut self, c: &[f64; 5], v: f64) -> f64 {
+        let y =
+            c[0] * v + c[1] * self.x[0] + c[2] * self.x[1] - c[3] * self.y[0] - c[4] * self.y[1];
+        self.x = [v, self.x[0]];
+        self.y = [y, self.y[0]];
+        y
+    }
+}
+
+/// State of the submode-1 vocoder excitation (tracer §4).
+#[derive(Debug, Clone, Copy, Default)]
+struct VocoderState {
+    /// Persistent pulse offset `o` (carries across sub-frames).
+    pulse_offset: i32,
+    /// `P[−1]`, `i[−1]` and the running mean `μ`.
+    last_pulse: f64,
+    last_noise: f64,
+    mean: f64,
+}
+
+/// Stateful narrowband CELP decoder carrying the synthesis, excitation,
+/// high-pass, enhancer and noise-generator state across frames.
 ///
-/// Construct with [`NarrowbandDecoder::new`] (stream-start: zero
-/// synthesis history, zero excitation history, no previous LSP), then
-/// call [`NarrowbandDecoder::decode_frame`] once per 20 ms narrowband
-/// frame. The decoder keeps:
-///
-/// * the [`SynthesisFilter`] IIR memory (`1/A(z)` history),
-/// * the [`ExcitationBuffer`] long-term-predictor history,
-/// * the previous frame's reconstructed Q10 LSP vector (for the §9.1
-///   sub-frame interpolation),
-///
-/// all of which must persist across frames for the decode to be
-/// continuous.
+/// Construct with [`NarrowbandDecoder::new`] (stream start), then call
+/// [`NarrowbandDecoder::decode_frame`] once per 20 ms narrowband frame.
+/// The perceptual enhancer and the output high-pass are **on** by
+/// default, as in the reference decoder; [`Self::set_enhancer`] /
+/// [`Self::set_output_highpass`] turn them off.
 #[derive(Debug, Clone)]
 pub struct NarrowbandDecoder {
-    filter: SynthesisFilter,
-    excitation: ExcitationBuffer,
-    prev_lsp_q10: Option<[i32; LPC_ORDER]>,
-    /// The full-precision composed excitation `e[n] = p[n] + c[n]` of the
-    /// most recently decoded frame, retained for the wideband high-band
-    /// **folded-excitation** reconstruction (manual §10.2 / §10.3: the
-    /// gain-only high-band sub-mode reuses the low-band excitation — see
-    /// [`crate::hb_fold`]). Zero at stream start and after a silence
-    /// frame.
+    /// Excitation timeline: `EXC_HISTORY` past samples followed by the
+    /// current frame's 160.
+    exc: Vec<f64>,
+    /// Transposed-form synthesis state.
+    synth: [f64; LPC_ORDER],
+    /// `A(z) = 1 + Σ a_k z^{−k}` of the previous frame's last sub-frame
+    /// (synthesises the pending excitation `e[−40..−1]`).
+    pending_lpc: [f64; LPC_ORDER],
+    /// Previous frame's decoded LSPs (radians); `None` restarts the
+    /// interpolation (stream start, after a null frame).
+    prev_lsp: Option<[f64; LPC_ORDER]>,
+    highpass: Highpass,
+    highpass_on: bool,
+    highpass_coeffs: [f64; 5],
+    enhancer_on: bool,
+    noise_state: u32,
+    vocoder: VocoderState,
     last_frame_excitation: [f32; NARROWBAND_FRAME_SAMPLES],
-    /// Per-sub-frame magnitude response `|A(e^{jπ})|` of the most
-    /// recently decoded frame's interpolated LPC analysis filters —
-    /// the low band's spectral weighting at the 4 kHz QMF crossover,
-    /// consumed by the wideband high-band innovation gain base (r450,
-    /// `crate::gain_scaled_hb_innovation::hb_gc_crossover_gain`).
-    last_crossover_response: [f64; 4],
-    /// Comfort-noise PRNG state for the mode-1 vocoder excitation
-    /// (r450 — see [`NB_MODE1_NOISE_SCALE`]). Seeded at construction so
-    /// decodes stay deterministic.
-    noise_state: u64,
-    /// Innovation-only part `g·c[n]` of the most recent frame's
-    /// excitation — the r450 mode-1 fold source (the fold does not
-    /// carry the adaptive-codebook contribution; see
-    /// `crate::hb_fold::HB_FOLD_CROSSOVER_SCALE`).
     last_frame_innovation: [f32; NARROWBAND_FRAME_SAMPLES],
+    last_crossover_response: [f64; 4],
 }
 
 impl Default for NarrowbandDecoder {
@@ -173,106 +226,113 @@ impl Default for NarrowbandDecoder {
 }
 
 impl NarrowbandDecoder {
-    /// A fresh decoder at stream start (zero history everywhere).
+    /// A fresh decoder at stream start (zero history everywhere,
+    /// enhancer and output high-pass on).
     pub fn new() -> Self {
         Self {
-            filter: SynthesisFilter::new(),
-            excitation: ExcitationBuffer::new(),
-            prev_lsp_q10: None,
+            exc: vec![0.0; EXC_HISTORY + NARROWBAND_FRAME_SAMPLES],
+            synth: [0.0; LPC_ORDER],
+            pending_lpc: [0.0; LPC_ORDER],
+            prev_lsp: None,
+            highpass: Highpass::default(),
+            highpass_on: true,
+            highpass_coeffs: NB_OUTPUT_HIGHPASS,
+            enhancer_on: true,
+            noise_state: NOISE_SEED,
+            vocoder: VocoderState::default(),
             last_frame_excitation: [0.0; NARROWBAND_FRAME_SAMPLES],
-            last_crossover_response: [1.0; 4],
-            noise_state: 0x9E37_79B9_7F4A_7C15,
             last_frame_innovation: [0.0; NARROWBAND_FRAME_SAMPLES],
+            last_crossover_response: [1.0; 4],
         }
     }
 
-    /// The composed full-precision excitation `e[n] = p[n] + c[n]` of the
-    /// most recently decoded frame (160 samples, one per PCM sample).
-    ///
-    /// This is the signal the wideband **folded** high-band excitation
-    /// law reuses (manual §10.2 / §10.3, [`crate::hb_fold`]): the
-    /// gain-only high-band sub-mode transmits no innovation vector, so
-    /// its excitation is this low-band excitation scaled by the 5-bit
-    /// folded gain. All-zero at stream start and after a silence frame
-    /// (whose excitation is zero by construction).
+    /// Turn the perceptual enhancer (tracer §2) on or off. The
+    /// reference decoder's default — and this decoder's — is on; the
+    /// in-band signalling code 0 (Manual Table 5.1) toggles it.
+    pub fn set_enhancer(&mut self, on: bool) {
+        self.enhancer_on = on;
+    }
+
+    /// Whether the perceptual enhancer is on.
+    pub fn enhancer(&self) -> bool {
+        self.enhancer_on
+    }
+
+    /// Turn the output high-pass ([`NB_OUTPUT_HIGHPASS`]) on or off (on
+    /// by default, as in the reference decoder).
+    pub fn set_output_highpass(&mut self, on: bool) {
+        self.highpass_on = on;
+    }
+
+    /// Select the output high-pass design for the stream's rate class:
+    /// [`NB_OUTPUT_HIGHPASS`] for a narrowband stream,
+    /// [`WB_LOW_BAND_OUTPUT_HIGHPASS`] when this decoder is the
+    /// narrowband layer of a wideband / ultra-wideband stream.
+    pub(crate) fn set_highpass_layer(&mut self, wideband_layer: bool) {
+        self.highpass_coeffs = if wideband_layer {
+            WB_LOW_BAND_OUTPUT_HIGHPASS
+        } else {
+            NB_OUTPUT_HIGHPASS
+        };
+    }
+
+    /// Whether the output high-pass is on.
+    pub fn output_highpass(&self) -> bool {
+        self.highpass_on
+    }
+
+    /// The composed excitation `e[n]` of the most recently decoded
+    /// frame (before the enhancer): adaptive plus fixed codebook, the
+    /// vocoder mix for submode 1, the comfort noise for a null frame.
+    /// This is the high band's gain base `e_L` (tracer §1.1 step 5).
     pub fn last_frame_excitation(&self) -> &[f32; NARROWBAND_FRAME_SAMPLES] {
         &self.last_frame_excitation
     }
 
-    /// Per-sub-frame `|A(e^{jπ})|` of the most recently decoded frame's
-    /// interpolated low-band LPC set — the analysis filter's magnitude
-    /// response at the 4 kHz QMF crossover (`z = −1`). Persists across
-    /// silence frames (which update no envelope); `1.0` before the
-    /// first envelope-carrying frame.
+    /// Per-sub-frame `|A(−1)|` of the most recently decoded frame's
+    /// interpolated quantised LPC — the low band's response at the
+    /// 4 kHz QMF crossover (tracer §5). Persists across null frames;
+    /// `1.0` before the first envelope-carrying frame.
     pub fn last_crossover_response(&self) -> &[f64; 4] {
         &self.last_crossover_response
     }
 
-    /// Innovation-only part `g·c[n]` of the most recently decoded
-    /// frame's excitation (the r450 crafted-stream probes pin this —
-    /// not the composed `e[n] = p[n] + c[n]` — as the mode-1 folded
-    /// high band's source; the pitch contribution does not fold).
+    /// Fixed-codebook part of the most recent frame's excitation (the
+    /// gained innovation; the gained noise for submode 1) — the wideband
+    /// fold source (tracer §5).
     pub fn last_frame_innovation(&self) -> &[f32; NARROWBAND_FRAME_SAMPLES] {
         &self.last_frame_innovation
     }
 
-    /// Resolve the de-biased pitch period for sub-frame `sf_idx` from
-    /// whichever of the two Table 9.1 pitch rows the sub-mode carries.
-    ///
-    /// Returns `None` for the silence mode (no pitch field at all).
+    /// Resolve the pitch period for sub-frame `sf_idx`: per-sub-frame
+    /// fine pitch (modes 3..=7) or the frame-level open-loop period
+    /// (modes 1, 2, 8); `None` for silence.
     fn pitch_period(
         body: &NarrowbandFrameBody,
         submode: &NarrowbandSubmode,
         sf_idx: usize,
     ) -> Option<u16> {
         if submode.fine_pitch_bits != 0 {
-            // Per-sub-frame fine pitch (modes 3..=7).
             Some(u16::from(body.subframes[sf_idx].pitch_index) + PITCH_PERIOD_MIN)
         } else if submode.ol_pitch_bits != 0 {
-            // Frame-level open-loop pitch applies to all sub-frames
-            // (modes 1, 2, 8).
             Some(u16::from(body.ol_pitch_index) + PITCH_PERIOD_MIN)
         } else {
             None
         }
     }
 
-    /// Resolve the pitch gains for sub-frame `sf_idx`, dispatching on
-    /// whichever of the two Table 9.1 pitch-gain rows the sub-mode
-    /// carries (they are mutually exclusive):
-    ///
-    /// * **Per-sub-frame 3-tap VQ** (`Pitch gain` row, modes 2..=7):
-    ///   look up the `(g0, g1, g2)` triple from the sub-frame's VQ index.
-    /// * **Frame-level forced gain** (`OL pitch gain` row = 4 bits,
-    ///   modes 1 and 8): reconstruct the single-centre-tap forced gain
-    ///   from the frame-level 4-bit
-    ///   [`NarrowbandFrameBody::ol_pitch_gain_index`]
-    ///   ([`crate::forced_pitch_gain_taps`]). The same forced taps apply
-    ///   to all four sub-frames (the field is frame-level), mirroring the
-    ///   frame-level open-loop pitch period.
-    /// * **Silence** (mode 0, neither row): the all-zero taps, no
-    ///   codebook consulted.
-    ///
-    /// The two pitch-gain rows are mutually exclusive per Table 9.1: a
-    /// mode that carries the per-sub-frame `Pitch gain` VQ (modes 2..=7)
-    /// has `OL pitch gain` = 0, and the two forced-gain modes (1, 8) have
-    /// `Pitch gain` = 0. The VQ branch is therefore selected by
-    /// `submode.pitch_gain`; the forced branch only fires when there is
-    /// no per-sub-frame VQ *and* the frame carries a forced `OL pitch
-    /// gain` field.
+    /// The pitch taps for sub-frame `sf_idx` (Q6, `+32` bias applied):
+    /// the per-sub-frame 3-tap VQ (modes 2..=7), the frame-level forced
+    /// centre tap (modes 1 / 8), or silence.
     fn pitch_taps(
         body: &NarrowbandFrameBody,
         submode: &NarrowbandSubmode,
         sf_idx: usize,
     ) -> PitchGainTaps {
         match submode.pitch_gain {
-            // Per-sub-frame 3-tap VQ (modes 2..=7).
             PitchGainQuant::Vq5Bit | PitchGainQuant::Vq7Bit => body.subframes[sf_idx]
                 .pitch_gain_taps(submode)
                 .unwrap_or(PitchGainTaps::SILENCE),
-            // No per-sub-frame VQ: either the frame-level forced gain
-            // (modes 1 / 8, OL pitch gain = 4 bits) or true silence
-            // (mode 0, no pitch field at all).
             PitchGainQuant::None => {
                 if submode.ol_pitch_gain_bits != 0 {
                     crate::forced_pitch_gain::forced_pitch_gain_taps(body.ol_pitch_gain_index)
@@ -283,190 +343,241 @@ impl NarrowbandDecoder {
         }
     }
 
+    /// One noise-generator draw (tracer §4): the 32-bit LCG advanced
+    /// once, mapped to a uniform unit-variance sample.
+    fn draw_noise(&mut self) -> f64 {
+        self.noise_state = self
+            .noise_state
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        let u = 1.0 + f64::from(self.noise_state & 0x007F_FFFF) / f64::from(1u32 << 23);
+        NOISE_SCALE * (u - 1.5)
+    }
+
     /// Decode one narrowband frame to `f64` PCM, advancing all decoder
-    /// state. Returns [`NARROWBAND_FRAME_SAMPLES`] = 160 samples.
-    ///
-    /// For the silence mode (mode 0) the frame carries no LSP, pitch, or
-    /// innovation; the decoder runs its synthesis filter on zero
-    /// excitation with the *previous* LSP set (the manual prescribes no
-    /// LSP update for silence), so the IIR memory rings out naturally.
+    /// state. Returns [`NARROWBAND_FRAME_SAMPLES`] = 160 samples, aligned
+    /// with the reference decoder's output.
+    // The sub-frame index addresses five parallel per-sub-frame arrays.
+    #[allow(clippy::needless_range_loop)]
     pub fn decode_frame(
         &mut self,
         body: &NarrowbandFrameBody,
         submode: &NarrowbandSubmode,
     ) -> Result<[f64; NARROWBAND_FRAME_SAMPLES], NarrowbandDecodeError> {
-        let mut pcm = [0.0f64; NARROWBAND_FRAME_SAMPLES];
+        // Advance the excitation timeline by one frame.
+        self.exc.copy_within(NARROWBAND_FRAME_SAMPLES.., 0);
+        let cur = EXC_HISTORY;
 
-        // Reconstruct this frame's LSPs. For silence (no LSP field) the
-        // previous LSPs persist; if there is no previous set (silence at
-        // stream start) we fall back to a flat all-pole filter (zero
-        // LPC), which the synthesis filter handles as a pass-through.
-        let curr_lsp_q10 = body.reconstructed_lsp_q10(submode);
-        let active_lsp = match curr_lsp_q10 {
-            Some(lsp) => lsp,
-            None => match self.prev_lsp_q10 {
-                Some(prev) => prev,
-                None => {
-                    // Silence at stream start: no spectral envelope to
-                    // apply. Filter the (zero) excitation through a
-                    // flat filter; output is silence.
-                    let flat = [0.0f64; LPC_ORDER];
-                    self.run_silence_subframes(&flat, &mut pcm);
-                    return Ok(pcm);
-                }
-            },
+        let Some(lsp) = nb_lsp_radians(body, submode) else {
+            return Ok(self.decode_null_frame());
         };
-
-        // Per-sub-frame LSP interpolation uses the previous frame's
-        // reconstructed LSPs (or the current ones at stream start, which
-        // yields the no-transient first-frame initialisation).
-        let prev = self.prev_lsp_q10.unwrap_or(active_lsp);
-        let sub_lsp = crate::lsp_interp::NbSubFrameLsp::new(&prev, &active_lsp);
-
-        // Per-sub-frame LPC sets with the **pinned LSP base vector**
-        // added (round r347): the r194 reconstruction emits codebook
-        // deltas only; `subframe_lpc_set_with_base` adds the documented
-        // `LSP_LINEAR` base so each sub-frame's LSP angles land inside
-        // the conformant `(0, π)` band by construction (see `lsp_base`).
-        let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
-        for (slot, lpc) in self.last_crossover_response.iter_mut().zip(lpc_sets.iter()) {
-            *slot = crossover_response(lpc);
+        let prev = self.prev_lsp.unwrap_or(lsp);
+        let mut lpcs = [[0.0f64; LPC_ORDER]; SUBFRAMES_PER_FRAME];
+        for (sf, lpc) in lpcs.iter_mut().enumerate() {
+            let w = (sf as f64 + 1.0) / 4.0;
+            let mut l = [0.0f64; LPC_ORDER];
+            for i in 0..LPC_ORDER {
+                l[i] = (1.0 - w) * prev[i] + w * lsp[i];
+            }
+            enforce_interpolated_margin(&mut l, NB_LSP_MARGIN);
+            *lpc = lsp_to_lpc_poly(&l);
+            self.last_crossover_response[sf] = lpc_at_minus_one(lpc).abs();
         }
 
-        for sf_idx in 0..SUBFRAMES_PER_FRAME {
-            let lpc: [f64; LPC_ORDER] = lpc_sets[sf_idx];
+        let mut enh_taps = [(40i32, [0.0f64; 3]); 4];
+        for sf in 0..SUBFRAMES_PER_FRAME {
+            let base = cur + sf * SUBFRAME_SAMPLES;
+            let gain_indices = FixedCodebookGainIndices::from_body(body, submode, sf)
+                .ok_or(NarrowbandDecodeError::GainIndicesUnavailable)?;
+            let g_frame = (f64::from(body.ol_exc_gain_index) / 3.5).exp();
+            let period = Self::pitch_period(body, submode, sf);
+            if let Some(t) = period
+                && !(PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX).contains(&t)
+            {
+                return Err(NarrowbandDecodeError::PitchOutOfRange { period: t });
+            }
 
-            // Innovation (fixed-codebook) contribution c[n] — the f32
-            // shape path carries the exact mode-7 stage-2 weight.
-            let c_shape = crate::innovation::decode_subframe_f32(
+            if submode.mode_id == 1 {
+                // Vocoder (tracer §4): noise × frame gain plus a pulse
+                // train at the open-loop period; the decoded adaptive
+                // contribution is discarded.
+                let t = i32::from(period.unwrap_or(PITCH_PERIOD_MIN));
+                let beta = f64::from(crate::forced_pitch_gain::FORCED_PITCH_GAIN_STEP)
+                    * f64::from(body.ol_pitch_gain_index);
+                let voicing = (1.5 * (beta - 0.2)).clamp(0.0, 1.0);
+                let mut noise = [0.0f64; SUBFRAME_SAMPLES];
+                for v in noise.iter_mut() {
+                    *v = self.draw_noise() * g_frame;
+                }
+                let mut pulses = [0.0f64; SUBFRAME_SAMPLES];
+                let height = (2.0 * f64::from(t)).sqrt() * voicing * g_frame;
+                let st = &mut self.vocoder;
+                while st.pulse_offset < SUBFRAME_SAMPLES as i32 {
+                    pulses[st.pulse_offset as usize] = height;
+                    st.pulse_offset += t;
+                }
+                st.pulse_offset -= SUBFRAME_SAMPLES as i32;
+                for n in 0..SUBFRAME_SAMPLES {
+                    let pp = if n > 0 { pulses[n - 1] } else { st.last_pulse };
+                    let ip = if n > 0 { noise[n - 1] } else { st.last_noise };
+                    let v = 0.7 * pulses[n] + 0.3 * pp + (1.0 - 0.85 * voicing) * noise[n]
+                        - 0.15 * voicing * ip;
+                    st.mean = 0.8 * st.mean + 0.2 * v;
+                    self.exc[base + n] = v - st.mean;
+                    self.last_frame_innovation[sf * SUBFRAME_SAMPLES + n] = noise[n] as f32;
+                }
+                st.last_pulse = pulses[SUBFRAME_SAMPLES - 1];
+                st.last_noise = noise[SUBFRAME_SAMPLES - 1];
+                enh_taps[sf] = (t, [0.0; 3]);
+                continue;
+            }
+
+            // Fixed-codebook contribution c[n] = g·shape/32.
+            let shape = crate::innovation::decode_subframe_f32(
                 submode,
-                body.subframes[sf_idx].innovation_vq_index,
+                body.subframes[sf].innovation_vq_index,
             )
             .map_err(|_| NarrowbandDecodeError::InnovationUndocumented {
                 mode_id: submode.mode_id,
             })?;
-            let gain_indices = FixedCodebookGainIndices::from_body(body, submode, sf_idx)
-                .ok_or(NarrowbandDecodeError::GainIndicesUnavailable)?;
-            let c = crate::gain_scaled_innovation::gain_scaled_innovation_from_shape_f32(
-                &c_shape,
-                gain_indices,
+            let g_sub = f64::from(
+                crate::gain_reconstruction::reconstruct_subframe_gain_correction(
+                    gain_indices.subframe,
+                ),
             );
+            let g = g_frame * g_sub;
 
-            // Pitch (adaptive-codebook) contribution p[n], short pitch
-            // via the r450 single-substitution repeat rule (see
-            // `gain_scaled_pitch_subframe_repeat`): crafted-stream
-            // probes recover the staged table's taps exactly under the
-            // §9.2 substitution applied once, with a twice-substituted
-            // tail position contributing zero — where the r410
-            // in-sub-frame recursion (whose arbitration predates the
-            // r450 innovation/parity fixes) misfits by 16–60 %.
-            // The forced OL-pitch modes (1 / 8) run a float centre-tap
-            // recursion instead (r450 shoot-out: the forced path feeds
-            // back where the VQ path repeats — see
-            // `gain_scaled_pitch_subframe_forced`).
-            let forced = submode.pitch_gain == crate::submode::PitchGainQuant::None
-                && submode.ol_pitch_gain_bits != 0;
-            let p = match Self::pitch_period(body, submode, sf_idx) {
-                Some(period) if forced => {
-                    let coef =
-                        crate::forced_pitch_gain::forced_pitch_coef(body.ol_pitch_gain_index);
-                    crate::gain_scaled_pitch::gain_scaled_pitch_subframe_forced(
-                        period,
-                        coef,
-                        &self.excitation,
-                    )
-                    .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?
-                }
-                Some(period) => {
-                    let taps = Self::pitch_taps(body, submode, sf_idx);
-                    gain_scaled_pitch_subframe_repeat(period, taps, &self.excitation)
-                        .map_err(|_| NarrowbandDecodeError::PitchOutOfRange { period })?
-                }
-                None => [0.0f32; SUBFRAME_SAMPLES],
-            };
-
-            // Mode 1 (vocoder): the reference's excitation carries a
-            // comfort-noise term the wire does not (r450 crafted-stream
-            // measurement: a deterministic decoder-side noise sequence
-            // scaled linearly by the frame OL gain — output rms
-            // 1.051·exp(qe/3.5) through the lsp-0 envelope across a 31×
-            // gain grid; a PRNG's sequence is not recoverable
-            // black-box, so this decoder substitutes its own
-            // white sequence at the measured level, energy-compensated
-            // against the forced pitch loop). Everything else decodes
-            // noise-free.
-            let c = if submode.mode_id == 1 {
-                let g_frame =
-                    crate::gain_reconstruction::reconstruct_frame_ol_exc_gain(gain_indices.frame);
-                let coef = f64::from(crate::forced_pitch_gain::forced_pitch_coef(
-                    body.ol_pitch_gain_index,
-                ));
-                // Noise attenuation under the forced pitch loop:
-                // (1−coef²) on the injected term leaves the composed
-                // excitation at ≈ K·g·√(1−coef²) after the loop's
-                // 1/√(1−coef²) amplification — within 6 % of the
-                // measured pitch-on probe.
-                let k = f64::from(NB_MODE1_NOISE_SCALE)
-                    * f64::from(g_frame)
-                    * (1.0 - coef * coef).max(0.0);
-                let mut noise = c;
-                for slot in noise.iter_mut() {
-                    // xorshift64* — uniform in (−√3, √3): unit variance.
-                    self.noise_state ^= self.noise_state >> 12;
-                    self.noise_state ^= self.noise_state << 25;
-                    self.noise_state ^= self.noise_state >> 27;
-                    let u = (self.noise_state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64
-                        / (1u64 << 53) as f64;
-                    *slot += (k * (u * 2.0 - 1.0) * 1.732_050_8) as f32;
-                }
-                noise
+            // Adaptive-codebook contribution from the float history.
+            let mut p = [0.0f64; SUBFRAME_SAMPLES];
+            let forced = submode.pitch_gain == PitchGainQuant::None;
+            let b = if forced {
+                // Forced open-loop gain: the float coefficient on the
+                // centre tap alone.
+                let coef = crate::forced_pitch_gain::forced_pitch_coef(body.ol_pitch_gain_index);
+                [0.0, f64::from(coef), 0.0]
             } else {
-                c
+                let taps = Self::pitch_taps(body, submode, sf);
+                [
+                    f64::from(taps.taps[0]) / 64.0,
+                    f64::from(taps.taps[1]) / 64.0,
+                    f64::from(taps.taps[2]) / 64.0,
+                ]
             };
-
-            // Full excitation e[n] = p[n] + c[n].
-            let e = gain_scaled_excitation_subframe(&p, &c);
-
-            // Retain the full-precision excitation (modes-2/3/4 gain
-            // base) and its innovation-only part (mode-1 fold source).
-            self.last_frame_excitation[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES]
-                .copy_from_slice(&e);
-            self.last_frame_innovation[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES]
-                .copy_from_slice(&c);
-
-            // Feedback: push the emitted excitation into the history so
-            // the NEXT sub-frame's adaptive codebook reads it.
-            for &sample in &e {
-                self.excitation.push(round_to_i16(sample));
-            }
-
-            // Synthesis filter x[n] = e[n] + Σ a[i]·x[n-1-i].
-            let e_f64: [f64; SUBFRAME_SAMPLES] = {
-                let mut tmp = [0.0f64; SUBFRAME_SAMPLES];
-                for (o, &v) in tmp.iter_mut().zip(e.iter()) {
-                    *o = f64::from(v);
+            if let Some(t) = period {
+                let t = t as i32;
+                enh_taps[sf] = (t, b);
+                for n in 0..SUBFRAME_SAMPLES as i32 {
+                    if forced {
+                        // Forced open-loop gain: a centre-tap recursion
+                        // over the pitch partial.
+                        let k = n - t;
+                        p[n as usize] = b[1]
+                            * if k >= 0 {
+                                p[k as usize]
+                            } else {
+                                self.exc[(base as i32 + k) as usize]
+                            };
+                    } else {
+                        // 3-tap predictor; a lag reaching into the
+                        // sub-frame folds back by one period once and
+                        // never further (nb-pitch-short-lag.md).
+                        let mut acc = 0.0;
+                        for (j, off) in [-1i32, 0, 1].iter().enumerate() {
+                            let mut k = n - t + off;
+                            if k >= 0 {
+                                k -= t;
+                            }
+                            if k < 0 {
+                                acc += b[j] * self.exc[(base as i32 + k) as usize];
+                            }
+                        }
+                        p[n as usize] = acc;
+                    }
                 }
-                tmp
+            }
+            for n in 0..SUBFRAME_SAMPLES {
+                let c = g * f64::from(shape[n]) / 32.0;
+                self.exc[base + n] = p[n] + c;
+                self.last_frame_innovation[sf * SUBFRAME_SAMPLES + n] = c as f32;
+            }
+        }
+        for (o, &e) in self
+            .last_frame_excitation
+            .iter_mut()
+            .zip(&self.exc[cur..cur + NARROWBAND_FRAME_SAMPLES])
+        {
+            *o = e as f32;
+        }
+
+        // The synthesised excitation e[−40..119], enhanced or not.
+        let mut syn = [0.0f64; NARROWBAND_FRAME_SAMPLES];
+        let gamma = enhancer_comb_gain(submode.mode_id).filter(|_| self.enhancer_on);
+        match gamma {
+            Some(gamma) => {
+                let period = enhancer_period(&enh_taps);
+                for half in 0..2 {
+                    let start = cur as i32 - 40 + (half * ENHANCER_BLOCK_SAMPLES) as i32;
+                    let end = (cur + NARROWBAND_FRAME_SAMPLES) as i32;
+                    let exc = &self.exc;
+                    let read = |i: i32| -> f64 {
+                        let k = start + i;
+                        if k >= end { 0.0 } else { exc[k as usize] }
+                    };
+                    let mut block = [0.0f64; ENHANCER_BLOCK_SAMPLES];
+                    enhance_block(&read, period, gamma, &mut block);
+                    syn[half * ENHANCER_BLOCK_SAMPLES..(half + 1) * ENHANCER_BLOCK_SAMPLES]
+                        .copy_from_slice(&block);
+                }
+            }
+            None => syn.copy_from_slice(&self.exc[cur - 40..cur + 120]),
+        }
+
+        let mut pcm = [0.0f64; NARROWBAND_FRAME_SAMPLES];
+        for (n, (o, &v)) in pcm.iter_mut().zip(syn.iter()).enumerate() {
+            let a = if n < SUBFRAME_SAMPLES {
+                &self.pending_lpc
+            } else {
+                &lpcs[n / SUBFRAME_SAMPLES - 1]
             };
-            let out = &mut pcm[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES];
-            self.filter.process(&lpc, &e_f64, out);
+            *o = synth_step(&mut self.synth, a, v);
         }
-
-        // Update the previous-LSP state only when the frame actually
-        // transmitted an LSP field (silence leaves it untouched).
-        if curr_lsp_q10.is_some() {
-            self.prev_lsp_q10 = curr_lsp_q10;
+        self.pending_lpc = lpcs[SUBFRAMES_PER_FRAME - 1];
+        self.prev_lsp = Some(lsp);
+        if self.highpass_on {
+            for v in pcm.iter_mut() {
+                *v = self.highpass.step(&self.highpass_coeffs, *v);
+            }
         }
-
         Ok(pcm)
     }
 
+    /// A null (submode-0) frame: 160 comfort-noise draws at the previous
+    /// frame's excitation level, synthesised directly through the last
+    /// LPC bandwidth-expanded by `0.93^k`, without the output high-pass;
+    /// the next frame restarts the LSP interpolation (tracer §4).
+    fn decode_null_frame(&mut self) -> [f64; NARROWBAND_FRAME_SAMPLES] {
+        let cur = EXC_HISTORY;
+        let prev = &self.exc[cur - NARROWBAND_FRAME_SAMPLES..cur];
+        let level = (0.1 + prev.iter().map(|v| v * v).sum::<f64>() / prev.len() as f64).sqrt();
+        let mut lpc = self.pending_lpc;
+        let mut f = NULL_FRAME_BANDWIDTH;
+        for a in lpc.iter_mut() {
+            *a *= f;
+            f *= NULL_FRAME_BANDWIDTH;
+        }
+        let mut pcm = [0.0f64; NARROWBAND_FRAME_SAMPLES];
+        for (n, o) in pcm.iter_mut().enumerate() {
+            let v = level * self.draw_noise();
+            self.exc[cur + n] = v;
+            self.last_frame_excitation[n] = v as f32;
+            *o = synth_step(&mut self.synth, &lpc, v);
+        }
+        self.last_frame_innovation = [0.0; NARROWBAND_FRAME_SAMPLES];
+        self.prev_lsp = None;
+        pcm
+    }
+
     /// Decode one narrowband frame to rounded, saturated `i16` PCM.
-    ///
-    /// Convenience over [`Self::decode_frame`] that quantises the `f64`
-    /// output to 16-bit samples. The decoder's internal feedback uses the
-    /// full-precision excitation regardless, so the `i16` reduction
-    /// affects only the returned PCM, not the IIR / excitation state.
     pub fn decode_frame_i16(
         &mut self,
         body: &NarrowbandFrameBody,
@@ -480,75 +591,171 @@ impl NarrowbandDecoder {
         Ok(out)
     }
 
-    /// Run the four sub-frames of a silence frame: zero excitation
-    /// through the given (flat or previous) LPC set, pushing the zero
-    /// excitation into the history and ringing the IIR memory out.
-    fn run_silence_subframes(
-        &mut self,
-        lpc: &[f64; LPC_ORDER],
-        pcm: &mut [f64; NARROWBAND_FRAME_SAMPLES],
-    ) {
-        let zero = [0.0f64; SUBFRAME_SAMPLES];
-        self.last_frame_excitation = [0.0; NARROWBAND_FRAME_SAMPLES];
-        for sf_idx in 0..SUBFRAMES_PER_FRAME {
-            for _ in 0..SUBFRAME_SAMPLES {
-                self.excitation.push(0);
-            }
-            let out = &mut pcm[sf_idx * SUBFRAME_SAMPLES..(sf_idx + 1) * SUBFRAME_SAMPLES];
-            self.filter.process(lpc, &zero, out);
+    /// Read-only view of the synthesis filter state (diagnostics).
+    pub fn synthesis_history(&self) -> &[f64; LPC_ORDER] {
+        &self.synth
+    }
+}
+
+/// One sample of the transposed-direct-form all-pole synthesis
+/// `y = x − Σ a_k y[n−k]`.
+#[inline]
+fn synth_step(mem: &mut [f64; LPC_ORDER], a: &[f64; LPC_ORDER], x: f64) -> f64 {
+    let y = x + mem[0];
+    for j in 0..LPC_ORDER - 1 {
+        mem[j] = mem[j + 1] - a[j] * y;
+    }
+    mem[LPC_ORDER - 1] = -a[LPC_ORDER - 1] * y;
+    y
+}
+
+/// The frame's ten decoded narrowband LSPs in radians (linear base
+/// `0.25·(i+1)` plus the scaled VQ stages), or `None` for a frame that
+/// carries no LSP field.
+fn nb_lsp_radians(body: &NarrowbandFrameBody, submode: &NarrowbandSubmode) -> Option<[f64; 10]> {
+    let st = body.lsp_stages(submode)?;
+    let mut l = [0.0f64; 10];
+    for (i, v) in l.iter_mut().enumerate() {
+        *v = 0.25 * i as f64 + 0.25;
+    }
+    let s0 = nb_lsp_stage0().get(usize::from(st.stage0))?;
+    for (v, &c) in l.iter_mut().zip(s0.iter()) {
+        *v += f64::from(c) * LSP_STAGE_SCALE[0];
+    }
+    let low1 = nb_lsp_low1().get(usize::from(st.low1))?;
+    for (v, &c) in l[..5].iter_mut().zip(low1.iter()) {
+        *v += f64::from(c) * LSP_STAGE_SCALE[1];
+    }
+    if let Some(i) = st.low2 {
+        for (v, &c) in l[..5]
+            .iter_mut()
+            .zip(nb_lsp_low2().get(usize::from(i))?.iter())
+        {
+            *v += f64::from(c) * LSP_STAGE_SCALE[2];
         }
     }
+    let high1 = nb_lsp_high1().get(usize::from(st.high1))?;
+    for (v, &c) in l[5..].iter_mut().zip(high1.iter()) {
+        *v += f64::from(c) * LSP_STAGE_SCALE[1];
+    }
+    if let Some(i) = st.high2 {
+        for (v, &c) in l[5..]
+            .iter_mut()
+            .zip(nb_lsp_high2().get(usize::from(i))?.iter())
+        {
+            *v += f64::from(c) * LSP_STAGE_SCALE[2];
+        }
+    }
+    Some(l)
+}
 
-    /// Read-only view of the synthesis filter (for tests / diagnostics).
-    pub fn synthesis_history(&self) -> &[f64; LPC_ORDER] {
-        self.filter.history()
+/// The stability margin of the interpolated LSPs, in index order
+/// (tracer §1.1 step 1): `ω₀ ≥ m`, `ω_{p−1} ≤ π − m`, then for
+/// `i = 1..p−2` raise `ω_i` to `ω_{i−1} + m` and, if it crowds
+/// `ω_{i+1}`, replace it by the mean of itself and `ω_{i+1} − m`.
+#[doc(hidden)]
+pub fn enforce_interpolated_margin(l: &mut [f64], m: f64) {
+    let p = l.len();
+    if p < 2 {
+        return;
+    }
+    if l[0] < m {
+        l[0] = m;
+    }
+    if l[p - 1] > core::f64::consts::PI - m {
+        l[p - 1] = core::f64::consts::PI - m;
+    }
+    for i in 1..p - 1 {
+        if l[i] < l[i - 1] + m {
+            l[i] = l[i - 1] + m;
+        }
+        if l[i] > l[i + 1] - m {
+            l[i] = 0.5 * (l[i] + l[i + 1] - m);
+        }
     }
 }
 
-/// Level of the mode-1 comfort-noise excitation relative to the frame
-/// OL gain (r450 crafted-stream measurement,
-/// `tests/fixtures/hb-gain-probes/NOTES.md`): mode-1 streams with the
-/// pitch coefficient at zero decode, in the reference, to a
-/// deterministic noise sequence whose output rms is `1.051·exp(qe/3.5)`
-/// through the lsp-0 envelope (constant over a 31× gain grid), i.e. an
-/// excitation-domain rms of ≈ `0.854·g` through that envelope's
-/// impulse-response norm; other envelopes read the same law within the
-/// fixed realization's ±12 % spectral scatter. With the forced pitch
-/// loop active the noise term is variance-compensated
-/// (`·√(1−coef²)`) so the composed excitation keeps the measured
-/// level.
-pub const NB_MODE1_NOISE_SCALE: f32 = 0.854;
-
-/// Round to nearest and saturate an `f64` excitation sample into the
-/// `i16` range for the history buffer. (The history buffer stores `i16`
-/// matching the staged codebook entry width.)
-#[inline]
-/// `|A(e^{jπ})|` for `A(z) = 1 − Σ aᵢ z⁻ⁱ` — the LPC analysis filter's
-/// magnitude response at the Nyquist edge (`z = −1`), i.e. at the 4 kHz
-/// QMF crossover for the 8 kHz low band.
-fn crossover_response(lpc: &[f64; LPC_ORDER]) -> f64 {
-    let mut a_pi = 1.0f64;
-    for (j, &aj) in lpc.iter().enumerate() {
-        // z⁻ⁱ at z = −1 is (−1)ⁱ with i = j + 1.
-        let sgn = if (j + 1) % 2 == 0 { 1.0 } else { -1.0 };
-        a_pi -= aj * sgn;
+/// The reference float LSP cosine: an even polynomial in the angle with
+/// a π/2 breakpoint (tracer §3, `tables/lsp-cos-poly.csv`).
+#[doc(hidden)]
+pub fn lsp_cos_poly(x: f64) -> f64 {
+    const K: [f64; 4] = [
+        0.999_993_294_6,
+        -0.499_912_437_6,
+        0.041_487_747_2,
+        -0.001_271_209_5,
+    ];
+    let even = |y: f64| {
+        let u = y * y;
+        K[0] + u * (K[1] + u * (K[2] + u * K[3]))
+    };
+    if x < core::f64::consts::FRAC_PI_2 {
+        even(x)
+    } else {
+        -even(core::f64::consts::PI - x)
     }
-    a_pi.abs()
 }
 
-fn round_to_i16(v: f32) -> i16 {
-    saturate_i16(f64::from(v))
+/// LSP → LPC: `A(z) = ½(P(z) + Q(z))` with `P` the product of the
+/// even-indexed sections `1 − 2cos(ω)z⁻¹ + z⁻²` times `(1 + z⁻¹)` and
+/// `Q` the odd-indexed ones times `(1 − z⁻¹)`. Returns `a₁..a_p` of
+/// `A(z) = 1 + Σ a_k z^{−k}`.
+#[doc(hidden)]
+pub fn lsp_to_lpc_poly<const P: usize>(lsp: &[f64; P]) -> [f64; P] {
+    // Product polynomials of degree P (P + 1 coefficients).
+    const MAX: usize = 17;
+    assert!(P < MAX, "LPC order");
+    let mut pp = [0.0f64; MAX];
+    let mut qq = [0.0f64; MAX];
+    pp[0] = 1.0;
+    qq[0] = 1.0;
+    let (mut np, mut nq) = (1usize, 1usize);
+    for (i, &w) in lsp.iter().enumerate() {
+        let c = -2.0 * lsp_cos_poly(w);
+        let (t, n) = if i % 2 == 0 {
+            (&mut pp, &mut np)
+        } else {
+            (&mut qq, &mut nq)
+        };
+        // Multiply by (1 + c·z⁻¹ + z⁻²).
+        let len = *n + 2;
+        for k in (0..len).rev() {
+            let mut v = t[k];
+            if k >= 1 {
+                v += c * t[k - 1];
+            }
+            if k >= 2 {
+                v += t[k - 2];
+            }
+            t[k] = v;
+        }
+        *n = len;
+    }
+    let mut a = [0.0f64; P];
+    for k in 1..=P {
+        a[k - 1] = 0.5 * (pp[k] + pp[k - 1] + qq[k] - qq[k - 1]);
+    }
+    a
+}
+
+/// `A(−1) = 1 + Σ (−1)^k a_k` for `A(z) = 1 + Σ a_k z^{−k}`.
+fn lpc_at_minus_one(a: &[f64; LPC_ORDER]) -> f64 {
+    let mut v = 1.0;
+    for (k, &ak) in a.iter().enumerate() {
+        if k % 2 == 0 {
+            v -= ak;
+        } else {
+            v += ak;
+        }
+    }
+    v
 }
 
 /// Round to nearest and saturate an `f64` into the signed-16-bit range.
 ///
 /// The single rounding convention shared by every `*_i16` PCM
-/// convenience in the crate (narrowband [`NarrowbandDecoder::decode_frame_i16`],
-/// the wideband 16 kHz path, and the top-level packet decoder): round to
-/// nearest (ties away from zero, per [`f64::round`]) then clamp to
-/// `[i16::MIN, i16::MAX]`. Centralising it here keeps the narrowband and
-/// wideband `i16` outputs bit-identical wherever the same `f64` sample
-/// appears.
+/// convenience in the crate: round to nearest (ties away from zero, per
+/// [`f64::round`]) then clamp to `[i16::MIN, i16::MAX]`.
 #[inline]
 pub fn saturate_i16(v: f64) -> i16 {
     let r = v.round();
@@ -558,334 +765,5 @@ pub fn saturate_i16(v: f64) -> i16 {
         i16::MIN
     } else {
         r as i16
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::frame::NarrowbandFrameHeader;
-    use crate::submode::{NARROWBAND_SUBMODES, NarrowbandSubmode, Submode};
-
-    /// Build an all-ones frame body for the given mode (same helper the
-    /// body parser tests use): wideband flag 0, mode ID in the next 4
-    /// bits, every body bit set to 1.
-    fn all_ones_frame(mode: u8) -> Vec<u8> {
-        let submode = NarrowbandSubmode::for_id(mode).expect("valid mode");
-        let total_bits = u32::from(submode.total_bits);
-        let total_bytes = total_bits.div_ceil(8);
-        let mut buf = vec![0xFFu8; total_bytes as usize];
-        let prefix_byte = (mode & 0x0F) << 3 | 0b0000_0111;
-        buf[0] = prefix_byte;
-        buf
-    }
-
-    fn parse(mode: u8) -> (NarrowbandSubmode, NarrowbandFrameBody) {
-        let buf = all_ones_frame(mode);
-        let (h, mut r) = NarrowbandFrameHeader::parse_bytes(&buf).unwrap();
-        let submode = match h.submode {
-            Submode::Celp(s) => s,
-            other => panic!("expected CELP, got {:?}", other),
-        };
-        let body = NarrowbandFrameBody::parse(&mut r, &submode).unwrap();
-        (submode, body)
-    }
-
-    #[test]
-    fn frame_samples_constant_is_160() {
-        assert_eq!(NARROWBAND_FRAME_SAMPLES, 160);
-    }
-
-    #[test]
-    fn silence_mode_at_stream_start_yields_zero_pcm() {
-        let (submode, body) = parse(0);
-        let mut dec = NarrowbandDecoder::new();
-        let pcm = dec.decode_frame(&body, &submode).unwrap();
-        assert!(
-            pcm.iter().all(|&s| s == 0.0),
-            "silence at stream start should produce zero PCM"
-        );
-    }
-
-    #[test]
-    fn mode_5_decodes_to_finite_responsive_pcm() {
-        // Mode 5 (15 kbps) has 30-bit LSP, 7-bit fine pitch, 7-bit
-        // pitch gain, 3-bit innovation gain, 48-bit innovation VQ —
-        // every field exercised.
-        let (submode, body) = parse(5);
-        let mut dec = NarrowbandDecoder::new();
-        let pcm = dec.decode_frame(&body, &submode).unwrap();
-        assert_eq!(pcm.len(), 160);
-        for (i, &s) in pcm.iter().enumerate() {
-            assert!(s.is_finite(), "sample {i} not finite: {s}");
-        }
-    }
-
-    /// The pinned LSP base vector (round r347) makes the decoder's
-    /// per-sub-frame LSP→LPC reconstruction operate on angles inside the
-    /// conformant `(0, π)` band by construction, so the synthesis output
-    /// is finite and bounded for a real mode-5 frame *without relying on
-    /// the radian clamp fallback*. We verify the base-aware sub-frame LPC
-    /// path is the one in use: the decoded PCM equals what the explicit
-    /// `subframe_lpc_set_with_base` path produces, and differs from the
-    /// unbounded delta-only `subframe_lpc_set` path (the two paths must
-    /// not be silently identical — the base is a real translation).
-    #[test]
-    fn base_vector_path_is_wired_and_bounds_lsp() {
-        use crate::lsp_to_lpc::{subframe_lpc_set, subframe_lpc_set_with_base};
-
-        let (submode, body) = parse(5);
-        let mut dec = NarrowbandDecoder::new();
-        let pcm = dec.decode_frame(&body, &submode).unwrap();
-        for &s in &pcm {
-            assert!(s.is_finite());
-        }
-
-        // Reconstruct the same first-frame sub-frame LSP set the decoder
-        // used and confirm the base-aware LPC set differs from the
-        // delta-only one (the base offset is non-trivial).
-        let active = body
-            .reconstructed_lsp_q10(&submode)
-            .expect("mode 5 carries an LSP field");
-        let sub_lsp = crate::lsp_interp::NbSubFrameLsp::new(&active, &active);
-        let with_base = subframe_lpc_set_with_base(&sub_lsp);
-        let delta_only = subframe_lpc_set(&sub_lsp);
-        // At least one coefficient must differ between the two paths.
-        let mut differs = false;
-        for sf in 0..SUBFRAMES_PER_FRAME {
-            for i in 0..LPC_ORDER {
-                if (with_base[sf][i] - delta_only[sf][i]).abs() > 1e-9 {
-                    differs = true;
-                }
-                assert!(with_base[sf][i].is_finite());
-            }
-        }
-        assert!(differs, "base-vector path must differ from delta-only path");
-
-        // Every pinned sub-frame LSP angle (base + delta) must sit
-        // strictly inside (0, π): re-derive the radian angles directly.
-        let base_q10 = crate::lsp_base::nb_lsp_base_q10();
-        for sf_q12 in &sub_lsp.subframes {
-            for (i, &v12) in sf_q12.iter().enumerate() {
-                // Q12 interpolated delta + Q12 base (base_q10 << 2).
-                let pinned_q12 = v12 + (base_q10[i] << 2);
-                let rad = f64::from(pinned_q12) / f64::from(1u32 << 12);
-                assert!(
-                    rad > 0.0 && rad < core::f64::consts::PI,
-                    "pinned LSP angle {rad} (coeff {i}) outside (0, π)"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn feedback_makes_pitch_nonzero_on_second_frame() {
-        // Decode two non-silent frames. After the first frame the
-        // excitation buffer holds real samples, so the second frame's
-        // adaptive-codebook contribution is generally non-zero — the
-        // very feedback this module wires. We verify by decoding the
-        // same frame twice and observing the outputs differ (the IIR +
-        // excitation state has advanced).
-        let (submode, body) = parse(5);
-        let mut dec = NarrowbandDecoder::new();
-        let first = dec.decode_frame(&body, &submode).unwrap();
-        let second = dec.decode_frame(&body, &submode).unwrap();
-        // The two frames cannot be identical: the second frame's
-        // adaptive codebook now reads the first frame's excitation, and
-        // the IIR history is non-zero, so the synthesis differs.
-        assert!(
-            first.iter().zip(second.iter()).any(|(&a, &b)| a != b),
-            "feedback should make the second frame differ from the first"
-        );
-    }
-
-    #[test]
-    fn excitation_buffer_holds_nonzero_after_nonsilent_frame() {
-        let (submode, body) = parse(5);
-        let mut dec = NarrowbandDecoder::new();
-        let _ = dec.decode_frame(&body, &submode).unwrap();
-        // The most recent excitation samples must be non-zero for a
-        // non-silent frame (the feedback push happened).
-        let mut any_nonzero = false;
-        for k in 1..=40i32 {
-            if dec.excitation.lookup(-k).unwrap() != 0 {
-                any_nonzero = true;
-                break;
-            }
-        }
-        assert!(
-            any_nonzero,
-            "excitation history should be non-zero after a non-silent frame"
-        );
-    }
-
-    #[test]
-    fn i16_path_matches_f64_path_rounded() {
-        let (submode, body) = parse(5);
-        let mut dec_a = NarrowbandDecoder::new();
-        let f64_pcm = dec_a.decode_frame(&body, &submode).unwrap();
-        let mut dec_b = NarrowbandDecoder::new();
-        let i16_pcm = dec_b.decode_frame_i16(&body, &submode).unwrap();
-        for (i, (&f, &q)) in f64_pcm.iter().zip(i16_pcm.iter()).enumerate() {
-            assert_eq!(q, saturate_i16(f), "sample {i}");
-        }
-    }
-
-    #[test]
-    fn deterministic_across_runs() {
-        let (submode, body) = parse(3);
-        let mut a = NarrowbandDecoder::new();
-        let mut b = NarrowbandDecoder::new();
-        for _ in 0..5 {
-            let pa = a.decode_frame(&body, &submode).unwrap();
-            let pb = b.decode_frame(&body, &submode).unwrap();
-            assert_eq!(pa, pb);
-        }
-    }
-
-    #[test]
-    fn every_table_9_1_mode_decodes() {
-        // All nine Table 9.1 modes decode (r438 — the staged
-        // `nb-innovation-binding.md` bound modes 1 and 7).
-        for mode in [0u8, 1, 2, 3, 4, 5, 6, 7, 8] {
-            let (submode, body) = parse(mode);
-            let mut dec = NarrowbandDecoder::new();
-            let pcm = dec
-                .decode_frame(&body, &submode)
-                .unwrap_or_else(|e| panic!("mode {mode} should decode: {e}"));
-            for &s in &pcm {
-                assert!(s.is_finite(), "mode {mode} produced non-finite PCM");
-            }
-        }
-    }
-
-    /// Mode 1's four 1-bit per-sub-frame innovation-gain fields are
-    /// inert (binding doc §4): flipping them must not change one output
-    /// sample. Decode the same mode-1 frame with the fields at 1
-    /// (all-ones frame) and forced to 0 — identical PCM, both frames.
-    #[test]
-    fn mode_1_innovation_gain_bits_are_inert() {
-        let (submode, body_ones) = parse(1);
-        let mut body_zeros = body_ones;
-        for sf in &mut body_zeros.subframes {
-            sf.innovation_gain_index = 0;
-        }
-        let mut dec_a = NarrowbandDecoder::new();
-        let mut dec_b = NarrowbandDecoder::new();
-        for _ in 0..3 {
-            let a = dec_a.decode_frame(&body_ones, &submode).unwrap();
-            let b = dec_b.decode_frame(&body_zeros, &submode).unwrap();
-            assert_eq!(a, b, "inert bits changed the decode");
-        }
-    }
-
-    /// Mode 7's innovation is the sum of its two 48-bit stages: zeroing
-    /// the second stage must change the decoded PCM (the stage is
-    /// load-bearing), while the frame still decodes.
-    #[test]
-    fn mode_7_second_stage_is_load_bearing() {
-        let (submode, body_full) = parse(7);
-        let mut body_one_stage = body_full;
-        for sf in &mut body_one_stage.subframes {
-            // Keep stage 1 (top 48 bits), zero stage 2.
-            sf.innovation_vq_index &= ((1u128 << 48) - 1) << 48;
-        }
-        let mut dec_a = NarrowbandDecoder::new();
-        let mut dec_b = NarrowbandDecoder::new();
-        let a = dec_a.decode_frame(&body_full, &submode).unwrap();
-        let b = dec_b.decode_frame(&body_one_stage, &submode).unwrap();
-        assert!(
-            a.iter().zip(b.iter()).any(|(&x, &y)| x != y),
-            "stage 2 should contribute to the decoded PCM"
-        );
-    }
-
-    #[test]
-    fn submode_table_pitch_rows_are_mutually_exclusive() {
-        // Sanity: no documented mode carries BOTH frame-level OL pitch
-        // and per-sub-frame fine pitch — the decoder's pitch-period
-        // resolution relies on this.
-        for s in NARROWBAND_SUBMODES {
-            assert!(
-                !(s.ol_pitch_bits != 0 && s.fine_pitch_bits != 0),
-                "mode {} carries both OL and fine pitch",
-                s.mode_id
-            );
-        }
-    }
-
-    /// The forced (open-loop) pitch-gain modes (1 and 8) now resolve a
-    /// non-silent pitch tap from the frame-level `OL pitch gain` field —
-    /// before round r356 they fell back to `SILENCE`. The all-ones frame
-    /// sets the 4-bit field to 15 (unit gain → Q6 centre tap 64).
-    #[test]
-    fn forced_pitch_gain_modes_resolve_nonsilent_centre_tap() {
-        for mode in [1u8, 8] {
-            let (submode, body) = parse(mode);
-            assert_eq!(
-                submode.ol_pitch_gain_bits, 4,
-                "mode {mode} should carry a 4-bit OL pitch gain"
-            );
-            assert_eq!(
-                body.ol_pitch_gain_index, 15,
-                "all-ones frame sets the 4-bit field to 15"
-            );
-            for sf in 0..SUBFRAMES_PER_FRAME {
-                let taps = NarrowbandDecoder::pitch_taps(&body, &submode, sf).taps;
-                // Single-centre-tap forced gain: g0 = g2 = 0, g1 = the
-                // Q6 round of the capped coefficient (0.99·64 → 63).
-                assert_eq!(taps, [0, 63, 0], "mode {mode} sf {sf}");
-            }
-        }
-    }
-
-    /// Mode 0 (true silence — no pitch field at all) still resolves the
-    /// all-zero taps; the forced branch only fires when a frame actually
-    /// carries the `OL pitch gain` field.
-    #[test]
-    fn silence_mode_pitch_taps_stay_silent() {
-        let (submode, body) = parse(0);
-        assert_eq!(submode.ol_pitch_gain_bits, 0);
-        for sf in 0..SUBFRAMES_PER_FRAME {
-            assert_eq!(
-                NarrowbandDecoder::pitch_taps(&body, &submode, sf),
-                PitchGainTaps::SILENCE,
-                "silence sf {sf}"
-            );
-        }
-    }
-
-    /// End-to-end: mode 8 (forced OL pitch gain + documented innovation)
-    /// now feeds a real pitch contribution. Decoding two frames, the
-    /// second frame's adaptive codebook reads the first frame's
-    /// excitation through the forced centre tap, so its output is no
-    /// longer the innovation-only stand-in. Cross-check that a decoder
-    /// with the forced gain zeroed (index 0) produces a *different*
-    /// second frame — proving the forced pitch path is load-bearing.
-    #[test]
-    fn forced_pitch_gain_changes_mode8_second_frame() {
-        let (submode, mut body) = parse(8);
-        // Unit forced gain (all-ones frame → index 15).
-        assert_eq!(body.ol_pitch_gain_index, 15);
-        let mut dec = NarrowbandDecoder::new();
-        let _f0 = dec.decode_frame(&body, &submode).unwrap();
-        let f1_forced = dec.decode_frame(&body, &submode).unwrap();
-
-        // Same stream, but with the forced pitch gain set to 0 (no pitch
-        // contribution). The first frames are identical (empty history →
-        // zero pitch either way), but the second frame must differ once
-        // the forced tap reads the non-zero history.
-        body.ol_pitch_gain_index = 0;
-        let mut dec0 = NarrowbandDecoder::new();
-        let _g0 = dec0.decode_frame(&body, &submode).unwrap();
-        let g1_zero = dec0.decode_frame(&body, &submode).unwrap();
-
-        assert!(
-            f1_forced.iter().zip(g1_zero.iter()).any(|(&a, &b)| a != b),
-            "forced pitch gain should change the second-frame output"
-        );
-        for &s in &f1_forced {
-            assert!(s.is_finite());
-        }
     }
 }

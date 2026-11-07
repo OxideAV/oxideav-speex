@@ -362,6 +362,7 @@ fn band_db(frame: &[f64]) -> (f64, f64) {
 fn decode_ours(spx: &[u8]) -> Vec<f64> {
     let packets = lift(spx);
     let mut dec = SpeexDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for pkt in &packets[2..] {
         let pcm = dec.decode_packet_pcm_i16(pkt).expect("probe decodes");
@@ -422,33 +423,30 @@ fn crate_decode_tracks_probes() {
     let (d2, hbv) = segment_band_errors(HBVAR_SPX, HBVAR_PCM);
     println!("lbvar delay {d1}: per-seg (lo,hi) dB {lbv:?}");
     println!("hbvar delay {d2}: per-seg (lo,hi) dB {hbv:?}");
-    assert!(
-        (140..=150).contains(&d1) && (140..=150).contains(&d2),
-        "decoder delay moved"
-    );
+    // r483: output aligned with the reference decoder; the remaining
+    // offset is the reference file's 223-sample trim.
+    assert!(d1 == 223 && d2 == 223, "decoder delay moved");
 
-    // The low band decodes essentially exactly on both probes
-    // (measured ≤ 0.08 dB per segment).
+    // The low band decodes exactly on both probes (r483 measured
+    // ≤ 0.0003 dB per segment; r450 0.08 dB).
     for (k, &(lo, _)) in lbv.iter().enumerate() {
-        assert!(lo < 0.5, "lbvar seg {k}: low band {lo:.2} dB ≥ 0.5");
+        assert!(lo < 0.01, "lbvar seg {k}: low band {lo:.4} dB ≥ 0.01");
     }
     for (k, &(lo, _)) in hbv.iter().enumerate() {
-        assert!(lo < 0.5, "hbvar seg {k}: low band {lo:.2} dB ≥ 0.5");
+        assert!(lo < 0.01, "hbvar seg {k}: low band {lo:.4} dB ≥ 0.01");
     }
-    // r450 crossover-anchored law: both probe streams decode to
-    // ≤ 0.4 dB per-segment high-band error (measured lbvar
-    // 0.07/0.02/0.04/0.03/0.06, hbvar 0.37/0.23/0.09/0.05/0.03 —
-    // the r446 fitted-law divergence of 6…27 dB is closed). Floor at
-    // 1 dB with cross-platform margin.
+    // Exact gain law on the exact float path: ≤ 0.001 dB per-segment
+    // high-band error (r483; r450 measured up to 0.37 dB, the r446
+    // fitted-law divergence 6…27 dB).
     for k in 0..5 {
         assert!(
-            lbv[k].1 < 1.0,
-            "lbvar seg {k}: 4–8 kHz {:.2} dB ≥ 1.0 (gain-law regression)",
+            lbv[k].1 < 0.01,
+            "lbvar seg {k}: 4–8 kHz {:.4} dB ≥ 0.01 (gain-law regression)",
             lbv[k].1
         );
         assert!(
-            hbv[k].1 < 1.0,
-            "hbvar seg {k}: 4–8 kHz {:.2} dB ≥ 1.0 (gain-law regression)",
+            hbv[k].1 < 0.01,
+            "hbvar seg {k}: 4–8 kHz {:.4} dB ≥ 0.01 (gain-law regression)",
             hbv[k].1
         );
     }

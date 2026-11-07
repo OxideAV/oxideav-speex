@@ -19,24 +19,22 @@
 //! * the `INNOVATION_CODEBOOK_SCALE` = 1/32 Q5 row normalisation — the
 //!   gate has **no scale freedom**, so a wrong absolute calibration
 //!   fails the energy-ratio and SNR floors immediately;
-//! * the QMF band alignment (the fixed 80-sample reference lead — the
-//!   reference decoder's QMF/look-ahead padding, `notes.md`).
+//! * the QMF band alignment.
 //!
 //! Reference geometry: `expected.pcm` is 32 080 samples s16le mono
-//! 16 kHz and leads the decode by 80 samples (2.5 ms QMF/look-ahead
-//! padding); the gate aligns at that fixed lag rather than searching,
-//! so a delay-convention regression fails loudly.
+//! 16 kHz, aligned with the decode sample for sample (r483: both bands
+//! run the reference's one-sub-frame synthesis lag; until r480 the
+//! reference led by 80 samples); the gate aligns at that fixed lag
+//! rather than searching, so a delay-convention regression fails loudly.
 
 use oxideav_speex::{QmfAnalysis, WidebandDecoder};
 
 const INPUT: &[u8] = include_bytes!("fixtures/wb-mode1-folded/input.spx");
 const EXPECTED: &[u8] = include_bytes!("fixtures/wb-mode1-folded/expected.pcm");
 
-/// Fixed alignment: the reference decode leads ours by 80 samples at
-/// 16 kHz (40 per 8 kHz half-band) — the reference QMF/look-ahead
-/// padding documented in the fixture notes.
-const REF_LEAD_FULL: usize = 80;
-const REF_LEAD_HALF: usize = 40;
+/// Fixed alignment: none (module docs).
+const REF_LEAD_FULL: usize = 0;
+const REF_LEAD_HALF: usize = 0;
 
 fn lift_ogg_packets(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut packets = Vec::new();
@@ -84,6 +82,8 @@ fn decode_fixture() -> Vec<f64> {
     assert_eq!(audio.len(), 101, "fixture carries 101 audio frames");
 
     let mut dec = WidebandDecoder::new();
+
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for (i, pkt) in audio.iter().enumerate() {
         let frame = dec
@@ -150,18 +150,23 @@ fn folded_high_band_decode_matches_reference() {
     // corr 0.9894; floors leave margin for platform float variance). ---
     let (snr, corr) = score(&ours, &reference, REF_LEAD_FULL);
     println!("WB full: {snr:.2} dB corr {corr:.5}");
-    assert!(snr >= 14.0, "full-signal absolute SNR {snr:.2} dB < 14 dB");
-    assert!(corr >= 0.985, "full-signal correlation {corr:.4} < 0.985");
+    // r483 exact float path: ≈ 80 dB.
+    assert!(snr >= 70.0, "full-signal absolute SNR {snr:.2} dB < 70 dB");
+    assert!(
+        corr >= 0.99999,
+        "full-signal correlation {corr:.6} < 0.99999"
+    );
 
     // --- Absolute energy calibration (no scale freedom): a missing or
     // doubled INNOVATION_CODEBOOK_SCALE / fold constant fails here. ---
-    let e_ours: f64 = ours.iter().map(|v| v * v).sum();
-    let e_ref: f64 = reference.iter().map(|v| v * v).sum();
+    let common = reference.len().min(ours.len());
+    let e_ours: f64 = ours[..common].iter().map(|v| v * v).sum();
+    let e_ref: f64 = reference[..common].iter().map(|v| v * v).sum();
     let ratio = e_ours / e_ref;
     println!("WB energy ratio: {ratio:.4}");
     assert!(
-        (0.85..=1.15).contains(&ratio),
-        "decode/reference energy ratio {ratio:.4} outside [0.85, 1.15]"
+        (0.999..=1.001).contains(&ratio),
+        "decode/reference energy ratio {ratio:.4} outside [0.999, 1.001]"
     );
 
     // --- Per-band conformance. The high band is the folded-law gate
@@ -175,38 +180,44 @@ fn folded_high_band_decode_matches_reference() {
     // corr 1.00000 (r450 crossover reading 44.1 dB; fitted ceiling law
     // 38.9 dB).
     assert!(
-        hsnr >= 52.0,
-        "high-band (folded) absolute SNR {hsnr:.2} dB < 52 dB"
+        hsnr >= 60.0,
+        "high-band (folded) absolute SNR {hsnr:.2} dB < 60 dB"
     );
-    assert!(hcorr >= 0.999, "high-band correlation {hcorr:.4} < 0.999");
+    assert!(
+        hcorr >= 0.99999,
+        "high-band correlation {hcorr:.6} < 0.99999"
+    );
 
     let (lsnr, lcorr) = score(&our_low, &ref_low, REF_LEAD_HALF);
     println!("WB low: {lsnr:.2} dB corr {lcorr:.5}");
-    // r410 (NB pitch-path fixes): measured 14.70 dB / 0.983.
-    assert!(lsnr >= 13.5, "low-band absolute SNR {lsnr:.2} dB < 13.5 dB");
-    assert!(lcorr >= 0.98, "low-band correlation {lcorr:.4} < 0.98");
+    // r483 exact low band (r410: 14.70 dB / 0.983).
+    assert!(lsnr >= 70.0, "low-band absolute SNR {lsnr:.2} dB < 70 dB");
+    assert!(
+        lcorr >= 0.99999,
+        "low-band correlation {lcorr:.6} < 0.99999"
+    );
 
     // The folded high band carries real (non-silent) energy at the
     // right level: ratio pinned tightly because the fold gain law has
     // no other external anchor.
-    let he_ours: f64 = our_high.iter().map(|v| v * v).sum();
-    let he_ref: f64 = ref_high.iter().map(|v| v * v).sum();
+    let hcommon = ref_high.len().min(our_high.len());
+    let he_ours: f64 = our_high[..hcommon].iter().map(|v| v * v).sum();
+    let he_ref: f64 = ref_high[..hcommon].iter().map(|v| v * v).sum();
     let hratio = he_ours / he_ref;
     assert!(
-        (0.9..=1.1).contains(&hratio),
-        "high-band energy ratio {hratio:.4} outside [0.9, 1.1]"
+        (0.995..=1.005).contains(&hratio),
+        "high-band energy ratio {hratio:.4} outside [0.995, 1.005]"
     );
 }
 
 /// The reference decode was produced with the codec's **default output
-/// high-pass** active (`--no-enh` disables only the perceptual
-/// enhancer; the manual's codec-control table documents the high-pass
-/// as default-on). Applying the crate's fitted [`OutputHighpass`]
-/// (r393, opt-in) to the raw decode must therefore move it *closer* to
-/// the reference — this pins both the filter fit and the pipeline
-/// reading (measured: 16.7 dB raw → 18.3 dB high-passed).
+/// high-pass** active, and so is this decoder's (r483: the measured
+/// 8 kHz biquad on the narrowband layer,
+/// `WB_LOW_BAND_OUTPUT_HIGHPASS`) — applying the older fitted
+/// [`OutputHighpass`] on top now moves the decode *away* from the
+/// reference.
 #[test]
-fn output_highpass_improves_reference_match() {
+fn output_highpass_is_built_in() {
     use oxideav_speex::OutputHighpass;
 
     let reference = reference_pcm();
@@ -215,15 +226,10 @@ fn output_highpass_improves_reference_match() {
 
     let mut hp = OutputHighpass::for_sample_rate(16_000);
     hp.process_slice(&mut ours);
-    let (hp_snr, hp_corr) = score(&ours, &reference, REF_LEAD_FULL);
-    println!("WB hp: raw {raw_snr:.2} -> {hp_snr:.2} dB corr {hp_corr:.5}");
-
-    assert!(
-        hp_snr > raw_snr + 0.5,
-        "high-pass should improve the match: raw {raw_snr:.2} dB vs {hp_snr:.2} dB"
-    );
-    assert!(hp_snr >= 16.0, "high-passed SNR {hp_snr:.2} dB < 16 dB");
-    assert!(hp_corr >= 0.985, "high-passed correlation {hp_corr:.4}");
+    let (hp_snr, _) = score(&ours, &reference, REF_LEAD_FULL);
+    println!("WB: built-in {raw_snr:.2} dB; extra post filter {hp_snr:.2} dB");
+    assert!(raw_snr >= 70.0, "built-in high-pass decode {raw_snr:.2} dB");
+    assert!(hp_snr < raw_snr - 10.0, "a second high-pass must hurt");
 }
 
 /// The header-driven top-level path ([`SpeexStreamDecoder`]) decodes
@@ -240,6 +246,8 @@ fn stream_decoder_path_matches_direct_wideband_decode() {
     assert!(header.is_wideband(), "fixture is a wideband stream");
 
     let mut stream = SpeexStreamDecoder::for_header(&header).expect("wideband dispatch");
+
+    stream.set_enhancer(false);
     assert_eq!(stream.output_rate_hz(), 16_000);
     assert_eq!(stream.frame_samples(), 320);
 
@@ -249,6 +257,8 @@ fn stream_decoder_path_matches_direct_wideband_decode() {
     }
 
     let mut direct = WidebandDecoder::new();
+
+    direct.set_enhancer(false);
     let mut via_direct: Vec<i16> = Vec::new();
     for pkt in &packets[2..] {
         via_direct.extend(direct.decode_packet_i16(pkt).expect("direct decode"));

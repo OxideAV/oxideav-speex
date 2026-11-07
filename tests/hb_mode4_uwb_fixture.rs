@@ -207,6 +207,7 @@ fn decode_fixture() -> Vec<f64> {
     let packets = lift_ogg_packets(INPUT);
     assert!(packets.len() > 2, "Ogg stream must carry audio packets");
     let mut dec = UltraWidebandDecoder::new();
+    dec.set_enhancer(false);
     let mut out = Vec::new();
     for pkt in &packets[2..] {
         for f in dec.decode_packet(pkt).expect("q10 UWB stream decodes") {
@@ -295,7 +296,7 @@ fn decode_tracks_reference() {
     // the delay on full-signal correlation and pin it.
     let mut best_delay = 0usize;
     let mut best_corr = f64::NEG_INFINITY;
-    for delay in 0..400usize {
+    for delay in 400..600usize {
         let n = (ours.len() - delay).min(reference.len());
         let (mut dot, mut ee, mut rr) = (0.0f64, 0.0f64, 0.0f64);
         for i in 0..n {
@@ -310,18 +311,18 @@ fn decode_tracks_reference() {
         }
     }
     println!("our-delay {best_delay} (corr {best_corr:.4})");
-    // Measured r446: 351 samples at 32 kHz — the triple-QMF decode
-    // chain's look-ahead against the source-length-trimmed reference
-    // (the 16 kHz fixture pins ≈142; one more QMF stage doubles it
-    // plus its own filter delay). A moved delay means the filterbank
-    // timeline changed.
-    assert!(
-        (348..=354).contains(&best_delay),
-        "decoder delay vs the trimmed reference moved (got {best_delay}, was ≈351)"
+    // r483: the decoder's output is aligned with the reference
+    // decoder's (every layer one sub-frame behind its excitation, as
+    // the reference), so the only offset left is the reference file's
+    // own 509-sample source-length trim (r446–r480: 351, before the
+    // synthesis lag was reproduced).
+    assert_eq!(
+        best_delay, 509,
+        "decoder delay vs the trimmed reference moved (got {best_delay})"
     );
     assert!(
-        best_corr > 0.98,
-        "full-signal alignment correlation {best_corr:.4} ≤ 0.98 (was 0.9967, r450)"
+        best_corr > 0.99999,
+        "full-signal alignment correlation {best_corr:.6} ≤ 0.99999"
     );
 
     let ours = &ours[best_delay..];
@@ -378,25 +379,10 @@ fn decode_tracks_reference() {
     //   docs gap.
     //
     // r480 (exact tracer-2026-09.md laws through all three layers):
-    // measured full 25.04 dB, bands 0.09 / 0.30 / 0.45 dB (r450: 20.16 dB,
-    // 0.10 / 0.49 / 0.70 dB).
-    assert!(snr > 23.0, "full-signal SNR {snr:.2} dB < 23 (was 25.04)");
-    assert!(
-        m[0] < 0.5,
-        "0-4 kHz mean |err| {:.2} dB ≥ 0.5 (was 0.10)",
-        m[0]
-    );
-    assert!(
-        m[1] < 1.2,
-        "4-8 kHz mean |err| {:.2} dB ≥ 1.2 (was 0.49)",
-        m[1]
-    );
-    assert!(
-        m[2] < 1.5,
-        "8-16 kHz mean |err| {:.2} dB ≥ 1.5 (was 0.70)",
-        m[2]
-    );
-    if m[1] < 3.0 {
-        println!("NOTE: inner mode-4 gain law appears pinned — tighten this floor");
+    // measured full 25.04 dB, bands 0.09 / 0.30 / 0.45 dB. r483 (the
+    // exact float path in every layer): full 76.6 dB, bands ≤ 0.01 dB.
+    assert!(snr > 70.0, "full-signal SNR {snr:.2} dB < 70");
+    for (b, v) in m.iter().enumerate() {
+        assert!(*v < 0.05, "band {b} mean |err| {v:.3} dB ≥ 0.05");
     }
 }
