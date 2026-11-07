@@ -6,6 +6,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OxideAV/oxideav-speex/compare/v0.0.11...v0.0.12) - 2026-11-07
+
+### Other
+
+- integration surface — SpeexStreamEncoder, header-less + stereo stream decode, integration-guide crate docs, runnable examples ([#7](https://github.com/OxideAV/oxideav-speex/pull/7))
+- API hygiene: #[non_exhaustive] on error / output enums and option records
+
 ### Added
 
 - `SpeexEncoderOptions::with_quality`.
