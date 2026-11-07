@@ -21,7 +21,7 @@
 //! RFC 5574 Table 2 — the ultra-wideband bit-rate sits a constant
 //! +1,800 bit/s (= 36 bits/frame at 50 frames/s) above the wideband
 //! bit-rate at **every** quality, and 36 bits is exactly (and uniquely)
-//! the Table 10.1 **mode-1** total (see [`crate::quality`]). A
+//! the Table 10.1 **mode-1** total (see `crate::quality`). A
 //! conformant stream's second layer is therefore the gain-only mode-1
 //! frame: 12-bit LSP MSVQ envelope + four 5-bit excitation gains, no
 //! excitation VQ.
@@ -126,7 +126,7 @@ pub const UWB_HALF_BAND_FRAME: usize = QMF_WIDEBAND_FRAME;
 
 /// Sub-frames per ultra-wideband second high-band layer — the same four
 /// per-frame gain slots as the wideband layer (the mode-1 36-bit total
-/// pins 4 × 5 gain bits; see [`crate::quality`]).
+/// pins 4 × 5 gain bits; see `crate::quality`).
 pub const UWB_HB_SUBFRAMES: usize = HIGH_BAND_SUBFRAMES_PER_FRAME as usize;
 
 /// One decoded ultra-wideband audio frame.

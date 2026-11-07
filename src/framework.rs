@@ -42,7 +42,7 @@
 //! `docs/audio/speex/intensity-stereo.md` clean-room note pins the
 //! payload layout, the L/R reconstruction law and the encoder fold, so
 //! this framework path implements true intensity stereo
-//! ([`crate::stereo`]):
+//! (`crate::stereo`):
 //!
 //! * **Decode** — for a stream whose header/parameters declare 2
 //!   channels, each frame's code-9 payload reconstructs an `(gL, gR)`
@@ -62,7 +62,7 @@
 //!
 //! `sample_rate` selects the rate class (8000 → narrowband, 16000 →
 //! wideband, 32000 → ultra-wideband; §2.2), the `quality` option (0..=10,
-//! default 8) selects the sub-mode ladder ([`crate::quality`]), and each
+//! default 8) selects the sub-mode ladder (`crate::quality`), and each
 //! 20 ms frame is emitted as one self-contained packet
 //! (`frames_per_packet = 1`, mode-15 terminated). Every quality 0..=10
 //! encodes in every rate class — wideband / ultra-wideband quality 10
@@ -81,19 +81,11 @@ use oxideav_core::{
     Result, RuntimeContext, SampleFormat, TimeBase, parse_options,
 };
 
-use crate::encoder_nb::{NB_FRAME_SAMPLES, NarrowbandEncoder};
-use crate::encoder_uwb::UltraWidebandEncoder;
-use crate::encoder_wb::WidebandEncoder;
-use crate::header::{
-    SPEEX_HEADER_LEN, SPEEX_MAGIC, SPEEX_MODE_NARROWBAND, SPEEX_MODE_ULTRAWIDEBAND,
-    SPEEX_MODE_WIDEBAND, SPEEX_STRING_LEN, SPEEX_VERSION_LEN, SpeexHeader,
-};
-use crate::qmf::QMF_WIDEBAND_FRAME;
+use crate::header::{SPEEX_MAGIC, SPEEX_STRING_LEN, SpeexHeader};
 use crate::quality::{MAX_QUALITY, nb_mode_for_quality, uwb_bitrate_bps, wb_bitrate_bps};
-use crate::stereo::{StereoDecoder, downmix_mean, encode_stereo_payload};
 use crate::stream_decoder::SpeexStreamDecoder;
+use crate::stream_encoder::SpeexStreamEncoder;
 use crate::submode::NarrowbandSubmode;
-use crate::uwb_decoder::UWB_FRAME_SAMPLES;
 
 /// Registry identifier this crate registers under.
 const CODEC_NAME: &str = "speex";
@@ -127,24 +119,6 @@ impl RateClass {
         }
     }
 
-    /// Samples per 20 ms frame (§2.1).
-    fn frame_samples(self) -> usize {
-        match self {
-            RateClass::Narrowband => NB_FRAME_SAMPLES,
-            RateClass::Wideband => QMF_WIDEBAND_FRAME,
-            RateClass::UltraWideband => UWB_FRAME_SAMPLES,
-        }
-    }
-
-    /// The Table 7.1 `mode` field value.
-    fn header_mode(self) -> u32 {
-        match self {
-            RateClass::Narrowband => SPEEX_MODE_NARROWBAND,
-            RateClass::Wideband => SPEEX_MODE_WIDEBAND,
-            RateClass::UltraWideband => SPEEX_MODE_ULTRAWIDEBAND,
-        }
-    }
-
     /// Nominal bit-rate of the class's quality ladder at `quality`.
     fn nominal_bitrate(self, quality: u8) -> Option<u32> {
         match self {
@@ -160,30 +134,10 @@ impl RateClass {
 
     /// A synthetic minimal stream header for this class (all numeric
     /// fields mirroring the staged real-capture headers).
-    fn stream_header(self, quality: u8, vbr: bool) -> SpeexHeader {
-        let mut speex_version = [0u8; SPEEX_VERSION_LEN];
-        let tag = env!("CARGO_PKG_VERSION").as_bytes();
-        let n = tag.len().min(SPEEX_VERSION_LEN);
-        speex_version[..n].copy_from_slice(&tag[..n]);
-        SpeexHeader {
-            speex_string: *SPEEX_MAGIC,
-            speex_version,
-            speex_version_id: 1,
-            header_size: SPEEX_HEADER_LEN as u32,
-            rate: self.sample_rate(),
-            mode: self.header_mode(),
-            // Every staged real capture across the three rate classes
-            // declares bitstream version 4.
-            mode_bitstream_version: 4,
-            nb_channels: 1,
-            bitrate: self.nominal_bitrate(quality).unwrap_or(0),
-            frame_size: self.frame_samples() as u32,
-            vbr: u32::from(vbr),
-            frames_per_packet: 1,
-            extra_headers: 0,
-            reserved1: 0,
-            reserved2: 0,
-        }
+    fn stream_header(self, quality: u8) -> SpeexHeader {
+        SpeexHeader::for_sample_rate(self.sample_rate())
+            .expect("rate class maps to a Speex rate")
+            .with_bitrate(self.nominal_bitrate(quality).unwrap_or(0))
     }
 }
 
@@ -210,9 +164,6 @@ pub struct SpeexFrameworkDecoder {
     pending: VecDeque<AudioFrame>,
     /// `flush` seen — drain then Eof.
     flushed: bool,
-    /// Intensity-stereo reconstruction state (used only when
-    /// `channels == 2`); carries the per-frame gain interpolation.
-    stereo: StereoDecoder,
     /// Perceptual enhancer setting from the `enhancer` option (an
     /// in-band code-0 message overrides it mid-stream).
     enhancer: bool,
@@ -283,7 +234,6 @@ impl SpeexFrameworkDecoder {
             channels: params.channels.unwrap_or(1).clamp(1, 2),
             pending: VecDeque::new(),
             flushed: false,
-            stereo: StereoDecoder::new(),
             enhancer: opts.enhancer,
         };
         if params.channels.is_some_and(|c| c > 2) {
@@ -329,7 +279,7 @@ impl SpeexFrameworkDecoder {
         })?;
         // A synthetic header carries exactly the mode field the stream
         // decoder dispatches on.
-        let header = class.stream_header(MAX_QUALITY, false);
+        let header = class.stream_header(MAX_QUALITY);
         let mut stream = SpeexStreamDecoder::for_header(&header)
             .map_err(|e| Error::invalid(format!("speex: {e}")))?;
         stream.set_enhancer(self.enhancer);
@@ -382,27 +332,15 @@ impl Decoder for SpeexFrameworkDecoder {
         // Two-channel output applies the in-band intensity-stereo law
         // (`crate::stereo`); mono output takes the flat concatenation.
         if self.channels >= 2 {
-            let frames = stream
-                .decode_packet_frames_stereo(data)
+            let interleaved = stream
+                .decode_packet_stereo_i16(data)
                 .map_err(|e| Error::invalid(format!("speex: {e}")))?;
-            let mut interleaved: Vec<i16> = Vec::new();
-            let mut total = 0u32;
-            for (mono, payload) in frames {
-                if mono.is_empty() {
-                    continue;
-                }
-                total += mono.len() as u32;
-                // Absent payload (non-stereo message stream): neutral
-                // duplicate, the un-panned identity.
-                let p = payload.unwrap_or(0b0000_0011); // bal 0, e 3 = unit gains
-                interleaved.extend_from_slice(&self.stereo.interleave_frame(&mono, p));
-            }
-            if total == 0 {
+            if interleaved.is_empty() {
                 return Ok(());
             }
             let bytes: Vec<u8> = interleaved.iter().flat_map(|s| s.to_le_bytes()).collect();
             self.pending.push_back(AudioFrame {
-                samples: total,
+                samples: (interleaved.len() / 2) as u32,
                 pts: packet.pts,
                 data: vec![bytes],
             });
@@ -443,7 +381,6 @@ impl Decoder for SpeexFrameworkDecoder {
         self.pending.clear();
         self.flushed = false;
         self.meta_skip = 0;
-        self.stereo = StereoDecoder::new();
         // Rebuild the rate-class state fresh (zero IIR / excitation /
         // QMF history) so post-seek decode starts clean.
         if let Some(header) = &self.header {
@@ -508,34 +445,17 @@ impl CodecOptionsStruct for SpeexEncoderOptions {
     }
 }
 
-/// Rate-class-specific encoder state behind [`SpeexFrameworkEncoder`].
-#[derive(Debug)]
-enum EncoderInner {
-    /// 8 kHz narrowband.
-    Nb(Box<NarrowbandEncoder>),
-    /// 16 kHz wideband.
-    Wb(Box<WidebandEncoder>),
-    /// 32 kHz ultra-wideband.
-    Uwb(Box<UltraWidebandEncoder>),
-}
-
-/// [`Encoder`] implementation over the three direct encoders. Built by
+/// [`Encoder`] implementation over [`SpeexStreamEncoder`]. Built by
 /// [`make_encoder`]; consumes interleaved S16 audio frames of any
 /// length, re-blocks them into 20 ms Speex frames, and emits one
 /// self-contained packet per frame.
 #[derive(Debug)]
 pub struct SpeexFrameworkEncoder {
     codec_id: CodecId,
-    inner: EncoderInner,
-    class: RateClass,
-    quality: u8,
-    /// Input channel count (2 is downmixed to mono before encoding).
-    in_channels: u16,
-    /// Mono sample accumulator awaiting a full 20 ms frame.
+    inner: SpeexStreamEncoder,
+    /// Interleaved sample accumulator awaiting a full 20 ms frame
+    /// (`frame_samples × channels` samples).
     buf: Vec<i16>,
-    /// Stereo (L, R) accumulator when `in_channels == 2`: true intensity
-    /// stereo emits the code-9 message + the `(L+R)/2` downmix per frame.
-    stereo_buf: Vec<(i16, i16)>,
     /// Encoded packets not yet pulled.
     pending: VecDeque<Packet>,
     /// Running output position in samples (packet pts).
@@ -548,15 +468,15 @@ impl SpeexFrameworkEncoder {
         let rate = params
             .sample_rate
             .ok_or_else(|| Error::invalid("speex: encoder needs sample_rate"))?;
-        let class = RateClass::for_sample_rate(rate).ok_or_else(|| {
-            Error::unsupported(format!(
+        if RateClass::for_sample_rate(rate).is_none() {
+            return Err(Error::unsupported(format!(
                 "speex: sample rate {rate} is not a Speex rate class (8000/16000/32000)"
-            ))
-        })?;
+            )));
+        }
         let in_channels = params.channels.unwrap_or(1);
         if !(1..=2).contains(&in_channels) {
             return Err(Error::unsupported(format!(
-                "speex: encoder accepts 1 or 2 input channels (2 is downmixed to mono), got {in_channels}"
+                "speex: encoder accepts 1 or 2 input channels (2 is intensity stereo), got {in_channels}"
             )));
         }
         if let Some(fmt) = params.sample_format
@@ -567,140 +487,65 @@ impl SpeexFrameworkEncoder {
             )));
         }
         let opts: SpeexEncoderOptions = parse_options(&params.options)?;
-        let inner = match class {
-            RateClass::Narrowband => EncoderInner::Nb(Box::default()),
-            RateClass::Wideband => EncoderInner::Wb(Box::default()),
-            RateClass::UltraWideband => EncoderInner::Uwb(Box::default()),
-        };
+        let inner = if in_channels == 2 {
+            SpeexStreamEncoder::new_stereo(rate, opts.quality)
+        } else {
+            SpeexStreamEncoder::new(rate, opts.quality)
+        }
+        .map_err(|e| Error::invalid(format!("speex: {e}")))?;
 
-        let mut header = class.stream_header(opts.quality, false);
         // True intensity-stereo output declares 2 channels so a decoder
         // installs the stereo callback (docs intensity-stereo.md §1).
-        if in_channels == 2 {
-            header.nb_channels = 2;
-        }
+        let header = inner.header();
         let mut output_params = CodecParameters::audio(params.codec_id.clone());
         output_params.sample_rate = Some(rate);
-        output_params.channels = Some(u16::from(in_channels == 2) + 1);
+        output_params.channels = Some(in_channels);
         output_params.sample_format = Some(SampleFormat::S16);
-        output_params.bit_rate = class.nominal_bitrate(opts.quality).map(u64::from);
+        output_params.bit_rate = inner.nominal_bitrate_bps().map(u64::from);
         output_params.extradata = header.write_bytes().to_vec();
 
         Ok(Self {
             codec_id: params.codec_id.clone(),
             inner,
-            class,
-            quality: opts.quality,
-            in_channels,
             buf: Vec::new(),
-            stereo_buf: Vec::new(),
             pending: VecDeque::new(),
             sample_pos: 0,
             output_params,
         })
     }
 
+    /// Samples per frame across all channels.
+    fn block_len(&self) -> usize {
+        self.inner.frame_samples() * usize::from(self.inner.channels())
+    }
+
     /// Encode every complete 20 ms frame buffered so far.
     fn drain_full_frames(&mut self) -> Result<()> {
-        let frame_len = self.class.frame_samples();
-        while self.buf.len() >= frame_len {
-            let frame: Vec<i16> = self.buf.drain(..frame_len).collect();
+        let block = self.block_len();
+        while self.buf.len() >= block {
+            let frame: Vec<i16> = self.buf.drain(..block).collect();
             self.encode_one(&frame)?;
         }
         Ok(())
     }
 
-    /// Encode one exactly-frame-length block of mono samples as a
+    /// Encode one exactly-frame-length interleaved block as a
     /// self-contained packet.
     fn encode_one(&mut self, frame: &[i16]) -> Result<()> {
-        let frame_len = self.class.frame_samples();
-        debug_assert_eq!(frame.len(), frame_len);
-        let bytes = self.encode_mono_frame_bytes(frame)?;
-        let rate = self.class.sample_rate();
+        let bytes = self
+            .inner
+            .encode_frame(frame)
+            .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+        let frame_len = self.inner.frame_samples() as i64;
+        let rate = self.inner.sample_rate_hz();
         let packet = Packet::new(0, TimeBase::from_rate(rate), bytes)
             .with_pts(self.sample_pos)
             .with_dts(self.sample_pos)
-            .with_duration(frame_len as i64)
+            .with_duration(frame_len)
             .with_keyframe(true);
-        self.sample_pos += frame_len as i64;
+        self.sample_pos += frame_len;
         self.pending.push_back(packet);
         Ok(())
-    }
-
-    /// Encode every complete stereo frame buffered so far: derive the
-    /// code-9 payload from the L/R magnitudes, encode the `(L+R)/2`
-    /// downmix, and emit the 17-bit in-band message prefixed to the frame.
-    fn drain_stereo_frames(&mut self) -> Result<()> {
-        let frame_len = self.class.frame_samples();
-        while self.stereo_buf.len() >= frame_len {
-            let pairs: Vec<(i16, i16)> = self.stereo_buf.drain(..frame_len).collect();
-            self.encode_one_stereo(&pairs)?;
-        }
-        Ok(())
-    }
-
-    /// Encode one stereo frame: mono downmix packet + code-9 message.
-    fn encode_one_stereo(&mut self, pairs: &[(i16, i16)]) -> Result<()> {
-        let frame_len = self.class.frame_samples();
-        debug_assert_eq!(pairs.len(), frame_len);
-        // Mean-absolute per-channel magnitude (any consistent measure —
-        // only the quantiser grid + clamp are pinned, docs §5).
-        let (mut sl, mut sr) = (0.0f64, 0.0f64);
-        let mut mono = Vec::with_capacity(frame_len);
-        for &(l, r) in pairs {
-            sl += f64::from(l.unsigned_abs());
-            sr += f64::from(r.unsigned_abs());
-            mono.push(downmix_mean(l, r));
-        }
-        let n = frame_len as f64;
-        let payload = encode_stereo_payload(sl / n, sr / n);
-        // Encode the mono downmix as a normal frame, then bit-prefix the
-        // 17-bit code-9 message (docs intensity-stereo.md §1).
-        let frame_bytes = self.encode_mono_frame_bytes(&mono)?;
-        let mut w = crate::bitreader::BitWriter::new();
-        w.write(0, 1).ok(); // wideband flag of the in-band pseudo-frame
-        w.write(14, 4).ok(); // mode 14 = in-band signalling
-        w.write(9, 4).ok(); // code 9 = intensity stereo
-        w.write(u32::from(payload), 8).ok();
-        for &b in &frame_bytes {
-            w.write(u32::from(b), 8).ok();
-        }
-        let bytes = w.into_bytes();
-        let rate = self.class.sample_rate();
-        let packet = Packet::new(0, TimeBase::from_rate(rate), bytes)
-            .with_pts(self.sample_pos)
-            .with_dts(self.sample_pos)
-            .with_duration(frame_len as i64)
-            .with_keyframe(true);
-        self.sample_pos += frame_len as i64;
-        self.pending.push_back(packet);
-        Ok(())
-    }
-
-    /// Encode one exactly-frame-length mono block to its packet bytes.
-    fn encode_mono_frame_bytes(&mut self, frame: &[i16]) -> Result<Vec<u8>> {
-        let frame_len = self.class.frame_samples();
-        debug_assert_eq!(frame.len(), frame_len);
-        match &mut self.inner {
-            EncoderInner::Nb(enc) => {
-                let mut pcm = [0i16; NB_FRAME_SAMPLES];
-                pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], self.quality)
-                    .map_err(|e| Error::invalid(format!("speex: {e}")))
-            }
-            EncoderInner::Wb(enc) => {
-                let mut pcm = [0i16; QMF_WIDEBAND_FRAME];
-                pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], self.quality)
-                    .map_err(|e| Error::invalid(format!("speex: {e}")))
-            }
-            EncoderInner::Uwb(enc) => {
-                let mut pcm = [0i16; UWB_FRAME_SAMPLES];
-                pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], self.quality)
-                    .map_err(|e| Error::invalid(format!("speex: {e}")))
-            }
-        }
     }
 }
 
@@ -727,33 +572,22 @@ impl Encoder for SpeexFrameworkEncoder {
                 "speex: encoder consumes interleaved S16 input (one plane)",
             ));
         }
-        let ch = usize::from(self.in_channels);
-        let expect = audio.samples as usize * ch * 2;
+        let total = audio.samples as usize * usize::from(self.inner.channels());
+        let expect = total * 2;
         if plane.len() < expect {
             return Err(Error::invalid(format!(
                 "speex: audio frame plane holds {} bytes, need {expect}",
                 plane.len()
             )));
         }
-        // Two-channel input: keep the L/R pair for the per-frame code-9
-        // message; the audio itself is the `(L+R)/2` downmix (§5).
-        if ch == 2 {
-            self.stereo_buf.reserve(audio.samples as usize);
-            for s in 0..audio.samples as usize {
-                let base = s * 4;
-                let l = i16::from_le_bytes([plane[base], plane[base + 1]]);
-                let r = i16::from_le_bytes([plane[base + 2], plane[base + 3]]);
-                self.stereo_buf.push((l, r));
-            }
-            return self.drain_stereo_frames();
-        }
-        // Mono input.
-        self.buf.reserve(audio.samples as usize);
-        for s in 0..audio.samples as usize {
-            let off = s * 2;
-            self.buf
-                .push(i16::from_le_bytes([plane[off], plane[off + 1]]));
-        }
+        self.buf.reserve(total);
+        self.buf.extend(
+            plane[..expect]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i16::from_le_bytes(*b)),
+        );
         self.drain_full_frames()
     }
 
@@ -763,19 +597,12 @@ impl Encoder for SpeexFrameworkEncoder {
 
     fn flush(&mut self) -> Result<()> {
         self.drain_full_frames()?;
-        self.drain_stereo_frames()?;
-        let frame_len = self.class.frame_samples();
         if !self.buf.is_empty() {
             // Zero-pad the trailing partial frame to a whole 20 ms frame
             // (Speex has no partial-frame syntax).
             let mut tail = std::mem::take(&mut self.buf);
-            tail.resize(frame_len, 0);
+            tail.resize(self.block_len(), 0);
             self.encode_one(&tail)?;
-        }
-        if !self.stereo_buf.is_empty() {
-            let mut tail = std::mem::take(&mut self.stereo_buf);
-            tail.resize(frame_len, (0, 0));
-            self.encode_one_stereo(&tail)?;
         }
         Ok(())
     }
@@ -817,6 +644,7 @@ pub fn register(ctx: &mut RuntimeContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::header::{SPEEX_MODE_NARROWBAND, SPEEX_MODE_ULTRAWIDEBAND, SPEEX_MODE_WIDEBAND};
 
     fn audio_params(rate: u32, channels: u16) -> CodecParameters {
         let mut p = CodecParameters::audio(CodecId::new(CODEC_NAME));
@@ -937,7 +765,7 @@ mod tests {
         enc.send_frame(&tone_frame(160, 8_000.0, 1, 0)).unwrap();
         let packets = drain_packets(enc.as_mut());
 
-        let header = RateClass::Narrowband.stream_header(8, false);
+        let header = RateClass::Narrowband.stream_header(8);
         let tb = TimeBase::from_rate(8_000);
         let header_pkt = Packet::new(0, tb, header.write_bytes().to_vec());
         let comment_pkt = Packet::new(0, tb, b"not-a-speex-frame comment body".to_vec());
@@ -1127,7 +955,7 @@ mod tests {
         let mut params = audio_params(8_000, 1);
         params.options.insert("quality", "3");
         let enc = SpeexFrameworkEncoder::from_params(&params).unwrap();
-        assert_eq!(enc.quality, 3);
+        assert_eq!(enc.inner.quality(), 3);
         assert_eq!(
             enc.output_params.bit_rate,
             Some(8_000),

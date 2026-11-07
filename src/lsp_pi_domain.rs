@@ -28,7 +28,7 @@
 //!
 //! ## Relationship to the crate's internal Q10-radian unit
 //!
-//! The reconstruction path ([`crate::lsp`]) accumulates the per-stage VQ
+//! The reconstruction path (`crate::lsp`) accumulates the per-stage VQ
 //! deltas directly into an internal **Q10-radian** unit (`1/1024` rad
 //! per LSB) by folding the float `LSP_DIV_256/512/1024` scalings into
 //! integer `×4 / ×2 / ×1` multiplies (see that module's docs). The
@@ -42,7 +42,7 @@
 //! ```
 //!
 //! This module pins `LSP_PI` and the storage→radian conversion, and its
-//! tests **cross-check** that the [`crate::lsp_base`] Q10-radian base
+//! tests **cross-check** that the `crate::lsp_base` Q10-radian base
 //! vector — derived independently from the float `LSP_LINEAR` form —
 //! agrees with the `LSP_PI`-domain conversion of the Q15-storage
 //! `LSP_LINEAR` form to within sub-Q10 rounding. Two independently
@@ -106,7 +106,7 @@ pub fn radians_to_lsp_storage(omega: f64) -> i32 {
 ///
 /// This is the bridge between the two coordinate systems described in
 /// the module docs: the codec's `LSP_PI` storage domain and the Q10-rad
-/// unit the [`crate::lsp`] reconstruction accumulates the VQ deltas in.
+/// unit the `crate::lsp` reconstruction accumulates the VQ deltas in.
 pub fn lsp_storage_to_q10(v_storage: i32) -> i32 {
     let q10 = f64::from(v_storage) * f64::from(1i32 << NB_LSP_OUTPUT_Q) * core::f64::consts::PI
         / f64::from(LSP_PI);
@@ -171,7 +171,7 @@ mod tests {
 
     /// The narrowband Q15-storage `LSP_LINEAR` vector, converted through
     /// the `LSP_PI` domain, lands on the **same** Q10-radian base vector
-    /// the [`crate::lsp_base`] module derived independently from the
+    /// the `crate::lsp_base` module derived independently from the
     /// float `.25·i + .25` form. This is the provenance cross-check that
     /// closes the angular-unit gap: two staged numeric facts
     /// (`LSP_LINEAR`, `LSP_PI`) pin one angle.

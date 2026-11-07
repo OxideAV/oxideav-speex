@@ -8,7 +8,7 @@
 //! narrowband encoder — the recursion bottoms out exactly as the
 //! bit-stream nests), and the high half (8–16 kHz) is encoded as a
 //! second Table 10.1 high-band layer. Per the RFC 5574 Table 2 pin
-//! (see [`crate::quality`]), a conformant stream's second layer is the
+//! (see `crate::quality`), a conformant stream's second layer is the
 //! 36-bit **mode-1** gain-only frame at every quality: a 12-bit LSP
 //! MSVQ envelope plus four 5-bit excitation gains — exactly the fields
 //! this encoder derives from the high half.
@@ -157,7 +157,7 @@ pub struct UltraWidebandEncoder {
     /// wideband layers — tracks exactly the excitation state the real
     /// [`crate::UltraWidebandDecoder`] will reconstruct, so the
     /// second-layer folded gains are chosen against the decoder's true
-    /// fold source (r393; see [`crate::uwb_decoder`] module docs).
+    /// fold source (r393; see `crate::uwb_decoder` module docs).
     local_decoder: WidebandDecoder,
     /// Previous frame's quantised second-layer LSP delta (Q10) — the
     /// §9.1 interpolation state the decoder keeps for the same layer.
@@ -222,12 +222,11 @@ impl UltraWidebandEncoder {
     }
 
     /// Encode a packet at a §2.1 quality setting, using the
-    /// [`crate::quality`] ladders for all three layers.
+    /// `crate::quality` ladders for all three layers.
     ///
-    /// All qualities 0..=10 encode (r450 — narrowband modes 1 and 7 are
-    /// bound). Quality 10 selects first-high-band mode 4, which (r450)
-    /// innovation-codebook binding is the remaining recorded docs gap,
-    /// the embedded wideband encoder searches two-stage.
+    /// All qualities 0..=10 encode. Quality 10 selects first-high-band
+    /// mode 4, whose two-stage innovation the embedded wideband encoder
+    /// searches.
     pub fn encode_packet_quality(
         &mut self,
         frames: &[[i16; UWB_FRAME_SAMPLES]],
@@ -294,7 +293,7 @@ impl UltraWidebandEncoder {
     /// Decode the just-encoded wideband layers locally and recombine
     /// their excitation tracks into the 16 kHz second-layer fold source
     /// (the exact signal the real decoder will fold — see
-    /// [`crate::uwb_decoder`]).
+    /// `crate::uwb_decoder`).
     fn local_fold_source(
         &mut self,
         wideband: &WidebandFrameBodies,

@@ -554,10 +554,73 @@ mode-1 fixture.
 oxideav-speex = "0.0"
 ```
 
-Register into an `oxideav_core::RuntimeContext` via `register()`, build
-codecs directly with `make_decoder` / `make_encoder`, or use the direct
-types (`SpeexDecoder`, `SpeexStreamDecoder`, `NarrowbandEncoder`,
-`WidebandEncoder`, `UltraWidebandEncoder`) without the registry.
+Three entry points; everything else the crate exports is the lower
+layer they are built from.
+
+| you have | use |
+| --- | --- |
+| raw 20 ms PCM frames, want packets (8 / 16 / 32 kHz, mono or stereo) | `SpeexStreamEncoder` |
+| Speex packets + an Ogg/Speex header, or a known rate | `SpeexStreamDecoder` |
+| the `oxideav-core` `Decoder` / `Encoder` traits | `register(ctx)`, or `make_decoder` / `make_encoder` |
+
+### Direct API (no registry)
+
+One packet per 20 ms frame: 160 / 320 / 640 samples per channel at
+8 / 16 / 32 kHz. Quality is 0..=10 in every rate class.
+
+```rust
+use oxideav_speex::{SpeexHeader, SpeexStreamDecoder, SpeexStreamEncoder};
+
+let mut enc = SpeexStreamEncoder::new(16_000, 8)?;     // wideband, quality 8
+let header: [u8; 80] = enc.header().write_bytes();     // Ogg packet 0 / extradata
+
+let mut dec = SpeexStreamDecoder::for_header(&SpeexHeader::parse(&header)?)?;
+// No header on the wire (RTP, RFC 5574)? SpeexStreamDecoder::for_sample_rate(16_000)?
+
+let frame = vec![0i16; enc.frame_samples()];          // 320 samples = 20 ms
+let packet: Vec<u8> = enc.encode_frame(&frame)?;
+let pcm: Vec<i16> = dec.decode_packet_pcm_i16(&packet)?;
+```
+
+Stereo is Speex's in-band intensity stereo:
+`SpeexStreamEncoder::new_stereo(rate, quality)` takes interleaved L/R
+frames (`2 × frame_samples()` samples) and
+`SpeexStreamDecoder::decode_packet_stereo_i16` returns interleaved L/R.
+`SpeexStreamDecoder::set_enhancer(false)` turns the perceptual enhancer
+off (on by default).
+
+### Framework API
+
+```rust
+use oxideav_core::{CodecId, CodecParameters, RuntimeContext, SampleFormat};
+
+let mut ctx = RuntimeContext::new();
+oxideav_speex::register(&mut ctx);
+
+let mut params = CodecParameters::audio(CodecId::new("speex"));
+params.sample_rate = Some(32_000);
+params.channels = Some(1);                  // 2 = intensity stereo
+params.sample_format = Some(SampleFormat::S16);
+params.options.insert("quality", "10");
+let mut enc = ctx.codecs.first_encoder(&params)?;
+let mut dec = ctx.codecs.first_decoder(enc.output_params())?;
+```
+
+The encoder takes interleaved S16 frames of any length, re-blocks them
+into 20 ms packets and publishes the 80-byte stream header as
+`output_params().extradata`. The decoder takes that header as
+`extradata`, a bare `sample_rate`, or in-band (the Ogg header + comment
+packets are consumed), and emits interleaved S16, one audio frame per
+packet. Options: encoder `quality` (0..=10, default 8), decoder
+`enhancer` (default on). The codec claims the Ogg payload magic
+`Speex   `, so an `oxideav-ogg` demuxer routes `.spx` streams to it.
+
+### Examples
+
+```sh
+cargo run --example roundtrip -- 32000 10 1   # RATE QUALITY CHANNELS, direct API
+cargo run --example registry                  # Encoder/Decoder traits via the registry
+```
 
 ## License
 

@@ -55,10 +55,10 @@
 //! [`crate::reconstruct_hb_exc_gain`] produces the gain in the decoder's
 //! normalised float signal domain (the same domain
 //! [`crate::reconstruct_fixed_codebook_gain`] uses for the narrowband
-//! path — see [`crate::gain_reconstruction`] module docs). Multiplying
+//! path — see `crate::gain_reconstruction` module docs). Multiplying
 //! the raw `i16` high-band innovation sub-vector by that float magnitude
 //! keeps the product in `f32`, matching the Q-format-agnostic posture of
-//! [`crate::gain_scaled_innovation`] / [`crate::synthesis`]; the downstream
+//! `crate::gain_scaled_innovation` / `crate::synthesis`; the downstream
 //! high-band synthesis filter filters in floating point and consumes the
 //! `[f32; 40]` directly.
 //!
@@ -86,7 +86,7 @@
 //!
 //! * No high-band pitch term (none exists — §10.2).
 //! * No high-band synthesis filtering (that is the
-//!   [`crate::hb_synthesis`] layer that consumes this excitation).
+//!   `crate::hb_synthesis` layer that consumes this excitation).
 //! * No QMF recombination of the low + high half-bands (that is the
 //!   wideband-synthesis-assembly layer).
 //! * Mode 4 (80-bit two-stage) is decoded here via the float two-stage
@@ -199,7 +199,7 @@ pub const GAIN_SCALED_HB_INNOVATION_SAMPLES: usize = HB_SUBFRAME_SAMPLES;
 /// `signed char` Q5-fraction rows as the narrowband ones
 /// (`tables/hb-innovation-cdbk-*.meta`), so the shared
 /// [`INNOVATION_CODEBOOK_SCALE`] = 1/32 normalisation applies here too
-/// (see [`crate::gain_scaled_innovation`] module docs for the external
+/// (see `crate::gain_scaled_innovation` module docs for the external
 /// calibration).
 ///
 /// Because *The Speex Codec Manual* §10.2 specifies no high-band pitch
@@ -267,7 +267,7 @@ pub fn gain_scaled_hb_innovation_from_body(
 /// `None`, the legacy correction-only scaling is preserved (the
 /// stateless single-frame entries keep their historical behaviour).
 /// The 5-bit mode-1 folded gain is untouched either way — its absolute
-/// law is the externally-arbitrated fold path ([`crate::hb_fold`]),
+/// law is the externally-arbitrated fold path (`crate::hb_fold`),
 /// not this one.
 pub fn gain_scaled_hb_innovation_from_body_leveled(
     body: &WidebandHighBandBody,

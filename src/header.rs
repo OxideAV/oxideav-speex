@@ -7,11 +7,12 @@
 //! specified verbatim in *The Speex Codec Manual* §7.3 "Ogg file format",
 //! Table 7.1, which the parser in this module follows byte-for-byte.
 //!
-//! Round-1 scope: this is a **header walker only**. It validates the
-//! magic, decodes every field as a little-endian integer per the spec's
-//! "All integer fields in the headers are stored as little-endian"
-//! sentence, and surfaces the fields as a Rust struct. No frame decode
-//! is wired up yet — that is round 2+.
+//! [`SpeexHeader::parse`] validates the magic, decodes every field as a
+//! little-endian integer per the spec's "All integer fields in the
+//! headers are stored as little-endian" sentence, and surfaces the
+//! fields as a Rust struct; [`SpeexHeader::write_bytes`] is its inverse
+//! and [`SpeexHeader::for_sample_rate`] builds a fresh header for a
+//! rate class.
 //!
 //! Spec references (in-tree clean-room sources, no external library
 //! consulted):
@@ -250,6 +251,62 @@ impl SpeexHeader {
         out
     }
 
+    /// A minimal stream header for one of the three §2.2 rate classes —
+    /// `8000` (narrowband), `16000` (wideband) or `32000`
+    /// (ultra-wideband); `None` for any other rate.
+    ///
+    /// The result is mono, constant-bit-rate, one 20 ms frame per packet,
+    /// no extra headers, with `mode_bitstream_version = 4` (the value
+    /// every staged real capture declares) and the nominal `bitrate` left
+    /// at `0` — set it with [`SpeexHeader::with_bitrate`] and the channel
+    /// count with [`SpeexHeader::with_channels`]. This is the header to
+    /// hand [`crate::SpeexStreamDecoder::for_header`] when a transport
+    /// (e.g. an RTP session, RFC 5574) fixes the rate out of band, and the
+    /// one [`crate::SpeexStreamEncoder::header`] publishes.
+    pub fn for_sample_rate(rate: u32) -> Option<Self> {
+        let mode = match rate {
+            8_000 => SPEEX_MODE_NARROWBAND,
+            16_000 => SPEEX_MODE_WIDEBAND,
+            32_000 => SPEEX_MODE_ULTRAWIDEBAND,
+            _ => return None,
+        };
+        let mut speex_version = [0u8; SPEEX_VERSION_LEN];
+        let tag = env!("CARGO_PKG_VERSION").as_bytes();
+        let n = tag.len().min(SPEEX_VERSION_LEN);
+        speex_version[..n].copy_from_slice(&tag[..n]);
+        Some(Self {
+            speex_string: *SPEEX_MAGIC,
+            speex_version,
+            speex_version_id: 1,
+            header_size: SPEEX_HEADER_LEN as u32,
+            rate,
+            mode,
+            mode_bitstream_version: 4,
+            nb_channels: 1,
+            bitrate: 0,
+            // 20 ms per frame in every rate class (§2.1).
+            frame_size: rate / 50,
+            vbr: 0,
+            frames_per_packet: 1,
+            extra_headers: 0,
+            reserved1: 0,
+            reserved2: 0,
+        })
+    }
+
+    /// Set the declared channel count (`1`, or `2` for an
+    /// intensity-stereo stream).
+    pub fn with_channels(mut self, channels: u32) -> Self {
+        self.nb_channels = channels;
+        self
+    }
+
+    /// Set the declared nominal bit-rate in bit/s.
+    pub fn with_bitrate(mut self, bitrate: u32) -> Self {
+        self.bitrate = bitrate;
+        self
+    }
+
     /// Return the `speex_version` field as a `&str` trimmed of trailing
     /// NUL padding. Returns `None` if the field is not valid UTF-8.
     pub fn version_str(&self) -> Option<&str> {
@@ -348,6 +405,21 @@ mod tests {
         }
         debug_assert_eq!(v.len(), SPEEX_HEADER_LEN);
         v
+    }
+
+    #[test]
+    fn for_sample_rate_builds_parseable_headers() {
+        for (rate, mode, frame) in [(8_000, 0, 160), (16_000, 1, 320), (32_000, 2, 640)] {
+            let h = SpeexHeader::for_sample_rate(rate)
+                .unwrap()
+                .with_channels(2)
+                .with_bitrate(12_345);
+            assert_eq!((h.rate, h.mode, h.frame_size), (rate, mode, frame));
+            assert_eq!((h.nb_channels, h.bitrate), (2, 12_345));
+            assert!(h.rate_matches_mode());
+            assert_eq!(SpeexHeader::parse(&h.write_bytes()).unwrap(), h);
+        }
+        assert!(SpeexHeader::for_sample_rate(44_100).is_none());
     }
 
     #[test]

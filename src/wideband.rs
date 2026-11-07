@@ -48,7 +48,7 @@
 //! the high-band LSP MSVQ codebook + the high-band innovation codebook
 //! are #969-blocked until staged under `docs/audio/speex/`. This round
 //! stops at the raw bit-index layer, matching the precedent set by
-//! [`crate::narrowband_body`] in round 3.
+//! `crate::narrowband_body` in round 3.
 //!
 //! ## Spec gaps noted (forwarded to follow-up rounds)
 //!
@@ -418,7 +418,7 @@ impl WidebandHighBandBody {
     /// the all-zero sub-vector; for mode 4 returns
     /// [`crate::HbInnovationError::Undocumented`] since the staged
     /// material does not pin a unique codebook decomposition. See
-    /// [`crate::hb_innovation`] module docs for the binding
+    /// `crate::hb_innovation` module docs for the binding
     /// derivation.
     ///
     /// Symmetric to r220's narrowband
@@ -449,7 +449,7 @@ impl WidebandHighBandBody {
     /// (gain budget outside {0, 4, 5}). The numeric gain magnitude
     /// stays gap-blocked behind the documented "computed, not a
     /// lookup array" quantiser note — see
-    /// [`crate::hb_excitation_gain`] module docs.
+    /// `crate::hb_excitation_gain` module docs.
     pub fn hb_excitation_gain_indices(
         &self,
         submode: &WidebandHighBandSubmode,

@@ -18,7 +18,7 @@
 //! A(z) = 1 − a[0]·z⁻¹ − a[1]·z⁻² − … − a[9]·z⁻¹⁰
 //! ```
 //!
-//! so the decoder's synthesis recurrence (see [`crate::synthesis`])
+//! so the decoder's synthesis recurrence (see `crate::synthesis`)
 //! is `x[n] = e[n] + Σ a[i]·x[n−1−i]`.
 //!
 //! ## Algorithm — the LSP polynomial identity
@@ -69,7 +69,7 @@
 //!
 //! The r194/r200 reconstruction path emits the LSPs in an internal
 //! **Q10 fixed-point unit** (`1/1024` of "the LSP frequency unit";
-//! see [`crate::lsp`]). *The Speex Codec Manual* and the staged
+//! see `crate::lsp`). *The Speex Codec Manual* and the staged
 //! `speex-celp-companion.md` describe the LSP *quantiser* structure
 //! but are **silent on the angular interpretation** of the stored
 //! values — i.e. whether a reconstructed value is the angle `ω`
@@ -146,7 +146,7 @@ pub fn lsp_q10_to_radians(value: i32) -> f64 {
 // angular storage domain measures `π` as `LSP_PI = 25736`
 // (`docs/audio/speex/provenance/02-speex-gain-quant.md`), and the
 // crate's Q10-radian accumulation unit is the same angle re-expressed at
-// `2^10` LSB/rad. [`crate::lsp_pi_domain`] cross-checks that the
+// `2^10` LSB/rad. `crate::lsp_pi_domain` cross-checks that the
 // `LSP_PI`-domain conversion of the staged `LSP_LINEAR` base vector
 // agrees with the Q10-radian base vector to sub-LSB precision.
 pub fn lsp_qn_to_radians(value: i32, q: u32) -> f64 {
@@ -173,10 +173,10 @@ pub fn lsp_vector_q10_to_radians(lsp_q10: &[i32; NB_LSP_ORDER]) -> [f64; NB_LSP_
 ///
 /// `value = round(ω · 2^Q)` with `Q = `[`NB_LSP_OUTPUT_Q`]`= 10`, the
 /// exact inverse of the decoder's `ω = value / 2^Q` (the
-/// provenance-confirmed angular-unit fact, see [`crate::lsp_pi_domain`]).
+/// provenance-confirmed angular-unit fact, see `crate::lsp_pi_domain`).
 /// Round-to-nearest is used so the value and its decode are mutually
 /// nearest. This is the bridge from the `crate::lpc_to_lsp` root-finder
-/// output (radians) into the Q10 domain [`crate::lsp_quant`] searches.
+/// output (radians) into the Q10 domain `crate::lsp_quant` searches.
 pub fn radians_to_lsp_q10(omega: f64) -> i32 {
     (omega * f64::from(1u32 << NB_LSP_OUTPUT_Q)).round() as i32
 }
@@ -315,7 +315,7 @@ pub fn nb_lsp_with_base_q10(lsp_delta_q10: &[i32; NB_LSP_ORDER]) -> [i32; NB_LSP
 /// per-frame path (round r347).
 ///
 /// This is the base-aware counterpart of [`lpc_from_lsp_q10`]: it first
-/// adds the [`crate::lsp_base`] linear-init base offset, then enforces
+/// adds the `crate::lsp_base` linear-init base offset, then enforces
 /// the pinned `LSP_MARGIN` minimum-spacing safeguard
 /// ([`crate::lsp_base::enforce_lsp_margin_radians`], margin `.002` rad),
 /// then runs the Q10→radian→LPC pipeline. The decoder's per-frame LPC
@@ -350,7 +350,7 @@ pub fn lpc_from_subframe_lsp_q12(lsp_q12: &[i32; NB_LSP_ORDER]) -> [f64; LPC_ORD
 ///
 /// This bridges the r200 sub-frame LSP interpolation and the r286
 /// LSP→LPC core for an entire narrowband frame: the returned `[[f64;
-/// 10]; 4]` is exactly the per-sub-frame LPC the [`crate::synthesis`]
+/// 10]; 4]` is exactly the per-sub-frame LPC the `crate::synthesis`
 /// filter consumes (the module docs there note "each sub-frame is
 /// filtered with its own interpolated LPC set").
 ///

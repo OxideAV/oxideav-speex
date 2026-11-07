@@ -92,7 +92,7 @@
 //!   (`UWB_FOLD_RECONSTRUCTION_MULT`): its staged fixture's layer-2
 //!   envelope sits in the saturated region, so the shaping is
 //!   unobservable there; its fold *source* at the 16 kHz half-band
-//!   geometry — see [`crate::uwb_decoder`] — is the r403 pin.
+//!   geometry — see `crate::uwb_decoder` — is the r403 pin.
 
 use crate::codebooks::HB_LPC_ORDER;
 use crate::hb_innovation::HB_SUBFRAME_SAMPLES;
@@ -381,7 +381,7 @@ pub fn folded_hb_excitation_subframe(
 /// The **law** is the one the wideband fixture pins
 /// ([`folded_hb_excitation_subframe`]); the ultra-wideband fold
 /// *source* fed to this variant is the crate's recursion-consistent
-/// generalisation (see [`crate::uwb_decoder`] — the reference's exact
+/// generalisation (see `crate::uwb_decoder` — the reference's exact
 /// source geometry at the 16 kHz half-band is a recorded gap, the
 /// staged fixture being wideband-only).
 #[inline]
@@ -410,7 +410,7 @@ pub fn folded_hb_excitation_slice(exc_src: &[f64], gain: f32, out: &mut [f64]) {
 /// the energy-ratio match `≈ 0.064`, and `1/16 = 0.0625` lands between
 /// them. Like the inner constant this is **fixture-calibrated** (adopted
 /// reading, not a staged table value) and carries the same ±1 % residue
-/// until the low band is bit-exact — see [`crate::uwb_decoder`].
+/// until the low band is bit-exact — see `crate::uwb_decoder`.
 pub const UWB_FOLD_RECONSTRUCTION_MULT: f64 = 0.0625;
 
 /// Linear-interpolate a 160-sample 8 kHz high-band excitation up to the

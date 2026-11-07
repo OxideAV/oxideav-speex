@@ -38,7 +38,7 @@
 //! ([`crate::QmfSynthesis`]). The staged material provides the 64-tap
 //! prototype `h0` as pure data; the synthesis structure is the classical
 //! two-band quadrature-mirror reconstruction (textbook multirate DSP,
-//! see the [`crate::qmf`] module docs). This decoder now carries a
+//! see the `crate::qmf` module docs). This decoder now carries a
 //! persistent [`QmfSynthesis`] and emits the recombined 16 kHz PCM as
 //! [`WidebandFrame::wideband_pcm`] alongside the two half-band signals.
 //! The bit-exact polyphase **delay** convention the reference decoder
@@ -174,7 +174,7 @@ impl From<WidebandBodyError> for WidebandDecodeError {
 /// Stateful wideband (sub-band CELP) decoder.
 ///
 /// Holds the embedded [`NarrowbandDecoder`] (low-band state) plus the
-/// high-band [`HbSynthesisFilter`] IIR memory, both carried across
+/// high-band `HbSynthesisFilter` IIR memory, both carried across
 /// frames. Construct with [`WidebandDecoder::new`], then call
 /// [`WidebandDecoder::decode_packet`] once per wideband packet.
 #[derive(Debug, Clone)]
@@ -188,7 +188,7 @@ pub struct WidebandDecoder {
     /// The high-band excitation of the most recently decoded frame (the
     /// folded excitation for the gain-only sub-mode, the gain-scaled
     /// innovation for the VQ sub-modes) — retained for the
-    /// ultra-wideband second-layer fold (see [`crate::uwb_decoder`]).
+    /// ultra-wideband second-layer fold (see `crate::uwb_decoder`).
     last_hb_excitation: [f32; HB_FRAME_SAMPLES],
     /// Per-sub-frame high-band envelope band-edge responses (see
     /// [`Self::last_hb_env`]).

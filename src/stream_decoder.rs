@@ -5,7 +5,7 @@
 //! (round r389 scope).
 //!
 //! The §5.5 frame concatenation is only walkable with the stream's
-//! rate class known out-of-band (see [`crate::uwb_decoder`] — after a
+//! rate class known out-of-band (see `crate::uwb_decoder` — after a
 //! high-band body, a second high-band prefix and a next frame's
 //! narrowband prefix are bit-indistinguishable). The stream header's
 //! `mode` field (§7.3) is that context: `0` narrowband, `1` wideband
@@ -17,6 +17,7 @@
 
 use crate::decoder::{DecodeError, SpeexDecoder};
 use crate::header::{SPEEX_MODE_ULTRAWIDEBAND, SpeexHeader};
+use crate::stereo::StereoDecoder;
 use crate::uwb_decoder::{UWB_FRAME_SAMPLES, UltraWidebandDecoder, UwbDecodeError};
 use core::fmt;
 
@@ -27,6 +28,9 @@ pub enum StreamDecodeError {
     /// The header's `mode` field is not one of the three documented
     /// rate classes (§7.3).
     UnknownMode(u32),
+    /// [`SpeexStreamDecoder::for_sample_rate`] was given a rate that is
+    /// not 8000 / 16000 / 32000 Hz.
+    UnsupportedSampleRate(u32),
     /// A narrowband / wideband packet failed to decode.
     Decode(DecodeError),
     /// An ultra-wideband packet failed to decode.
@@ -39,6 +43,10 @@ impl fmt::Display for StreamDecodeError {
             StreamDecodeError::UnknownMode(m) => {
                 write!(f, "speex stream decode: unknown header mode {m}")
             }
+            StreamDecodeError::UnsupportedSampleRate(r) => write!(
+                f,
+                "speex stream decode: sample rate {r} is not a Speex rate class (8000/16000/32000)"
+            ),
             StreamDecodeError::Decode(e) => write!(f, "speex stream decode: {e}"),
             StreamDecodeError::Uwb(e) => write!(f, "speex stream decode: {e}"),
         }
@@ -75,17 +83,32 @@ enum Inner {
     Ultra(Box<UltraWidebandDecoder>),
 }
 
-/// Stateful whole-stream decoder for one Ogg/Speex logical stream.
+/// Stateful whole-stream decoder for one Speex stream (8, 16 or 32 kHz).
 ///
-/// Construct once from the stream's parsed header with
-/// [`SpeexStreamDecoder::for_header`], then feed every audio packet to
-/// [`SpeexStreamDecoder::decode_packet_pcm_i16`]; the internal
-/// per-band state carries across packets.
+/// Construct once — from the stream's parsed header with
+/// [`SpeexStreamDecoder::for_header`] (Ogg/Speex), or from a bare rate
+/// with [`SpeexStreamDecoder::for_sample_rate`] (transports that fix the
+/// rate out of band, e.g. RTP) — then feed every audio packet, in order,
+/// to [`SpeexStreamDecoder::decode_packet_pcm_i16`] (mono) or
+/// [`SpeexStreamDecoder::decode_packet_stereo_i16`] (interleaved L/R);
+/// the internal per-band state carries across packets.
+///
+/// ```
+/// use oxideav_speex::{SpeexStreamDecoder, SpeexStreamEncoder};
+///
+/// let mut enc = SpeexStreamEncoder::new(8_000, 8).unwrap();
+/// let mut dec = SpeexStreamDecoder::for_sample_rate(8_000).unwrap();
+/// let packet = enc.encode_frame(&[0i16; 160]).unwrap();
+/// assert_eq!(dec.decode_packet_pcm_i16(&packet).unwrap().len(), 160);
+/// ```
 #[derive(Debug, Clone)]
 pub struct SpeexStreamDecoder {
     inner: Inner,
     rate_hz: u32,
     frame_samples: usize,
+    /// Intensity-stereo gain state for
+    /// [`SpeexStreamDecoder::decode_packet_stereo_i16`].
+    stereo: StereoDecoder,
 }
 
 impl SpeexStreamDecoder {
@@ -111,7 +134,18 @@ impl SpeexStreamDecoder {
             inner,
             rate_hz,
             frame_samples,
+            stereo: StereoDecoder::new(),
         })
+    }
+
+    /// Build the decoder for a bare sampling rate (8000 / 16000 /
+    /// 32000 Hz) — for packets that arrive without an Ogg/Speex stream
+    /// header. Equivalent to [`Self::for_header`] on
+    /// [`SpeexHeader::for_sample_rate`].
+    pub fn for_sample_rate(rate: u32) -> Result<Self, StreamDecodeError> {
+        let header = SpeexHeader::for_sample_rate(rate)
+            .ok_or(StreamDecodeError::UnsupportedSampleRate(rate))?;
+        Self::for_header(&header)
     }
 
     /// Turn the narrowband perceptual enhancer on or off (on by default,
@@ -142,6 +176,33 @@ impl SpeexStreamDecoder {
             Inner::NarrowOrWide(d) => Ok(d.decode_packet_pcm_i16(packet)?),
             Inner::Ultra(d) => Ok(d.decode_packet_pcm_i16(packet)?),
         }
+    }
+
+    /// Decode one packet of a two-channel (intensity-stereo) stream to
+    /// interleaved L/R `i16` PCM at [`Self::output_rate_hz`]: each audio
+    /// frame's mono decode is panned by the code-9 message ahead of it
+    /// ([`crate::StereoDecoder`], `intensity-stereo.md` §3). A frame with
+    /// no stereo message keeps unit gains (both channels = the mono
+    /// signal), so this also turns a mono stream into dual-mono.
+    pub fn decode_packet_stereo_i16(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<Vec<i16>, StreamDecodeError> {
+        // Payload for "no message": balance 0, e_ratio index 3 — the
+        // neutral unit-gain pair.
+        const NEUTRAL: u8 = 0b0000_0011;
+        let mut out = Vec::new();
+        for (mono, payload) in self.decode_packet_frames_stereo(packet)? {
+            if mono.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(
+                &self
+                    .stereo
+                    .interleave_frame(&mono, payload.unwrap_or(NEUTRAL)),
+            );
+        }
+        Ok(out)
     }
 
     /// Decode a packet to per-audio-frame `(mono PCM, code-9 stereo

@@ -147,7 +147,7 @@ impl<'a> BitReader<'a> {
 /// `BitReader` would emit from a matching buffer produces a sequence of
 /// bytes a `BitReader` would then round-trip back to the original
 /// values, in the same order. The round-trip invariant is asserted by
-/// the [`bitreader_bitwriter_round_trip`] test below.
+/// the `bitreader_bitwriter_round_trip` test below.
 ///
 /// When the last write does not land on a byte boundary, the trailing
 /// bits inside the final byte are left as `0` — matching the §5.5

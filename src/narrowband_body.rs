@@ -163,7 +163,7 @@ impl NarrowbandSubFrameIndices {
     /// `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]` (Manual Eq. 9.1).
     ///
     /// Wires the r191 3-tap pitch-gain VQ codebooks through the
-    /// [`crate::pitch_gain`] module's `reconstruct` accessor. For the
+    /// `crate::pitch_gain` module's `reconstruct` accessor. For the
     /// silence sub-mode (`PitchGainQuant::None` — mode 0) the all-zero
     /// [`PitchGainTaps::SILENCE`] is returned regardless of
     /// `pitch_gain_index`.
@@ -179,7 +179,7 @@ impl NarrowbandSubFrameIndices {
     /// Resolve the raw [`Self::innovation_vq_index`] into the 40-sample
     /// fixed-codebook sub-vector `c[n]` for this sub-frame, wiring the
     /// r191 narrowband innovation codebooks through the per-mode
-    /// dispatcher documented in [`crate::innovation`].
+    /// dispatcher documented in `crate::innovation`.
     ///
     /// Mode 0 (silence) returns the all-zero vector; modes 6 / 8 return
     /// the concatenated sub-vector lookup; modes whose per-mode
@@ -272,7 +272,7 @@ impl NarrowbandFrameBody {
 
     /// Resolve the raw [`Self::lsp_index`] into per-stage 6-bit
     /// codebook indices using the documented stage-ordering
-    /// convention (see [`crate::lsp`] module docs). Returns `None`
+    /// convention (see `crate::lsp` module docs). Returns `None`
     /// for sub-modes that do not transmit an LSP field (mode 0 —
     /// silence).
     pub fn lsp_stages(&self, submode: &NarrowbandSubmode) -> Option<NbLspStages> {
@@ -285,7 +285,7 @@ impl NarrowbandFrameBody {
     /// transmit an LSP field (mode 0 — silence).
     ///
     /// The reconstruction is the typed lookup + per-stage summation
-    /// described in [`crate::lsp`]; sub-frame interpolation and
+    /// described in `crate::lsp`; sub-frame interpolation and
     /// LSP→LPC conversion stay deferred.
     pub fn reconstructed_lsp_q10(
         &self,
@@ -320,7 +320,7 @@ impl NarrowbandFrameBody {
 
     /// Compose the typed §9.2 / CELP companion §2.3 fixed-codebook gain
     /// index pair `(g_frame_index, g_subf_index)` for every sub-frame
-    /// of this frame. See [`crate::fixed_codebook_gain`] for the
+    /// of this frame. See `crate::fixed_codebook_gain` for the
     /// composition's spec basis and Q-format gap.
     ///
     /// Returns `None` only if the sub-mode's per-field bit budgets

@@ -9,6 +9,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `SpeexEncoderOptions::with_quality`.
+- Integration surface (#7): `SpeexStreamEncoder` — one rate-agnostic
+  encoder for 8 / 16 / 32 kHz, quality 0..=10, mono or intensity stereo
+  (`new` / `new_stereo`, `frame_samples`, `encode_frame`, `header`,
+  `nominal_bitrate_bps`) with `StreamEncodeError`;
+  `SpeexStreamDecoder::for_sample_rate` (header-less transports such as
+  RTP) and `SpeexStreamDecoder::decode_packet_stereo_i16` (interleaved
+  L/R); `SpeexHeader::for_sample_rate` + `with_channels` /
+  `with_bitrate`; `StreamDecodeError::UnsupportedSampleRate`.
+- `examples/roundtrip.rs` (direct API, any rate / quality / channel
+  count) and `examples/registry.rs` (the `Encoder` / `Decoder` traits
+  through `register`) (#7).
 
 ### Changed
 
@@ -24,6 +35,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   records whose layout the Speex bitstream fixes (frame kinds, submodes,
   in-band codes, quantiser / gain-index shapes, the 80-byte header and
   the per-frame index records) stay exhaustive. No behaviour change.
+- Docs (#7): the crate-level documentation (the docs.rs front page) is
+  rewritten as an integration guide — which entry point to use,
+  compiled direct and framework examples, current limits — replacing
+  the per-round development log that still described long-closed gaps;
+  the README `Usage` section gains the same code. Broken intra-doc
+  links to private modules are fixed (`cargo doc` is warning-free).
+- The framework encoder and decoder now run on `SpeexStreamEncoder` /
+  `SpeexStreamDecoder::decode_packet_stereo_i16`; output is unchanged.
 
 ## [0.0.11](https://github.com/OxideAV/oxideav-speex/compare/v0.0.10...v0.0.11) - 2026-11-07
 

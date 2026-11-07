@@ -49,12 +49,12 @@
 //! [`crate::reconstruct_fixed_codebook_gain`] produces the gain in the
 //! decoder's **normalised float signal domain** (the Q15 `ol_gain` level
 //! divided by `SIG_SCALING`, equivalently `exp(qe/3.5)` for the frame
-//! factor — see [`crate::gain_reconstruction`] module docs). Multiplying
+//! factor — see `crate::gain_reconstruction` module docs). Multiplying
 //! the raw `i16` innovation sub-vector by that float magnitude keeps the
 //! product in `f32` rather than committing the result to a fixed-point
 //! Q-format the in-repo manual does not specify for the synthesis
 //! recurrence (the same Q-format-agnostic posture
-//! [`crate::synthesis`] / [`crate::excitation`] adopt). The downstream
+//! `crate::synthesis` / `crate::excitation` adopt). The downstream
 //! [`crate::SynthesisFilter`] already filters in floating point, so the
 //! `[f32; 40]` contribution feeds it directly.
 //!
@@ -126,7 +126,7 @@ pub const GAIN_SCALED_INNOVATION_SAMPLES: usize = SUBFRAME_SAMPLES;
 /// `wb-mode1-folded` fixture (see the module docs) and consistent with
 /// the `signed char` storage width of every staged innovation table.
 /// Shared by the narrowband path here, the high-band VQ path
-/// ([`crate::gain_scaled_hb_innovation`]), and the encoder-side gain
+/// (`crate::gain_scaled_hb_innovation`), and the encoder-side gain
 /// selection, so the encode → decode gain domain is symmetric.
 pub const INNOVATION_CODEBOOK_SCALE: f32 = 1.0 / 32.0;
 

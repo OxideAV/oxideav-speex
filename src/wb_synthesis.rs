@@ -96,11 +96,11 @@
 //! [`crate::UltraWidebandEncoder`] decode/encode the second high-band
 //! layer, whose conformant shape (Table 10.1 **mode 1** at every
 //! quality) is pinned by RFC 5574 Table 2's constant +36 bits/frame
-//! ultra-wideband column (see [`crate::quality`]). The staged manual
+//! ultra-wideband column (see `crate::quality`). The staged manual
 //! still has no "Table 11.x": the mode-1 folded-excitation *source*
 //! and the excitation-VQ modes' sub-frame geometry at the 16 kHz
 //! half-band remain the recorded docs gaps (see the
-//! [`crate::uwb_decoder`] module docs).
+//! `crate::uwb_decoder` module docs).
 
 use crate::codebooks::HB_LPC_ORDER;
 use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationError};
@@ -214,7 +214,7 @@ pub fn synthesise_high_band_frame_interp(
 /// transmits an excitation gain but **no innovation vector** (Table 10.1
 /// mode 1) each sub-frame's excitation is reconstructed by the
 /// fixture-arbitrated folded law
-/// `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]` ([`crate::hb_fold`]); every other
+/// `e_hb[n] = K·g·(−1)ⁿ·e_lb[n]` (`crate::hb_fold`); every other
 /// documented sub-mode takes the innovation-VQ path exactly as before.
 pub fn synthesise_high_band_frame_folded(
     body: &WidebandHighBandBody,
@@ -243,7 +243,7 @@ pub fn synthesise_high_band_frame_folded(
 /// The ultra-wideband decoder consumes this track: the §2.2 recursion's
 /// second layer folds the **embedded wideband layer's excitation**, so
 /// the wideband decode must retain what its high band was excited with
-/// (see [`crate::uwb_decoder`]).
+/// (see `crate::uwb_decoder`).
 pub fn synthesise_high_band_frame_folded_exc(
     body: &WidebandHighBandBody,
     submode: &WidebandHighBandSubmode,

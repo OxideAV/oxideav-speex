@@ -1,406 +1,86 @@
 //! # oxideav-speex
 //!
-//! **Status:** clean-room rebuild in progress (post 2026-05-19 audit).
+//! Pure-Rust Speex (CELP speech codec): decoder and encoder for all three
+//! rate classes — narrowband 8 kHz, wideband 16 kHz, ultra-wideband
+//! 32 kHz — at every quality 0..=10, mono or intensity stereo, with the
+//! perceptual enhancer. Implemented from *The Speex Codec Manual* and
+//! RFC 5574. The float decode matches reference decodes to ±1 LSB; the
+//! encoder produces conformant streams (it is not a bit-stream twin of
+//! the reference encoder).
 //!
-//! Layered scope as the rebuild advances:
+//! ## Which API to use
 //!
-//! * **Round 1** — the Ogg/Speex stream-header packet parser from
-//!   *The Speex Codec Manual* §7.3, Table 7.1 (validates `Speex   `
-//!   magic + decodes 13 LE int32 fields). See [`SpeexHeader`].
-//! * **Round 2** — the per-frame leading prefix (1-bit wideband flag +
-//!   4-bit mode ID) from §9.3 + the typed narrowband sub-mode table
-//!   from Table 9.1 (modes 0..=8, plus the three §5.5
-//!   reserved-for-signalling slots: custom in-band mode 13, in-band
-//!   signalling mode 14, terminator mode 15). See
-//!   [`NarrowbandFrameHeader`] and [`Submode`].
-//! * **Round 3** — the narrowband CELP frame-body bit-reader: walks
-//!   Table 9.1's columns in the order documented in §9.3 ("All
-//!   frame-based parameters are packed before sub-frame parameters.
-//!   The parameters for a certain sub-frame are all packed before the
-//!   following sub-frame is packed.") and surfaces every field as a
-//!   raw bit-index in [`NarrowbandFrameBody`]. Codebook lookup (LSP VQ
-//!   → coefficients, innovation VQ → 40-sample sub-vector) and LSP→LPC
-//!   conversion stay deferred until the Speex CELP companion table
-//!   docs gap closes.
-//! * **Round 4** — the §5.5 in-band signalling bodies that the
-//!   round-2 dispatcher leaves unparsed: [`InbandMessage`] walks
-//!   mode 14's 4-bit Table 5.1 code + 1/4/8/16/32/64-bit payload;
-//!   [`CustomInbandMessage`] consumes mode 13's 5-bit byte size +
-//!   opaque payload. Table 5.1 itself is staged as the public
-//!   [`INBAND_TABLE_5_1`] array indexed by code value. The §5.5 path
-//!   needs no CELP companion tables — it is bit-stream framing only.
-//! * **Round r165** (this commit) — typed packet → frame iterator
-//!   composing the round-2..5 primitives end-to-end. See
-//!   [`PacketFrames`], [`PacketFrame`], and the [`parse_packet`]
-//!   convenience that returns a `Vec<PacketFrame>`. Walks a Speex
-//!   packet body per §5.5 ("Sometimes it is desirable to pack more
-//!   than one frame per packet … it is possible to include a
-//!   terminator code. That terminator consists of the code 15
-//!   (decimal) encoded with 5 bits"), dispatching each successive
-//!   5-bit prefix into a CELP frame, a wideband narrowband+high-band
-//!   pair, a §5.5 in-band signalling message, or a mode-13 custom
-//!   in-band message, and terminating cleanly on mode 15 or on
-//!   <5-bit padding tail.
-//! * **Round 5** — the wideband high-band sub-mode
-//!   table from §10.4 / Table 10.1 (modes 0..=4, 5 columns) plus a
-//!   high-band frame-body bit-reader. A wideband packet is the
-//!   concatenation of an embedded narrowband frame (round 3) followed
-//!   by a 1-bit wideband flag, a 3-bit high-band mode ID, the 12-bit
-//!   LSP MSVQ index (modes 1..=4), and four sub-frames of `gain || VQ`
-//!   bits as listed in Table 10.1. See [`WidebandHighBandFrameHeader`]
-//!   and [`WidebandHighBandBody`]. As with round 3 the body lands
-//!   only the raw bit indices — the high-band LSP MSVQ codebook +
-//!   innovation codebook are #969-blocked until staged.
-//! * **Round r191** (this commit) — CELP companion-table accessors.
-//!   The clean-room codebook arrays staged under
-//!   `docs/audio/speex/tables/` (LSP VQ stages, 3-tap pitch-gain VQ,
-//!   six narrowband innovation codebooks, the two wideband
-//!   high-band LSP MSVQ stages + two high-band innovation
-//!   codebooks, plus the Q15 LPC analysis window, autocorrelation
-//!   lag window, and QMF analysis filter) are now embedded into
-//!   the crate via [`include_str!`] and parsed on first use into
-//!   typed `&'static [Row]` slices. Dimension constants are
-//!   cross-checked against the existing
-//!   [`NarrowbandSubmode`] bit-budget table. Lookup, scaling, and
-//!   the downstream LSP→LPC / synthesis-filter path stay deferred.
-//!   See [`codebooks`] (re-exported at the crate root).
-//! * **Round r187** — structured `write` methods
-//!   symmetric to the existing `parse` paths for the three
-//!   framing-level types whose layout is fully defined by the
-//!   manual without any CELP companion-table material:
-//!   [`NarrowbandFrameHeader::write`] emits the 5-bit prefix
-//!   (1-bit wideband flag + 4-bit mode ID per §9.3);
-//!   [`InbandMessage::write`] emits the 4-bit Table 5.1 code +
-//!   1/4/8/16/32/64-bit payload (with the same >32-bit split path
-//!   the parser uses for reserved codes 14 / 15);
-//!   [`CustomInbandMessage::write`] emits the 5-bit `size_bytes`
-//!   per §5.5 + opaque payload bytes from a caller-supplied
-//!   slice. A new [`NarrowbandFrameHeader::new`] constructor is
-//!   the encoder-side counterpart of the round-2 parser's
-//!   reserved-mode rejection. All three writers depend only on
-//!   the round-179 [`BitWriter`] + existing dispatch tables —
-//!   no companion-table material was touched at that point.
+//! | you have | use |
+//! | --- | --- |
+//! | raw 20 ms PCM frames, want packets (any rate, mono / stereo) | [`SpeexStreamEncoder`] |
+//! | Speex packets + an Ogg/Speex header (or a known rate) | [`SpeexStreamDecoder`] |
+//! | the `oxideav-core` [`Decoder`](oxideav_core::Decoder) / [`Encoder`](oxideav_core::Encoder) traits | [`register`], or [`make_decoder`] / [`make_encoder`] without a registry |
 //!
-//! * **Round r194** — first companion-table → decoder
-//!   pipeline wiring. The 5-stage narrowband LSP-VQ codebooks staged
-//!   in [`codebooks`] now drive a reconstructed
-//!   ten-coefficient LSP frequency vector in a common Q10
-//!   fixed-point format. Given a parsed [`NarrowbandFrameBody`],
-//!   [`NarrowbandFrameBody::reconstructed_lsp_q10`] resolves the
-//!   raw `lsp_index` field into per-stage 6-bit indices and sums
-//!   the contributions per the `.meta`-documented per-stage scaling
-//!   factors (1/256, 1/512, 1/1024). See the new [`lsp`] module for
-//!   the documented bit-stream-stage-ordering convention used to
-//!   split the packed 18-bit / 30-bit LSP field into per-stage
-//!   indices. LSP→LPC conversion, sub-frame interpolation, and
-//!   downstream synthesis filtering stay deferred.
+//! Everything else exported here (per-band encoders/decoders, bit-stream
+//! parsers, codebooks, gain laws) is the lower layer those types are
+//! built from; integrations do not need it.
 //!
-//! * **Round r208** (this commit) — narrowband **3-tap pitch-gain VQ
-//!   reconstruction** per Speex manual Eq. 9.1 / companion §2.2. The
-//!   r191 5-bit (32 × 4) and 7-bit (128 × 4) pitch-gain VQ codebooks
-//!   are now resolved through a typed accessor: given a per-sub-frame
-//!   raw VQ index parsed by the round-3 frame-body bit-reader and the
-//!   active sub-mode's [`PitchGainQuant`] regime, the new
-//!   [`pitch_gain`] module returns [`PitchGainTaps`] — the three β tap
-//!   coefficients `(g0, g1, g2)` of the long-term predictor
-//!   convolution `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]`,
-//!   with the documented `+32` codebook bias already applied. Mode 0
-//!   silence (`PitchGainQuant::None`) returns the all-zero
-//!   [`PitchGainTaps::SILENCE`] without consulting any codebook. A
-//!   [`NarrowbandSubFrameIndices::pitch_gain_taps`] convenience
-//!   method wires the lookup off the existing per-sub-frame indices.
-//!   The long-term predictor convolution itself stays deferred — it
-//!   needs the per-sub-frame pitch period (already surfaced by
-//!   [`NarrowbandSubFrameIndices::pitch_period`]) plus the historical
-//!   excitation buffer, which lands once the innovation-codebook
-//!   path is also wired.
+//! ## Direct API
 //!
-//! * **Round r200** — narrowband **sub-frame LSP
-//!   interpolation** per the Speex manual §9.1 ("The LSP's are
-//!   considered to be associated to the 4th sub-frames and the LSP's
-//!   associated to the first 3 sub-frames are linearly interpolated
-//!   using the current and previous LSP coefficients"). The new
-//!   [`lsp_interp`] module takes the previous + current frame's
-//!   reconstructed Q10 LSPs (from r194) and produces a
-//!   `[[i32; 10]; 4]` matrix of per-sub-frame LSP vectors in Q12
-//!   fixed-point — the unique linear-interpolation weight set
-//!   `(3·prev + 1·curr) / 4`, `(2·prev + 2·curr) / 4`,
-//!   `(1·prev + 3·curr) / 4`, `(0·prev + 4·curr) / 4 = curr`. The
-//!   output is emitted in Q12 (not Q10-after-division) so the
-//!   interpolation is exact integer arithmetic with no rounding
-//!   direction choice for the spec to be silent about; the
-//!   downstream LSP→LPC conversion can rescale with a single
-//!   arithmetic shift. A new [`NarrowbandFrameBody::interpolated_lsp_q12`]
-//!   convenience method composes the r194 reconstruction with this
-//!   sub-frame interpolation. A `first_frame` constructor handles
-//!   the stream-start case (prev = curr → no spurious transient).
-//!   LSP→LPC conversion stays deferred — the in-repo Speex manual
-//!   §9.1 + the staged CELP companion are both silent on the
-//!   specific algorithm (the manual only states "converted back to
-//!   the LPC filter Â(z)" without giving the polynomial root-find
-//!   procedure). Reported as a docs gap.
+//! One packet per 20 ms frame (160 / 320 / 640 samples per channel at
+//! 8 / 16 / 32 kHz). The header is the Ogg/Speex packet 0 (Table 7.1),
+//! 80 bytes via [`SpeexHeader::write_bytes`].
 //!
-//! * **Round r220** (this commit) — narrowband **innovation sub-vector
-//!   lookup primitive + per-mode dispatcher** for the two modes whose
-//!   codebook binding is grounded by the staged material (Speex Codec
-//!   Manual §9.2 + CELP companion §2.3 worked examples). The new
-//!   [`innovation`] module exposes [`InnovationCodebook`] selecting one
-//!   of the six documented sub-vector codebook shapes (5 / 8 / 10 / 20
-//!   sample sub-vectors at 4 / 5 / 6 / 7 / 8 bits per index),
-//!   [`innovation_sub_vector`] returning the `&'static [i16]` slice for
-//!   one row, [`InnovationMapping::for_mode`] dispatching mode 0 to
-//!   `Silence`, modes 6 and 8 to `Documented`, and the rest to
-//!   `Undocumented`, plus [`decode_innovation_subframe`] decoding the
-//!   40-sample fixed-codebook `c[n]` sub-vector for one CELP sub-frame
-//!   by concatenating `count` MSB-first sub-vector lookups off the
-//!   `innovation_vq_index` field. Wired off
-//!   [`NarrowbandSubFrameIndices::innovation_sub_vector`]. Per-mode
-//!   binding for modes 1 / 2 / 3 / 4 / 5 / 7 stayed deferred behind a
-//!   docs gap until r277 narrowed it to modes 1 / 7 (see below).
+//! ```
+//! use oxideav_speex::{SpeexHeader, SpeexStreamDecoder, SpeexStreamEncoder};
 //!
-//! * **Round r230** (this commit) — wideband **high-band innovation
-//!   sub-vector lookup primitive + per-mode dispatcher** mirroring
-//!   r220's narrowband [`innovation`] path for the sub-band-CELP
-//!   high band. Spec basis: Speex Codec Manual §10.3 *"the encoding
-//!   of the high-band excitation is done in a way similar to that
-//!   of the narrowband innovation"*, Table 10.1's per-sub-frame
-//!   `excitation_vq_bits` widths (0 / 0 / 20 / 40 / 80 for modes
-//!   0..=4), and the two staged high-band codebook shapes in
-//!   `docs/audio/speex/tables/README.md`. The new [`hb_innovation`]
-//!   module exposes [`HbInnovationCodebook`] selecting between
-//!   `HbSv8_128` (8-sample × 7-bit index + 1-bit sign, 128 entries)
-//!   and `HbSv10_32` (10-sample × 5-bit, 32 entries),
-//!   [`hb_innovation_sub_vector`] returning the `&'static [i16]`
-//!   slice for one row, [`HbInnovationMapping::for_mode`]
-//!   dispatching modes 0 / 1 to `Silence`, mode 2 to `Documented`
-//!   (4 × `HbSv10_32`), mode 3 to `Documented` (5 × `HbSv8_128`
-//!   with per-sub-vector sign), mode 4 to `Undocumented` (no
-//!   unique decomposition over the staged inventory), plus
-//!   [`decode_hb_subframe`] decoding the 40-sample fixed-codebook
-//!   excitation sub-vector for one high-band CELP sub-frame. Wired
-//!   off [`WidebandHighBandBody::hb_innovation_sub_vector`].
-//!   High-band fixed-codebook gain scaling + excitation buffer
-//!   state + mode-4 codebook binding stay deferred.
+//! let mut enc = SpeexStreamEncoder::new(32_000, 10).unwrap(); // UWB, ~44 kbit/s
+//! let header: [u8; 80] = enc.header().write_bytes();
 //!
-//! * **Round r214** — wideband **high-band LSP MSVQ
-//!   reconstruction** per Speex manual §10.1 / companion §9. The
-//!   r191 two-stage 6-bit MSVQ codebooks (`hb_lsp_stage1`,
-//!   `hb_lsp_stage2`; 64 × 8 each) now resolve through a typed
-//!   accessor: given the 12-bit packed `lsp_index` field already
-//!   surfaced by [`WidebandHighBandBody::lsp_index`] (round-r160)
-//!   plus the resolved sub-mode, the new [`hb_lsp`] module returns
-//!   an eight-coefficient Q10 fixed-point LSP frequency vector —
-//!   matching the r194 narrowband Q-format so both bands speak the
-//!   same downstream Q-format. [`HbLspStages::from_packed`] splits
-//!   the packed field into per-stage 6-bit indices (top 6 bits →
-//!   level-1 codebook, bottom 6 bits → level-2 residual codebook);
-//!   [`hb_lsp::reconstruct_q10`] sums the two staged contributions
-//!   with the `.meta`-documented per-stage scaling (`1/256` → ×4
-//!   and `1/512` → ×2). New
-//!   [`WidebandHighBandBody::lsp_stages`] and
-//!   [`WidebandHighBandBody::reconstructed_lsp_q10`] convenience
-//!   methods wire the new module off the existing parsed body,
-//!   mirroring r194's narrowband path. Silence mode 0 propagates
-//!   `None`. High-band LSP→LPC conversion + the equivalent
-//!   r200-style sub-frame interpolation rule (if any) stay
-//!   deferred — the in-repo manual §10 is silent on whether the
-//!   high band uses the same interpolation scheme as the
-//!   narrowband or none at all.
+//! let mut dec = SpeexStreamDecoder::for_header(&SpeexHeader::parse(&header).unwrap()).unwrap();
+//! // No header on the wire (e.g. RTP)? `SpeexStreamDecoder::for_sample_rate(32_000)`.
 //!
-//! * **Round r241** (this commit) — narrowband **adaptive-codebook
-//!   contribution sum** composing r208 + r234 into the per-sub-frame
-//!   `[i32; 40]` evaluation of Speex Manual §9.2 Eq. 9.1
-//!   `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]`. The new
-//!   [`adaptive_contribution`] module exposes
-//!   [`adaptive_contribution_subframe`] (whole sub-frame batch) and
-//!   [`adaptive_contribution_sample`] (per-sample helper) returning
-//!   the raw integer dot product of the post-bias gain triple with
-//!   the three substituted historical samples — no Q-format scaling,
-//!   no rounding, no widening shift. Output is in Q-format-agnostic
-//!   raw integer units in `i32` (documented headroom: ≤ 3 × 159 ×
-//!   `i16::MAX` ≈ 1.6e7, well below `i32::MAX`). Stream-start case is
-//!   handled implicitly by the all-zero default [`ExcitationBuffer`]
-//!   from r234 — every historical lookup returns `0`, yielding an
-//!   all-zero contribution and the documented "no spurious transient"
-//!   envelope at stream start. The downstream `e[n] = p[n] + c[n]`
-//!   composition + the Q-format choice for `p[n] = ea[n]` stay
-//!   deferred behind the documented pitch-gain Q-format gap (see the
-//!   [`pitch_gain`] module docs).
+//! let frame = vec![0i16; enc.frame_samples()]; // 640 samples = 20 ms
+//! let packet: Vec<u8> = enc.encode_frame(&frame).unwrap();
+//! let pcm: Vec<i16> = dec.decode_packet_pcm_i16(&packet).unwrap();
+//! assert_eq!(pcm.len(), 640);
+//! ```
 //!
-//! * **Round r234** — narrowband **adaptive-codebook
-//!   (long-term predictor) index resolution + excitation history
-//!   buffer**, Q-format-agnostic by design. Spec basis: Speex Codec Manual §9.2 Eq. 9.1
-//!   `ea[n] = g0·e[n−T−1] + g1·e[n−T] + g2·e[n−T+1]` plus the
-//!   explicit excitation-repeat rule for short pitches:
-//!   *"when the pitch is smaller than the sub-frame size, we repeat
-//!   the excitation at a period T. For example, when `n − T + 1 ≥ 0`,
-//!   we use `n − 2T + 1` instead."* The new [`adaptive_codebook`]
-//!   module exposes [`resolve_lookback`] (the typed repeat-rule
-//!   helper), [`sample_lookback_indices`] (per-sample three-tap
-//!   offsets), [`subframe_lookback_indices`] (a
-//!   `[[i32; 3]; 40]` matrix per pitch period), plus the typed
-//!   [`ExcitationBuffer`] holding the
-//!   [`EXCITATION_HISTORY_LEN`] = 145 past samples the deepest
-//!   conformant tap (`e[n − T − 1]` at `n = 0`, `T = 144`) reads.
-//!   The module is **Q-format-agnostic** by design — the gain
-//!   multiplication `g·e[k]` is deferred until the documented β
-//!   Q-format pin (see [`crate::pitch_gain`] module docs for the
-//!   recorded gap), so the index resolution + buffer state machine
-//!   land independently and the eventual long-term-predictor sum
-//!   can pin its scaling in a single follow-up round.
+//! Stereo: [`SpeexStreamEncoder::new_stereo`] takes interleaved L/R
+//! frames (`2 × frame_samples()` samples) and
+//! [`SpeexStreamDecoder::decode_packet_stereo_i16`] returns interleaved
+//! L/R — the Speex in-band intensity-stereo extension.
 //!
-//! * **Round r244** — narrowband **raw excitation composition primitive**
-//!   composing r241 + r220 into the per-sub-frame `[i32; 40]`
-//!   raw-integer evaluation of Speex Codec Manual §8.4 / CELP companion
-//!   §2.3 `e[n] = p[n] + c[n]` where `p[n] = ea[n]` is the r241
-//!   adaptive-codebook contribution and `c[n]` is the r220 innovation
-//!   sub-vector. The new [`excitation`] module exposes
-//!   [`raw_excitation_subframe`] (whole sub-frame batch) and
-//!   [`raw_excitation_sample`] (per-sample helper) returning the raw
-//!   widening sum `ea[n] + i32::from(c[n])` — Q-format-agnostic by
-//!   design, matching the r234 / r241 convention. The fixed-codebook
-//!   gain composition + the saturating `i32 → i16` buffer-push step +
-//!   the final Q-format pin stay deferred behind the documented
-//!   pitch-gain Q-format gap (see the [`adaptive_contribution`] module
-//!   docs) and the CELP companion §9 fixed-codebook gain scalar
-//!   quantiser gap.
+//! ## Framework API
 //!
-//! * **Round r261** (this commit) — narrowband **fixed-codebook gain
-//!   index composition primitive** surfacing the Speex Codec Manual
-//!   §9.2 / CELP companion §2.3 product structure
-//!   `fixed-codebook gain = g_frame × g_subf` at the typed-index layer.
-//!   The new [`fixed_codebook_gain`] module exposes
-//!   [`FrameInnovationGainIndex`] (typed wrapper over the 5-bit
-//!   frame-level OL excitation-gain field with a [`FrameInnovationGainIndex::Silence`]
-//!   variant for mode 0),
-//!   [`SubFrameInnovationGainCorrection`] (typed wrapper over the
-//!   0 / 1 / 3-bit per-sub-frame correction field with an
-//!   [`SubFrameInnovationGainCorrection::Absent`] variant for the
-//!   0-bit-budget modes 0, 2, 8), and the composed
-//!   [`FixedCodebookGainIndices`] pair. A [`fixed_codebook_gain_indices`]
-//!   helper produces `[FixedCodebookGainIndices; 4]` per frame; a
-//!   [`NarrowbandFrameBody::fixed_codebook_gain_indices`] convenience
-//!   method wires it off the existing parsed body. The numeric
-//!   `g_frame × g_subf` reconstruction is gap-blocked behind the CELP
-//!   companion §9 "computed, not a lookup array" open-loop scalar
-//!   quantiser note; this primitive surfaces the algebra of the
-//!   composition at the index layer, leaving the Q-format / quantiser
-//!   pin for a future docs round.
+//! ```
+//! use oxideav_core::{CodecId, CodecParameters, RuntimeContext, SampleFormat};
 //!
-//! * **Round r269** (this commit) — wideband **high-band
-//!   fixed-codebook gain index primitive**, the high-band counterpart
-//!   of r261's narrowband composition. Per Speex Codec Manual §10.4 /
-//!   Table 10.1 the high band carries exactly one gain field per
-//!   sub-frame (the `Excitation gain` row: 0 / 5 / 4 / 4 / 4 bits for
-//!   modes 0..=4) and **no frame-level factor**, so the §9.2
-//!   `g_frame × g_subf` product structure reduces to a single typed
-//!   index. The new [`hb_excitation_gain`] module exposes
-//!   [`HbExcitationGainIndex`] (`Absent` for mode 0 / `FiveBit` for
-//!   mode 1 / `FourBit` for modes 2..=4), the
-//!   [`hb_excitation_gain_indices`] batch helper, and the
-//!   [`WidebandHighBandBody::hb_excitation_gain_indices`] convenience
-//!   method. The numeric gain magnitude stays gap-blocked behind the
-//!   documented "computed, not a lookup array" open-loop scalar
-//!   quantiser note (`tables/README.md` "Not extracted").
+//! let mut ctx = RuntimeContext::new();
+//! oxideav_speex::register(&mut ctx);
 //!
-//! * **Round r277** (this commit) — narrowband **per-mode innovation
-//!   codebook binding for modes 2 / 3 / 4 / 5**. The staged
-//!   per-codebook innovation bit-rate annotations
-//!   (`docs/audio/speex/tables/innovation-cdbk-*.meta` `role:`
-//!   fields plus the staged `tables/README.md` inventory) combined
-//!   with the Table 9.1 "Innovation VQ" row (`bits/sub-frame × 200
-//!   = innovation bps`) uniquely pin mode 2 → 4 × `Sv10_16`, mode
-//!   3 → 4 × `Sv10_32`, mode 4 → 5 × `Sv8_128`, mode 5 → 8 ×
-//!   `Sv5_64`.
-//!   [`InnovationMapping::for_mode`] now surfaces `Documented` for
-//!   modes 2 / 3 / 4 / 5 / 6 / 8; `Undocumented` narrows to mode 1
-//!   (0-bit VQ field, vocoder excitation generation unstaged) and
-//!   mode 7 (96 bits → 19 200 bps, no annotated codebook). The real
-//!   mode-5 fixture now decodes every sub-frame's 40-sample `c[n]`
-//!   innovation vector end-to-end.
+//! let mut params = CodecParameters::audio(CodecId::new("speex"));
+//! params.sample_rate = Some(16_000);
+//! params.channels = Some(1);
+//! params.sample_format = Some(SampleFormat::S16);
+//! params.options.insert("quality", "8");
+//! let enc = ctx.codecs.first_encoder(&params).unwrap();
+//! // extradata = the 80-byte stream header; the decoder accepts it, a
+//! // bare `sample_rate`, or the header in-band as the first packet.
+//! let dec = ctx.codecs.first_decoder(enc.output_params()).unwrap();
+//! # let _ = dec;
+//! ```
 //!
-//! * **Round r286** (this commit) — narrowband **LSP→LPC conversion +
-//!   the LPC synthesis filter**, closing the decoder README's
-//!   "lacks LSP→LPC + synthesis filter" tail. The new `lsp_to_lpc`
-//!   module turns a set of LSP angular frequencies into the ten
-//!   linear-prediction coefficients of the analysis filter
-//!   `A(z) = 1 − Σ a[i]·z⁻¹⁻ⁱ` via the standard auxiliary-polynomial
-//!   identity `A(z) = (P(z) + Q(z)) / 2` (P/Q built by convolving the
-//!   per-LSP second-order sections `[1, −2cos(ωₖ), 1]` and applying
-//!   the `(1 ± z⁻¹)` boundary factors). Spec basis: *The Speex Codec
-//!   Manual* §9.1 ("converted back to the LPC filter Â(z)") + §9.4
-//!   ("the synthesis filter S(z) = 1/A(z)"). `lsp_to_lpc` is the
-//!   general float transform; [`lsp_q10_to_radians`] /
-//!   [`lsp_vector_q10_to_radians`] / [`lpc_from_lsp_q10`] bridge the
-//!   r194/r200 Q10 reconstruction under a documented angular-unit
-//!   assumption (the LSP Q-format pin for *bit-exactness* against
-//!   reference output is a recorded docs gap). The new [`synthesis`]
-//!   module's [`SynthesisFilter`] runs the decoder recurrence
-//!   `x[n] = e[n] + Σ a[i]·x[n−1−i]` (manual §8.2 prediction-error
-//!   inverse) with persistent IIR history across sub-frames and
-//!   frames, emitting `f64` or rounded/saturated `i16` PCM. A new
-//!   integration test (`tests/synthesis_pcm_fixture.rs`) runs the
-//!   real mode-5 fixture end-to-end (LSP → interp → LSP→LPC →
-//!   innovation `c[n]` → synthesis) to produce finite, responsive,
-//!   non-silent PCM. The adaptive-codebook (pitch) contribution is
-//!   not yet folded into the excitation feeding the filter — its gain
-//!   Q-format stays gap-blocked — so the PCM is correct-by-construction
-//!   but not yet bit-exact.
+//! The encoder takes interleaved S16 frames of any length and re-blocks
+//! them into 20 ms packets; the decoder emits interleaved S16, one audio
+//! frame per packet. Options: encoder `quality` (0..=10, default 8),
+//! decoder `enhancer` (default on). Runnable versions of both paths are
+//! in `examples/roundtrip.rs` and `examples/registry.rs`.
 //!
-//! * **Round r296** (this commit) — narrowband **per-sub-frame LSP→LPC
-//!   conversion for a full frame**, bridging the r200 sub-frame LSP
-//!   interpolation (Q12 [`crate::lsp_interp::NbSubFrameLsp`]) and the
-//!   r286 LSP→LPC core. The r286 `lpc_from_lsp_q10` path only consumed
-//!   the per-frame Q10 vector; the interpolated per-sub-frame vectors
-//!   carry two extra sub-binary-point bits (Q12), so a Q-shift-aware
-//!   conversion was missing. This round generalises
-//!   [`lsp_q10_to_radians`] into the Q-shift-parameterised
-//!   [`lsp_qn_to_radians`] (the Q10 helper now delegates to it), adds
-//!   [`lpc_from_subframe_lsp_q12`] for one Q12 sub-frame vector, and
-//!   [`subframe_lpc_set`] returning the four per-sub-frame LPC sets the
-//!   [`synthesis`] filter consumes (manual §9.1: "each sub-frame is
-//!   filtered with its own interpolated LPC set"; the 4th sub-frame
-//!   carries the current LSPs unchanged). The angular-unit assumption
-//!   stays pinned in the single shared [`lsp_qn_to_radians`] helper, so
-//!   the recorded LSP Q-format docs gap still has one fix-site.
+//! ## Limits
 //!
-//! * **Round r321** (this commit) — **exact scalar gain reconstruction
-//!   tables**, wiring the previously index-only excitation-gain fields
-//!   (r261 narrowband frame-level OL excitation
-//!   gain + r269 high-band per-sub-frame excitation gain) into
-//!   reconstructed scalar magnitudes. Spec basis: the **exact**
-//!   reconstruction tables staged under `docs/audio/speex/tables/`
-//!   (`provenance/02-speex-gain-quant.md`) — `ol_gain_table` (32-level
-//!   5-bit NB OL excitation gain, float law `exp(qe/3.5)`),
-//!   `exc_gain_quant_scal3` / `_scal1` (8-/2-level NB per-sub-frame
-//!   innovation-gain correction `g_subf`), `gc_quant_bound` (16-level
-//!   4-bit HB gain-correction, reconstruction `0.87360·bound`), and
-//!   `fold_quant_bound` (32-level 5-bit HB folded gain). The
-//!   [`gain_reconstruction`] module embeds these vendored tables and
-//!   exposes the raw level accessors plus the dispatch helpers
-//!   [`reconstruct_frame_ol_exc_gain`] (silence → `0.0`),
-//!   [`reconstruct_subframe_gain_correction`] (absent → identity
-//!   `1.0`), [`reconstruct_fixed_codebook_gain`] (the composed
-//!   `g_frame · g_subf` fixed-codebook gain), and
-//!   [`reconstruct_hb_exc_gain`] (absent → `0.0`). This **replaces** the
-//!   earlier parametric `10^((index − offset)/slope)` placeholder grid:
-//!   the gain magnitudes are now exact reconstruction-level lookups, so
-//!   the codec author's quantiser points are pinned (no remaining
-//!   behavioural-trace gap for these tables). Excitation scaling
-//!   (multiplying the §8.4 innovation by the gain) remains a downstream
-//!   synthesis layer.
-//!
-//! * **Round r438** — the `oxideav-core` framework surface is wired
-//!   (see [`SpeexFrameworkDecoder`] / [`SpeexFrameworkEncoder`]):
-//!   [`register`] installs real `Decoder` /
-//!   `Encoder` factories under the id `"speex"` (payload magic
-//!   `Speex   `), and the dual-API [`make_decoder`] / [`make_encoder`]
-//!   free functions expose the same factories directly. The same round
-//!   bound the last two narrowband sub-modes (1 and 7) from the staged
-//!   `nb-innovation-binding.md`, so every Table 9.1 mode — and with it
-//!   every quality 0..=10 narrowband, 0..=9 wideband/ultra-wideband —
-//!   encodes and decodes. Wideband quality 10 (high-band mode 4) and
-//!   the intensity-stereo reconstruction law remain recorded docs gaps.
+//! * The fixed-point decode build is not reproduced (the float decode is
+//!   within a few LSB of it).
+//! * The encoder's searches are its own analysis-by-synthesis without a
+//!   perceptual weighting filter: conformant, input-tracking streams,
+//!   not the reference encoder's exact bits.
+//! * Ogg encapsulation lives in the container layer (`oxideav-ogg`);
+//!   this crate handles the header and packets.
 
 #![warn(missing_debug_implementations)]
 
@@ -456,6 +136,7 @@ mod quality;
 mod signalling;
 mod stereo;
 mod stream_decoder;
+mod stream_encoder;
 mod submode;
 mod synthesis;
 mod uwb_decoder;
@@ -743,6 +424,7 @@ pub use stereo::{
     encode_stereo_payload, pack_stereo_payload, stereo_gains,
 };
 pub use stream_decoder::{SpeexStreamDecoder, StereoFrame, StreamDecodeError};
+pub use stream_encoder::{SpeexStreamEncoder, StreamEncodeError};
 pub use submode::{LspQuant, NARROWBAND_SUBMODES, NarrowbandSubmode, PitchGainQuant, Submode};
 // internal: narrowband LPC synthesis filter plumbing, exposed for tests only
 #[doc(hidden)]

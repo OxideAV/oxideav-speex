@@ -60,7 +60,7 @@
 //! The downstream `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]`
 //! multiplication is **not** performed here: the gains from
 //! [`crate::pitch_gain::reconstruct`] are surfaced as post-bias signed
-//! integers in raw codebook units (Q-format gap per [`crate::pitch_gain`]
+//! integers in raw codebook units (Q-format gap per `crate::pitch_gain`
 //! module docs), so the multiplication output Q-format would inherit
 //! that ambiguity. Keeping the buffer + index resolution at the
 //! integer-offset layer means the eventual long-term-predictor step
@@ -90,7 +90,7 @@
 //! * No gain multiplication. The §9.2 / Eq. 9.1 sum
 //!   `ea[n] = g0·e[n-T-1] + g1·e[n-T] + g2·e[n-T+1]` needs a documented
 //!   Q-format for the post-bias `g0, g1, g2` triple (see
-//!   [`crate::pitch_gain`] module docs for the recorded gap). The
+//!   `crate::pitch_gain` module docs for the recorded gap). The
 //!   multiplication output value is therefore deferred.
 //! * No `e[n] = p[n] + c[n]` composition. The final excitation sum
 //!   per §8.4 needs the gain-scaled adaptive contribution `p[n] = ea[n]`
@@ -204,7 +204,7 @@ pub fn sample_lookback_indices(n: u32, t: u16) -> [i32; ADAPTIVE_CODEBOOK_TAPS] 
 ///
 /// This is the pure index resolution; combining it with the
 /// [`ExcitationBuffer::lookup`] historical reads and the three β tap
-/// gains (per [`crate::pitch_gain`]) would produce the §9.2 / Eq. 9.1
+/// gains (per `crate::pitch_gain`) would produce the §9.2 / Eq. 9.1
 /// `ea[n]` sum once the gain Q-format is pinned.
 pub fn subframe_lookback_indices(t: u16) -> [[i32; ADAPTIVE_CODEBOOK_TAPS]; SUBFRAME_SAMPLES] {
     let mut out = [[0i32; ADAPTIVE_CODEBOOK_TAPS]; SUBFRAME_SAMPLES];

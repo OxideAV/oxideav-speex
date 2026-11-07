@@ -34,7 +34,7 @@
 //!       filter `h0` used by the wideband split (§10.1).
 //! * Dimension constants for every accessor are cross-checked
 //!   against the bit-budget records already in
-//!   [`crate::submode`] (e.g. mode-3 innovation VQ is 20 bits per
+//!   `crate::submode` (e.g. mode-3 innovation VQ is 20 bits per
 //!   sub-frame → the matching codebook has `2.pow(20 / 4)` = 32
 //!   entries of 10 samples; mode-6 7-bit pitch-gain VQ → 128 rows
 //!   of 4 columns; etc.). These checks live in the module's
@@ -480,7 +480,7 @@ pub fn qmf_h0_q15() -> &'static [i16] {
 }
 
 /// 64-tap QMF prototype lowpass filter `h0` (float variant), the
-/// reconstruction-side input for the [`crate::qmf`] two-band synthesis
+/// reconstruction-side input for the `crate::qmf` two-band synthesis
 /// filterbank. Same prototype as [`qmf_h0_q15`] at full float precision
 /// (the staged `qmf-filter-h0-float.csv`).
 pub fn qmf_h0_float() -> &'static [f64] {
