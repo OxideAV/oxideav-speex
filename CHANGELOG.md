@@ -58,6 +58,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   metric — it optimises a perceptually weighted error). The embedded
   low band lifts wideband speech q8 / q10 11.6 / 13.0 → 14.1 / 16.1 dB
   and ultra-wideband q10 12.1 → 13.3 dB below 7 kHz.
+- **High-band shape search by analysis-by-synthesis** (r483): at the
+  reference gain decision (unchanged, tracer §1.3), each sub-vector and
+  sign is chosen through the decoder's own high-band LPC and a mirror
+  of its synthesis state. Wideband speech's 4–8 kHz level offset goes
+  from −1.28 / −0.52 dB to −0.05 / −0.10 dB at q8 / q10; the q10 mode-4
+  source 8.86 → 9.06 dB (the reference encoder: 9.25 dB); ultra-wideband
+  q10 13.3 → 13.8 dB below 7 kHz.
 
 ### Added
 

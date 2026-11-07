@@ -46,15 +46,16 @@ in the reference, and switchable (`set_enhancer`, the framework option
 `enhancer`, in-band code 0). All 152 enhancer blocks of the staged trace
 reproduce; the enhanced decode is within ±1 LSB everywhere.
 
-The narrowband encoder searches by **analysis-by-synthesis** through a
+Both bands' encoders search by **analysis-by-synthesis** through a
 mirror of the decoder's own synthesis (r483). Encode → decode vs the
 input (`tests/encoder_fidelity_e2e.rs`, the registry factories end to
 end; the decode is the reference decoder's, so `speexdec --no-enh`
 gives the same figures): narrowband pitch-glide speech 15.5 / 21.1 /
 25.5 dB at q4 / q8 / q10 against the high-passed input (the reference
 encoder: 8.5 / 9.7 / 9.8 dB on the same metric), every quality 1..=10
-above the reference's; wideband 14.1 / 16.1 dB at q8 / q10;
-ultra-wideband quality 10 (44 kbit/s) 13.3 dB below 7 kHz.
+above the reference's; wideband 14.1 / 16.1 dB at q8 / q10 with the
+4–8 kHz band level within 0.1 dB; ultra-wideband quality 10
+(44 kbit/s) 13.8 dB below 7 kHz.
 
 What is implemented and tested:
 
@@ -542,9 +543,8 @@ mode-1 fixture.
 * **Short pitch lags T ∈ {17, 18, 19}**: the sub-frame tail past `2T`
   carries unpinned reference content (`nb-pitch-short-lag.md` §2.4).
 * **Encoder reference-equivalence.** The high-band gain decisions are
-  the reference's; the searches are this crate's own — waveform
-  analysis-by-synthesis in the narrowband, a residual match in the high
-  band — with no perceptual weighting filter.
+  the reference's; the searches are this crate's own waveform
+  analysis-by-synthesis, with no perceptual weighting filter.
 
 ## Usage
 
