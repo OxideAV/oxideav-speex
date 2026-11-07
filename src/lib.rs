@@ -416,6 +416,7 @@ mod encoder_wb;
 mod enhancer;
 mod excitation;
 mod fixed_codebook_gain;
+mod fixed_point;
 mod forced_pitch_gain;
 mod frame;
 mod framework;
@@ -678,8 +679,14 @@ pub use lsp_quant::{pack_lsp_index, quantise_lsp_q10};
 // [`NarrowbandDecoder::synthesis_history`] signature
 pub use lsp_to_lpc::LPC_ORDER;
 // internal: LSP->LPC conversion plumbing, exposed for tests only
+// internal: the staged fixed-point primitives (no fixed-point decoder), exposed for tests only
 pub use enhancer::{
     ENHANCER_BLOCK_SAMPLES, EnhancerBlock, enhance_block, enhancer_comb_gain, enhancer_period,
+};
+#[doc(hidden)]
+pub use fixed_point::{
+    FixedNoise, LSP_PI_Q13, hb_gain_q14, hb_lsp_q13, interpolate_lsp_q13, lpc_at_minus_one_q13,
+    lsp_cos_q13, lsp_cos_stored, lsp_to_lpc_q13, nb_lsp_q13,
 };
 #[doc(hidden)]
 pub use lsp_to_lpc::{

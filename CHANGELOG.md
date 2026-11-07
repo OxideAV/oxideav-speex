@@ -55,6 +55,15 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   every sample.
 - `enhance_block` / `enhancer_period` / `enhancer_comb_gain` /
   `EnhancerBlock`, `NarrowbandDecoder::set_output_highpass`.
+- **Fixed-point primitives** (`src/fixed_point.rs`, test-only surface):
+  the staged integer schedules of the fixed-point build — the Q13 LSP
+  cosine (all 25 737 inputs), the Q13 LSP decode / interpolation /
+  LSP → LPC of both bands (every traced `A(−1)` of five fixtures, 3 040
+  values), the high-band `g_c` / `R` / `S` schedule (1 520 rows) and the
+  integer noise generator (5 120 draws, state hand-over across null
+  frames) — all exact (`tests/fixed_point_primitives.rs`). No
+  fixed-point decoder: the rest of that build's arithmetic is not
+  staged.
 
 ### Fixed
 
