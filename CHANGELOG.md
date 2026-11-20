@@ -46,6 +46,43 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Rate modes on `SpeexStreamEncoder`** (manual §2.1), all three rate
+  classes, mono and stereo:
+  - `set_vbr(Some(q))` — variable bit-rate: each frame picks its own
+    sub-modes around the float quality `q` from its voicing, onset and
+    level (vowels keep `q`, onsets go above, unvoiced and quiet frames
+    below, background becomes comfort noise);
+  - `set_abr(Some(bps))` — average bit-rate: VBR steered by the
+    accumulated bit surplus (within 3 % of the target on 8 s of
+    speech-like material at 8 / 12 / 20 kbit/s in each class);
+  - `set_vbr_max_bitrate` — a per-frame ceiling for both;
+  - `set_vad(true)` — non-speech frames coded as comfort noise (the
+    lowest ladder step) in constant-quality operation;
+  - `set_dtx(true)` — null frames (5 / 9 / 13 bits) while the
+    background holds still.
+- `SpeexStreamEncoder::set_submodes` — explicit Table 9.1 / Table 10.1
+  sub-modes in place of the quality ladder (every narrowband mode 1..=8
+  with every high-band mode 0..=4 at 16 kHz); `set_quality`,
+  `set_bitrate` (highest quality at or below a rate), `set_complexity`,
+  `set_noise_weighting`, `last_submodes` (`FrameSubmodes`),
+  `last_frame_bits`.
+- `SpeexStreamEncoder::queue_inband` (Table 5.1 messages) and
+  `queue_user_data` (mode-13 payloads, in the manual's layout) — sent at
+  the head of the next packet.
+- Framework encoder options `complexity`, `bitrate`, `vbr`,
+  `vbr_quality`, `abr`, `vbr_max_bitrate`, `vad`, `dtx`,
+  `noise_weighting` (with `SpeexEncoderOptions::with_*` builders); the
+  stream header's `vbr` field is set for VBR / ABR streams.
+- `examples/encoder_report.rs` — bit-rate, SNR, segmental SNR,
+  noise-weighted segmental SNR and encode / decode speed for every
+  quality in each rate class, optionally beside a black-box encoder and
+  with a black-box cross-decode of this crate's streams.
+- `tests/encoder_rate_modes.rs` (the rate modes, sub-mode selection,
+  complexity and the in-band channel through the crate's decoder) and
+  `tests/encoder_blackbox.rs` (every quality, every 16 kHz sub-mode
+  pair, every rate mode, stereo and in-band messages through two
+  independent decoder executables when installed: the reference decoder
+  reproduces the crate's own decode to a few LSB).
 - `NarrowbandEncoder::set_complexity` / `complexity` (and on
   `WidebandEncoder`, `UltraWidebandEncoder`), `DEFAULT_COMPLEXITY`:
   the manual's 1..=10 complexity setting. It scales the pitch lags

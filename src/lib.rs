@@ -133,6 +133,7 @@ mod packet;
 mod pitch_gain;
 mod qmf;
 mod quality;
+mod rate_control;
 mod signalling;
 mod stereo;
 mod stream_decoder;
@@ -424,7 +425,7 @@ pub use stereo::{
     encode_stereo_payload, pack_stereo_payload, stereo_gains,
 };
 pub use stream_decoder::{SpeexStreamDecoder, StereoFrame, StreamDecodeError};
-pub use stream_encoder::{SpeexStreamEncoder, StreamEncodeError};
+pub use stream_encoder::{FrameSubmodes, SpeexStreamEncoder, StreamEncodeError};
 pub use submode::{LspQuant, NARROWBAND_SUBMODES, NarrowbandSubmode, PitchGainQuant, Submode};
 // internal: narrowband LPC synthesis filter plumbing, exposed for tests only
 #[doc(hidden)]

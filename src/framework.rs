@@ -404,6 +404,30 @@ pub struct SpeexEncoderOptions {
     /// §2.1 quality knob, 0..=10 (Table 9.2 / Table 10.2 / RFC 5574
     /// Table 2 ladders). Default 8.
     pub quality: u8,
+    /// Search complexity, 1..=10. Default
+    /// [`crate::DEFAULT_COMPLEXITY`].
+    pub complexity: u8,
+    /// Constant bit-rate ceiling in bit/s: the highest quality at or
+    /// below it replaces `quality`. `0` (default) leaves `quality`.
+    pub bitrate: u32,
+    /// Variable bit-rate (manual §2.1). Default off.
+    pub vbr: bool,
+    /// VBR quality, 0.0..=10.0; negative (default) follows `quality`.
+    pub vbr_quality: f32,
+    /// Average bit-rate target in bit/s; `0` (default) is off.
+    pub abr: u32,
+    /// Per-frame rate ceiling for VBR / ABR in bit/s; `0` (default) is
+    /// none.
+    pub vbr_max_bitrate: u32,
+    /// Voice-activity detection: comfort noise for non-speech frames.
+    /// Default off.
+    pub vad: bool,
+    /// Discontinuous transmission: null frames over a steady
+    /// background. Default off.
+    pub dtx: bool,
+    /// Search in the noise-weighted domain of manual §8.5 (default)
+    /// rather than on the plain waveform error.
+    pub noise_weighting: bool,
 }
 
 impl SpeexEncoderOptions {
@@ -412,21 +436,165 @@ impl SpeexEncoderOptions {
         self.quality = v;
         self
     }
+
+    /// Set `complexity`.
+    pub fn with_complexity(mut self, v: u8) -> Self {
+        self.complexity = v;
+        self
+    }
+
+    /// Set the constant bit-rate ceiling (`0` = none).
+    pub fn with_bitrate(mut self, bps: u32) -> Self {
+        self.bitrate = bps;
+        self
+    }
+
+    /// Turn VBR on at `quality` (0.0..=10.0), or off with `None`.
+    pub fn with_vbr(mut self, quality: Option<f32>) -> Self {
+        self.vbr = quality.is_some();
+        self.vbr_quality = quality.unwrap_or(-1.0);
+        self
+    }
+
+    /// Set the ABR target (`0` = off).
+    pub fn with_abr(mut self, bps: u32) -> Self {
+        self.abr = bps;
+        self
+    }
+
+    /// Set the VBR / ABR per-frame ceiling (`0` = none).
+    pub fn with_vbr_max_bitrate(mut self, bps: u32) -> Self {
+        self.vbr_max_bitrate = bps;
+        self
+    }
+
+    /// Set voice-activity detection.
+    pub fn with_vad(mut self, on: bool) -> Self {
+        self.vad = on;
+        self
+    }
+
+    /// Set discontinuous transmission.
+    pub fn with_dtx(mut self, on: bool) -> Self {
+        self.dtx = on;
+        self
+    }
+
+    /// Set the noise-weighted search.
+    pub fn with_noise_weighting(mut self, on: bool) -> Self {
+        self.noise_weighting = on;
+        self
+    }
+
+    /// Configure a stream encoder with these options.
+    fn configure(&self, enc: &mut SpeexStreamEncoder) -> Result<()> {
+        enc.set_complexity(self.complexity);
+        if self.bitrate > 0 {
+            enc.set_bitrate(self.bitrate)
+                .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+        }
+        if !self.noise_weighting {
+            enc.set_noise_weighting(None);
+        }
+        if self.vbr {
+            enc.set_vbr(Some(if self.vbr_quality >= 0.0 {
+                self.vbr_quality
+            } else {
+                f32::from(enc.quality())
+            }));
+        }
+        if self.abr > 0 {
+            enc.set_abr(Some(self.abr));
+        }
+        if self.vbr_max_bitrate > 0 {
+            enc.set_vbr_max_bitrate(Some(self.vbr_max_bitrate));
+        }
+        enc.set_vad(self.vad);
+        enc.set_dtx(self.dtx);
+        Ok(())
+    }
 }
 
 impl Default for SpeexEncoderOptions {
     fn default() -> Self {
-        Self { quality: 8 }
+        Self {
+            quality: 8,
+            complexity: crate::DEFAULT_COMPLEXITY,
+            bitrate: 0,
+            vbr: false,
+            vbr_quality: -1.0,
+            abr: 0,
+            vbr_max_bitrate: 0,
+            vad: false,
+            dtx: false,
+            noise_weighting: true,
+        }
     }
 }
 
 impl CodecOptionsStruct for SpeexEncoderOptions {
-    const SCHEMA: &'static [OptionField] = &[OptionField {
-        name: "quality",
-        kind: OptionKind::U32,
-        default: OptionValue::U32(8),
-        help: "Speex quality 0-10 (sub-mode ladder per rate class)",
-    }];
+    const SCHEMA: &'static [OptionField] = &[
+        OptionField {
+            name: "quality",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(8),
+            help: "Speex quality 0-10 (sub-mode ladder per rate class)",
+        },
+        OptionField {
+            name: "complexity",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(crate::DEFAULT_COMPLEXITY as u32),
+            help: "Search complexity 1-10 (deeper searches, same bit-rate)",
+        },
+        OptionField {
+            name: "bitrate",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Constant bit-rate ceiling in bit/s: picks the highest quality at or below it (0 = use quality)",
+        },
+        OptionField {
+            name: "vbr",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Variable bit-rate: every frame picks its own sub-modes",
+        },
+        OptionField {
+            name: "vbr_quality",
+            kind: OptionKind::F32,
+            default: OptionValue::F32(-1.0),
+            help: "VBR quality 0.0-10.0 (negative = follow quality)",
+        },
+        OptionField {
+            name: "abr",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Average bit-rate target in bit/s (0 = off)",
+        },
+        OptionField {
+            name: "vbr_max_bitrate",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Per-frame bit-rate ceiling for VBR / ABR in bit/s (0 = none)",
+        },
+        OptionField {
+            name: "vad",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Voice-activity detection: comfort noise for non-speech frames",
+        },
+        OptionField {
+            name: "dtx",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Discontinuous transmission: null frames over a steady background",
+        },
+        OptionField {
+            name: "noise_weighting",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(true),
+            help: "Search in the noise-weighted domain (off: plain waveform error)",
+        },
+    ];
 
     fn apply(&mut self, key: &str, value: &OptionValue) -> Result<()> {
         match key {
@@ -439,6 +607,31 @@ impl CodecOptionsStruct for SpeexEncoderOptions {
                 }
                 self.quality = q as u8;
             }
+            "complexity" => {
+                let c = value.as_u32()?;
+                if !(1..=10).contains(&c) {
+                    return Err(Error::invalid(format!(
+                        "speex: complexity {c} out of range 1..=10"
+                    )));
+                }
+                self.complexity = c as u8;
+            }
+            "bitrate" => self.bitrate = value.as_u32()?,
+            "vbr" => self.vbr = value.as_bool()?,
+            "vbr_quality" => {
+                let q = value.as_f32()?;
+                if q > f32::from(MAX_QUALITY) {
+                    return Err(Error::invalid(format!(
+                        "speex: vbr_quality {q} out of range 0..=10"
+                    )));
+                }
+                self.vbr_quality = q;
+            }
+            "abr" => self.abr = value.as_u32()?,
+            "vbr_max_bitrate" => self.vbr_max_bitrate = value.as_u32()?,
+            "vad" => self.vad = value.as_bool()?,
+            "dtx" => self.dtx = value.as_bool()?,
+            "noise_weighting" => self.noise_weighting = value.as_bool()?,
             other => return Err(Error::invalid(format!("speex: unknown option '{other}'"))),
         }
         Ok(())
@@ -487,12 +680,13 @@ impl SpeexFrameworkEncoder {
             )));
         }
         let opts: SpeexEncoderOptions = parse_options(&params.options)?;
-        let inner = if in_channels == 2 {
+        let mut inner = if in_channels == 2 {
             SpeexStreamEncoder::new_stereo(rate, opts.quality)
         } else {
             SpeexStreamEncoder::new(rate, opts.quality)
         }
         .map_err(|e| Error::invalid(format!("speex: {e}")))?;
+        opts.configure(&mut inner)?;
 
         // True intensity-stereo output declares 2 channels so a decoder
         // installs the stereo callback (docs intensity-stereo.md §1).
