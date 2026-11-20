@@ -6,6 +6,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OxideAV/oxideav-speex/compare/v0.0.12...v0.0.13) - 2026-11-20
+
+### Other
+
+- test the framework encoder options end to end
+- README encoder section with before / after tables; no pitch lags under 20; crate docs for the rate modes
+- centre the frame gain by a probe pass with unquantised innovation gains; deeper default search
+- share the first sub-frame's pitch search and the search buffers across gain candidates; recursive short-lag responses; tabulated LSP scan cosines; hostile-input test
+- joint high-band gain / shape search, formant-weighted LSP error, deeper LSP searches at higher complexity
+- VBR, ABR, VAD comfort noise and DTX on the stream encoder; explicit sub-modes, in-band messages, framework options
+- noise-weighted narrowband search, complexity setting, table-driven searches, decoder hand-over after generated-excitation frames
+- packets end with the RFC 5574 padding, not a terminator code plus zeros
+- clippy 1.100: iterate the sub-frame LSP rows in two interpolation tests
+
 ### Fixed
 
 - **Packets end with the RFC 5574 §3.3 padding** — *"a 0 followed by all
