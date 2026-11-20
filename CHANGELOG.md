@@ -128,7 +128,8 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   quality, rate mode and complexity extreme: no panic, every packet
   decodes to a whole frame, silence stays silent.
 - `tests/encoder_rate_modes.rs` (the rate modes, sub-mode selection,
-  complexity and the in-band channel through the crate's decoder) and
+  complexity, the in-band channel and the framework options through
+  the crate's decoder) and
   `tests/encoder_blackbox.rs` (every quality, every 16 kHz sub-mode
   pair, every rate mode, stereo and in-band messages through two
   independent decoder executables when installed: the reference decoder

@@ -322,3 +322,113 @@ fn stereo_streams_keep_their_message_in_every_rate_mode() {
     }
     assert!(el > 4.0 * er, "left {el:.0} vs right {er:.0}");
 }
+
+/// Encode `x` through the framework factory with the given options;
+/// returns the packet sizes and the encoder's output parameters.
+fn framework_encode(
+    x: &[i16],
+    rate: u32,
+    options: &[(&str, &str)],
+) -> oxideav_core::Result<(Vec<usize>, oxideav_core::CodecParameters)> {
+    use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, SampleFormat};
+    let mut p = CodecParameters::audio(CodecId::new("speex"));
+    p.sample_rate = Some(rate);
+    p.channels = Some(1);
+    p.sample_format = Some(SampleFormat::S16);
+    for (k, v) in options {
+        p.options.insert(*k, *v);
+    }
+    let mut enc = oxideav_speex::make_encoder(&p)?;
+    enc.send_frame(&Frame::Audio(AudioFrame {
+        samples: x.len() as u32,
+        pts: Some(0),
+        data: vec![x.iter().flat_map(|s| s.to_le_bytes()).collect()],
+    }))?;
+    let mut sizes = Vec::new();
+    loop {
+        match enc.receive_packet() {
+            Ok(pk) => sizes.push(pk.data.len()),
+            Err(Error::NeedMore) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((sizes, enc.output_params().clone()))
+}
+
+#[test]
+fn framework_options_reach_the_rate_modes() {
+    let x = speech_like(8_000, 3.0, 4_917);
+    // Constant quality: every packet the same size.
+    let (plain, params) = framework_encode(&x, 8_000, &[("quality", "6")]).unwrap();
+    assert!(
+        plain.iter().all(|&n| n == 28),
+        "mode 4 = 220 bits = 28 octets"
+    );
+    assert_eq!(params.bit_rate, Some(11_000));
+    let header = oxideav_speex::SpeexHeader::parse(&params.extradata).unwrap();
+    assert_eq!(header.vbr, 0);
+
+    // `bitrate` picks the quality.
+    let (by_rate, params) = framework_encode(&x, 8_000, &[("bitrate", "15000")]).unwrap();
+    assert!(by_rate.iter().all(|&n| n == 38), "15 kbit/s = mode 5");
+    assert_eq!(params.bit_rate, Some(15_000));
+
+    // VBR + DTX: sizes vary, null frames appear, the header says VBR.
+    let (vbr, params) = framework_encode(
+        &x,
+        8_000,
+        &[
+            ("quality", "6"),
+            ("vbr", "true"),
+            ("vbr_quality", "5.5"),
+            ("dtx", "true"),
+            ("complexity", "2"),
+        ],
+    )
+    .unwrap();
+    let mut distinct = vbr.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(distinct.len() >= 4, "VBR packet sizes {distinct:?}");
+    assert!(vbr.contains(&1), "a null frame is one octet");
+    assert!(vbr.iter().sum::<usize>() < plain.iter().sum::<usize>());
+    assert_eq!(
+        oxideav_speex::SpeexHeader::parse(&params.extradata)
+            .unwrap()
+            .vbr,
+        1
+    );
+
+    // ABR: the target is the declared bit-rate and the stream meets it.
+    let (abr, params) = framework_encode(&x, 8_000, &[("abr", "9000")]).unwrap();
+    assert_eq!(params.bit_rate, Some(9_000));
+    let bps = abr.iter().sum::<usize>() as f64 * 8.0 * 50.0 / abr.len() as f64;
+    assert!((bps - 9_000.0).abs() < 900.0, "ABR 9000: {bps:.0} bit/s");
+
+    // VAD alone: two sizes (speech and comfort noise).
+    let (vad, _) = framework_encode(&x, 8_000, &[("quality", "8"), ("vad", "true")]).unwrap();
+    let mut distinct = vad.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct, vec![6, 38]);
+
+    // The plain search is selectable and changes the stream's content,
+    // not its size.
+    let (unweighted, _) =
+        framework_encode(&x, 8_000, &[("quality", "6"), ("noise_weighting", "false")]).unwrap();
+    assert_eq!(unweighted, plain);
+
+    // Out-of-range settings are refused up front.
+    for bad in [
+        [("complexity", "0")],
+        [("complexity", "11")],
+        [("quality", "11")],
+        [("vbr_quality", "10.5")],
+        [("bitrate", "1000")],
+    ] {
+        assert!(
+            framework_encode(&x[..160], 8_000, &bad).is_err(),
+            "{bad:?} accepted"
+        );
+    }
+}
