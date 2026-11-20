@@ -204,8 +204,8 @@ mod tests {
         let curr = lsp([200; NB_LSP_ORDER]);
         let out = NbSubFrameLsp::new(&prev, &curr);
         // sub-frame 2 (s=1, k=2): out = 2·prev + 2·curr = 200 + 400 = 600.
-        for i in 0..NB_LSP_ORDER {
-            assert_eq!(out.subframes[1][i], 2 * 100 + 2 * 200);
+        for &v in &out.subframes[1] {
+            assert_eq!(v, 2 * 100 + 2 * 200);
         }
     }
 
@@ -228,9 +228,10 @@ mod tests {
         // (input Q10 × 4 = Q12).
         let unit = lsp([1; NB_LSP_ORDER]);
         let out = NbSubFrameLsp::new(&unit, &unit);
-        for s in 0..NB_LSP_SUBFRAMES_PER_FRAME {
-            for i in 0..NB_LSP_ORDER {
-                assert_eq!(out.subframes[s][i], 4, "sub-frame {s} coeff {i}");
+        assert_eq!(out.subframes.len(), NB_LSP_SUBFRAMES_PER_FRAME);
+        for (s, sub) in out.subframes.iter().enumerate() {
+            for (i, &v) in sub.iter().enumerate() {
+                assert_eq!(v, 4, "sub-frame {s} coeff {i}");
             }
         }
     }
