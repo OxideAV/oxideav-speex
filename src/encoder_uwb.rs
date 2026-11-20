@@ -39,7 +39,7 @@
 //!    with the wideband flag, Table 9.1 body, first high-band frame),
 //!    then the second high-band frame through the same
 //!    [`crate::write_high_band_frame`] writer; packets close with the
-//!    §5.5 mode-15 terminator.
+//!    RFC 5574 §3.3 octet padding.
 //!
 //! ## Fidelity
 //!
@@ -202,8 +202,8 @@ impl UltraWidebandEncoder {
     }
 
     /// Encode a whole **packet** of consecutive frames: each frame packs
-    /// as the embedded layout, closed with the §5.5 mode-15 terminator
-    /// and zero-padded to the byte boundary — directly consumable by
+    /// as the embedded layout, and the packet is padded to the octet
+    /// boundary as RFC 5574 §3.3 prescribes — directly consumable by
     /// [`crate::UltraWidebandDecoder::decode_packet`].
     pub fn encode_packet(
         &mut self,
@@ -214,11 +214,26 @@ impl UltraWidebandEncoder {
     ) -> Result<Vec<u8>, UwbEncodeError> {
         let mut writer = BitWriter::new();
         for pcm in frames {
-            let bodies = self.encode_frame_bodies(pcm, nb_mode, hb_mode, uwb_mode)?;
-            write_uwb_frame(&mut writer, &bodies)?;
+            self.encode_frame_into(&mut writer, pcm, nb_mode, hb_mode, uwb_mode)?;
         }
         crate::nb_encode::write_packet_terminator(&mut writer).map_err(UwbEncodeError::Pack)?;
         Ok(writer.into_bytes())
+    }
+
+    /// Encode one frame with the given sub-modes and append it (all
+    /// three layers, no padding) to `writer` — the building block for
+    /// packets that carry several frames or in-band messages. Close the
+    /// packet with [`crate::write_packet_terminator`].
+    pub fn encode_frame_into(
+        &mut self,
+        writer: &mut BitWriter,
+        pcm: &[i16; UWB_FRAME_SAMPLES],
+        nb_mode: u8,
+        hb_mode: u8,
+        uwb_mode: u8,
+    ) -> Result<(), UwbEncodeError> {
+        let bodies = self.encode_frame_bodies(pcm, nb_mode, hb_mode, uwb_mode)?;
+        write_uwb_frame(writer, &bodies)
     }
 
     /// Encode a packet at a §2.1 quality setting, using the
@@ -539,8 +554,8 @@ mod tests {
 
     #[test]
     fn quality_ladder_frame_sizes_match_staged_rates() {
-        // For each encodable quality, one frame + terminator must pack
-        // to exactly ceil((bits + 5) / 8) bytes where bits is the
+        // For each encodable quality, one frame must pack
+        // to exactly ceil(bits / 8) bytes where bits is the
         // quality's staged bits-per-frame total — the wire-budget tie
         // between the quality module and the packers.
         use crate::quality::{FRAMES_PER_SECOND, uwb_bitrate_bps};
@@ -551,7 +566,7 @@ mod tests {
                 .encode_packet_quality(&frames, q)
                 .unwrap_or_else(|e| panic!("quality {q}: {e}"));
             let frame_bits = uwb_bitrate_bps(q).unwrap() / FRAMES_PER_SECOND;
-            let expected_len = (frame_bits + 5).div_ceil(8) as usize;
+            let expected_len = frame_bits.div_ceil(8) as usize;
             assert_eq!(bytes.len(), expected_len, "quality {q} packet size");
 
             // And it decodes.

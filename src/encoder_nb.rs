@@ -206,8 +206,8 @@ impl NarrowbandEncoder {
 
     /// Encode a whole **packet** of consecutive 160-sample frames in the
     /// given mode: the frames are packed back-to-back (§5.5 — *"it is
-    /// desirable to pack more than one frame per packet"*), closed with
-    /// the mode-15 terminator, and zero-padded to the byte boundary.
+    /// desirable to pack more than one frame per packet"*) and padded
+    /// to the octet boundary as RFC 5574 §3.3 prescribes.
     /// The result is directly consumable by
     /// [`crate::SpeexDecoder::decode_packet`].
     pub fn encode_packet(
@@ -215,18 +215,31 @@ impl NarrowbandEncoder {
         frames: &[[i16; NB_FRAME_SAMPLES]],
         mode: u8,
     ) -> Result<Vec<u8>, EncodeError> {
-        let submode = NarrowbandSubmode::for_id(mode).ok_or(EncodeError::UnknownMode(mode))?;
         let mut writer = crate::bitreader::BitWriter::new();
         for pcm in frames {
-            let body = self.build_body(pcm, &submode)?;
-            let header = crate::frame::NarrowbandFrameHeader::new(false, submode.mode_id)
-                .map_err(EncodeError::Pack)?;
-            header.write(&mut writer).map_err(EncodeError::Pack)?;
-            crate::nb_encode::write_narrowband_body(&mut writer, &body, &submode)
-                .map_err(|e| EncodeError::Pack(FrameError::from(e)))?;
+            self.encode_frame_into(&mut writer, pcm, mode)?;
         }
         crate::nb_encode::write_packet_terminator(&mut writer).map_err(EncodeError::Pack)?;
         Ok(writer.into_bytes())
+    }
+
+    /// Encode one frame in the given mode and append it (prefix + body,
+    /// no padding) to `writer` — the building block for packets that
+    /// carry several frames or in-band messages. Close the packet with
+    /// [`crate::write_packet_terminator`].
+    pub fn encode_frame_into(
+        &mut self,
+        writer: &mut crate::bitreader::BitWriter,
+        pcm: &[i16; NB_FRAME_SAMPLES],
+        mode: u8,
+    ) -> Result<(), EncodeError> {
+        let submode = NarrowbandSubmode::for_id(mode).ok_or(EncodeError::UnknownMode(mode))?;
+        let body = self.build_body(pcm, &submode)?;
+        let header = crate::frame::NarrowbandFrameHeader::new(false, submode.mode_id)
+            .map_err(EncodeError::Pack)?;
+        header.write(writer).map_err(EncodeError::Pack)?;
+        crate::nb_encode::write_narrowband_body(writer, &body, &submode)
+            .map_err(|e| EncodeError::Pack(FrameError::from(e)))
     }
 
     /// Encode a packet at a §2.1 quality setting (0..=10), selecting the
@@ -1499,8 +1512,8 @@ mod tests {
     fn quality_packets_match_ladder_budgets() {
         // encode_packet_quality wires the Table 9.2 ladder: for EVERY
         // quality 0..=10 (r438 — modes 1 and 7 are now bound), one
-        // frame + terminator packs to exactly ceil((mode_bits + 5) / 8)
-        // bytes and decodes.
+        // frame packs to exactly ceil(mode_bits / 8) bytes — the
+        // RFC 5574 §3.3 padding adds no octet — and decodes.
         for q in 0..=10u8 {
             let mode = crate::quality::nb_mode_for_quality(q).unwrap();
             let submode = NarrowbandSubmode::for_id(mode).unwrap();
@@ -1509,7 +1522,7 @@ mod tests {
             let pkt = enc
                 .encode_packet_quality(&frames, q)
                 .unwrap_or_else(|e| panic!("quality {q}: {e}"));
-            let bits = u32::from(submode.total_bits) + 5;
+            let bits = u32::from(submode.total_bits);
             assert_eq!(pkt.len(), bits.div_ceil(8) as usize, "quality {q}");
             let mut dec = crate::SpeexDecoder::new();
             assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");

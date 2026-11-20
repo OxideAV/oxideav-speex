@@ -7,7 +7,7 @@
 //! message itself.
 //!
 //! Each call to [`SpeexStreamEncoder::encode_frame`] turns one 20 ms
-//! frame into one self-contained packet (mode-15 terminated, §5.5),
+//! frame into one self-contained packet (octet-padded, RFC 5574 §3.3),
 //! and [`SpeexStreamEncoder::header`] is the matching Table 7.1 stream
 //! header (`frames_per_packet = 1`).
 //!
@@ -208,52 +208,56 @@ impl SpeexStreamEncoder {
                 got: pcm.len(),
             });
         }
-        if self.channels == 1 {
-            return self.encode_mono(pcm);
-        }
-        // Intensity stereo (docs intensity-stereo.md §5): mean-absolute
-        // per-channel magnitude drives the code-9 payload, the audio is
-        // the (L+R)/2 fold.
-        let (mut sl, mut sr) = (0.0f64, 0.0f64);
-        let mut mono = Vec::with_capacity(n);
-        for lr in pcm.as_chunks::<2>().0 {
-            sl += f64::from(lr[0].unsigned_abs());
-            sr += f64::from(lr[1].unsigned_abs());
-            mono.push(downmix_mean(lr[0], lr[1]));
-        }
-        let payload = encode_stereo_payload(sl / n as f64, sr / n as f64);
-        let frame_bytes = self.encode_mono(&mono)?;
         let mut w = BitWriter::new();
-        // Each write fits its declared width, so none can fail.
-        w.write(0, 1).ok(); // wideband flag of the in-band pseudo-frame
-        w.write(14, 4).ok(); // mode 14 = in-band signalling
-        w.write(9, 4).ok(); // code 9 = intensity stereo
-        w.write(u32::from(payload), 8).ok();
-        for &b in &frame_bytes {
-            w.write(u32::from(b), 8).ok();
+        if self.channels == 1 {
+            self.encode_mono(&mut w, pcm)?;
+        } else {
+            // Intensity stereo (docs intensity-stereo.md §5): mean-absolute
+            // per-channel magnitude drives the code-9 payload, the audio is
+            // the (L+R)/2 fold.
+            let (mut sl, mut sr) = (0.0f64, 0.0f64);
+            let mut mono = Vec::with_capacity(n);
+            for lr in pcm.as_chunks::<2>().0 {
+                sl += f64::from(lr[0].unsigned_abs());
+                sr += f64::from(lr[1].unsigned_abs());
+                mono.push(downmix_mean(lr[0], lr[1]));
+            }
+            let payload = encode_stereo_payload(sl / n as f64, sr / n as f64);
+            // Each write fits its declared width, so none can fail.
+            w.write(0, 1).ok(); // wideband flag of the in-band pseudo-frame
+            w.write(14, 4).ok(); // mode 14 = in-band signalling
+            w.write(9, 4).ok(); // code 9 = intensity stereo
+            w.write(u32::from(payload), 8).ok();
+            self.encode_mono(&mut w, &mono)?;
         }
+        crate::nb_encode::write_packet_terminator(&mut w).ok();
         Ok(w.into_bytes())
     }
 
-    fn encode_mono(&mut self, frame: &[i16]) -> Result<Vec<u8>, StreamEncodeError> {
+    /// Append one mono frame's layers to `w` at the configured quality.
+    fn encode_mono(&mut self, w: &mut BitWriter, frame: &[i16]) -> Result<(), StreamEncodeError> {
         let q = self.quality;
+        let unknown = || StreamEncodeError::QualityOutOfRange(q);
         match &mut self.inner {
             Inner::Nb(enc) => {
+                let mode = nb_mode_for_quality(q).ok_or_else(unknown)?;
                 let mut pcm = [0i16; NB_FRAME_SAMPLES];
                 pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], q)
+                enc.encode_frame_into(w, &pcm, mode)
                     .map_err(StreamEncodeError::Narrowband)
             }
             Inner::Wb(enc) => {
+                let m = crate::quality::wb_modes_for_quality(q).ok_or_else(unknown)?;
                 let mut pcm = [0i16; QMF_WIDEBAND_FRAME];
                 pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], q)
+                enc.encode_frame_into(w, &pcm, m.nb_mode, m.hb_mode)
                     .map_err(StreamEncodeError::Wideband)
             }
             Inner::Uwb(enc) => {
+                let m = crate::quality::uwb_modes_for_quality(q).ok_or_else(unknown)?;
                 let mut pcm = [0i16; UWB_FRAME_SAMPLES];
                 pcm.copy_from_slice(frame);
-                enc.encode_packet_quality(&[pcm], q)
+                enc.encode_frame_into(w, &pcm, m.nb_mode, m.hb_mode, m.uwb_hb_mode)
                     .map_err(StreamEncodeError::UltraWideband)
             }
         }

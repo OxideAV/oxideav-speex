@@ -6,6 +6,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Packets end with the RFC 5574 §3.3 padding** — *"a 0 followed by all
+  ones (until the end of the octet)"*, and nothing when the frames
+  already end on an octet boundary — instead of a full 5-bit terminator
+  code plus zero bits. Every packet is now exactly `ceil(bits / 8)`
+  octets (a narrowband quality-8 frame is 38 bytes, not 39; quality 4
+  is 20, not 21), which is what the manual means by the terminator
+  *"doesn't involve any overhead"*. A black-box decoder that sizes
+  frames from the packet length rejected every packet of the old shape;
+  it now decodes all three rate classes without a diagnostic. A stereo
+  packet no longer carries padding in the middle (its in-band message
+  and its frame are written into one bit stream).
+
+### Added
+
+- `NarrowbandEncoder::encode_frame_into`,
+  `WidebandEncoder::encode_frame_into`,
+  `UltraWidebandEncoder::encode_frame_into` — append one frame, without
+  padding, to a caller's `BitWriter` (several frames or in-band
+  messages per packet; close with `write_packet_terminator`).
+
 ## [0.0.12](https://github.com/OxideAV/oxideav-speex/compare/v0.0.11...v0.0.12) - 2026-11-07
 
 ### Other

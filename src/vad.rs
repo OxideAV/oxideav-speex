@@ -93,7 +93,7 @@ impl NarrowbandEncoder {
     /// Encode a packet with VAD/DTX: active frames encode at `mode`,
     /// inactive frames as the 5-bit mode-0 DTX frame (§2.1 / Table 9.2).
     ///
-    /// The packet closes with the §5.5 terminator and is directly
+    /// The packet closes with the RFC 5574 §3.3 padding and is directly
     /// consumable by [`crate::SpeexDecoder::decode_packet`] — DTX
     /// frames decode as silence, so the frame count (and 20 ms timing)
     /// is preserved.
@@ -218,13 +218,13 @@ mod tests {
 
     #[test]
     fn nb_dtx_silent_packet_is_five_bits_per_frame() {
-        // Four silent frames: 4 × 5 bits + 5-bit terminator = 25 bits →
-        // 4 bytes. The §2.1 "only 5 bits … 250 bps" pin.
+        // Four silent frames: 4 × 5 bits, padded to the octet = 3
+        // bytes. The §2.1 "only 5 bits … 250 bps" pin.
         let mut enc = NarrowbandEncoder::new();
         let mut vad = EnergyVad::new(100.0, 0);
         let frames = [[0i16; NB_FRAME_SAMPLES]; 4];
         let pkt = enc.encode_packet_dtx(&frames, 5, &mut vad).unwrap();
-        assert_eq!(pkt.len(), 4, "4 DTX frames + terminator in 4 bytes");
+        assert_eq!(pkt.len(), 3, "4 DTX frames in 3 bytes");
 
         // The DTX frames still decode, preserving the frame count, to
         // the null frame's comfort noise (tracer §4): at the stream

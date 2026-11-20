@@ -214,8 +214,8 @@ impl WidebandEncoder {
     /// Encode a whole **packet** of consecutive 320-sample 16 kHz frames:
     /// each frame packs as the §10.4 embedded layout (narrowband layer
     /// with the wideband flag set, then the high band), the frames are
-    /// concatenated back-to-back (§5.5), closed with the mode-15
-    /// terminator, and zero-padded to the byte boundary. The result is
+    /// concatenated back-to-back (§5.5) and padded to the octet
+    /// boundary as RFC 5574 §3.3 prescribes. The result is
     /// directly consumable by [`crate::SpeexDecoder::decode_packet`].
     pub fn encode_packet(
         &mut self,
@@ -225,21 +225,35 @@ impl WidebandEncoder {
     ) -> Result<Vec<u8>, WbEncodeError> {
         let mut writer = crate::bitreader::BitWriter::new();
         for pcm in frames {
-            let bodies = self.encode_frame_bodies(pcm, nb_mode, hb_mode)?;
-            let nb_submode = NarrowbandSubmode::for_id(bodies.nb_mode)
-                .expect("mode validated by encode_frame_bodies");
-            let hb_submode = WidebandHighBandSubmode::for_id(bodies.hb_mode)
-                .expect("mode validated by encode_frame_bodies");
-            let header = crate::frame::NarrowbandFrameHeader::new(false, nb_submode.mode_id)
-                .map_err(WbEncodeError::Pack)?;
-            header.write(&mut writer).map_err(WbEncodeError::Pack)?;
-            crate::nb_encode::write_narrowband_body(&mut writer, &bodies.nb_body, &nb_submode)
-                .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))?;
-            crate::hb_encode::write_high_band_frame(&mut writer, &bodies.hb_body, &hb_submode)
-                .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))?;
+            self.encode_frame_into(&mut writer, pcm, nb_mode, hb_mode)?;
         }
         crate::nb_encode::write_packet_terminator(&mut writer).map_err(WbEncodeError::Pack)?;
         Ok(writer.into_bytes())
+    }
+
+    /// Encode one frame with the given sub-modes and append it (both
+    /// layers, no padding) to `writer` — the building block for packets
+    /// that carry several frames or in-band messages. Close the packet
+    /// with [`crate::write_packet_terminator`].
+    pub fn encode_frame_into(
+        &mut self,
+        writer: &mut crate::bitreader::BitWriter,
+        pcm: &[i16; QMF_WIDEBAND_FRAME],
+        nb_mode: u8,
+        hb_mode: u8,
+    ) -> Result<(), WbEncodeError> {
+        let bodies = self.encode_frame_bodies(pcm, nb_mode, hb_mode)?;
+        let nb_submode = NarrowbandSubmode::for_id(bodies.nb_mode)
+            .expect("mode validated by encode_frame_bodies");
+        let hb_submode = WidebandHighBandSubmode::for_id(bodies.hb_mode)
+            .expect("mode validated by encode_frame_bodies");
+        let header = crate::frame::NarrowbandFrameHeader::new(false, nb_submode.mode_id)
+            .map_err(WbEncodeError::Pack)?;
+        header.write(writer).map_err(WbEncodeError::Pack)?;
+        crate::nb_encode::write_narrowband_body(writer, &bodies.nb_body, &nb_submode)
+            .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))?;
+        crate::hb_encode::write_high_band_frame(writer, &bodies.hb_body, &hb_submode)
+            .map_err(|e| WbEncodeError::Pack(FrameError::from(e)))
     }
 
     /// Encode a packet at a §2.1 quality setting (0..=10), selecting the
@@ -764,8 +778,8 @@ mod tests {
     #[test]
     fn quality_packets_match_ladder_budgets() {
         // encode_packet_quality wires the Table 10.2-derived ladder:
-        // one frame + terminator packs to the staged bits-per-frame
-        // total and decodes through the top-level SpeexDecoder.
+        // one frame packs to the staged bits-per-frame total (padded
+        // to the octet) and decodes through the top-level SpeexDecoder.
         use crate::quality::{FRAMES_PER_SECOND, wb_bitrate_bps};
         for q in 0..=10u8 {
             let mut enc = WidebandEncoder::new();
@@ -773,7 +787,7 @@ mod tests {
             let pkt = enc
                 .encode_packet_quality(&frames, q)
                 .unwrap_or_else(|e| panic!("quality {q}: {e}"));
-            let bits = wb_bitrate_bps(q).unwrap() / FRAMES_PER_SECOND + 5;
+            let bits = wb_bitrate_bps(q).unwrap() / FRAMES_PER_SECOND;
             assert_eq!(pkt.len(), bits.div_ceil(8) as usize, "quality {q}");
             let mut dec = crate::SpeexDecoder::new();
             assert_eq!(dec.decode_packet(&pkt).unwrap().len(), 1, "quality {q}");

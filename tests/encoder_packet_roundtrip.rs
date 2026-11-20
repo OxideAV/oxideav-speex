@@ -1,7 +1,7 @@
 //! Packet-level encode → top-level decode round-trip (round r385).
 //!
 //! Drives the two encoders' `encode_packet` output (frames packed
-//! back-to-back + the §5.5 mode-15 terminator + byte padding) through
+//! back-to-back + the RFC 5574 §3.3 octet padding) through
 //! the top-level [`SpeexDecoder`] — the same entry point a container
 //! demuxer feeds — asserting the packet walker recovers exactly the
 //! encoded frames (no misparse of the padding tail) and the PCM
@@ -103,15 +103,34 @@ fn single_frame_wideband_packet_decodes() {
 }
 
 #[test]
-fn empty_frame_list_encodes_terminator_only_packet() {
-    // An empty packet is just the terminator + padding; the decoder
-    // yields zero frames.
+fn empty_frame_list_encodes_an_empty_packet() {
+    // No frames end on an octet boundary, so the RFC 5574 §3.3 padding
+    // adds nothing; the decoder yields zero frames.
     let mut enc = NarrowbandEncoder::new();
     let packet = enc.encode_packet(&[], 5).expect("encode");
-    assert!(!packet.is_empty(), "terminator still occupies one byte");
+    assert!(packet.is_empty(), "an aligned packet takes no padding");
     let mut dec = SpeexDecoder::new();
     let out = dec.decode_packet(&packet).expect("decode");
-    assert!(out.is_empty(), "terminator-only packet has no frames");
+    assert!(out.is_empty(), "an empty packet has no frames");
+}
+
+#[test]
+fn padding_is_a_zero_then_ones_to_the_octet() {
+    // RFC 5574 §3.3: "a 0 followed by all ones (until the end of the
+    // octet)", and none when the frames end on a boundary.
+    let frame = [0i16; 160];
+    // Mode 5 = 300 bits: four padding bits, 0111.
+    let mut enc = NarrowbandEncoder::new();
+    let packet = enc.encode_packet(&[frame], 5).expect("encode");
+    assert_eq!(packet.len(), 38);
+    assert_eq!(packet[37] & 0x0f, 0b0111);
+    // Mode 3 = 160 bits: octet-aligned, no padding.
+    let packet = enc.encode_packet(&[frame], 3).expect("encode");
+    assert_eq!(packet.len(), 20);
+    // Mode 1 = 43 bits: five padding bits, the whole terminator code.
+    let packet = enc.encode_packet(&[frame], 1).expect("encode");
+    assert_eq!(packet.len(), 6);
+    assert_eq!(packet[5] & 0x1f, 0b01111);
 }
 
 #[test]
