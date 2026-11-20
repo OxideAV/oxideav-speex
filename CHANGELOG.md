@@ -50,9 +50,12 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   search likewise, the pitch pre-selection builds each lag's response
   from the previous lag's, and a second innovation pass at an unchanged
   gain is skipped. Streams were bit-identical before / after on the
-  measurement set at the time of the change; 8 kHz quality 8 went
-  14.6× → 47× real time, 32 kHz quality 7 5.4× → 18× (one core, medians,
-  shared machine).
+  measurement set at the time of the change. A follow-up shares the
+  first sub-frame's pitch search and the search buffers across a
+  frame's gain candidates, builds the short-lag (T < 40) responses by
+  the same recursion, and tabulates the LSP root scan's grid cosines —
+  again with bit-identical streams. Before → after tables are in the
+  README.
 - The vocoder mode (narrowband mode 1) estimates its open-loop pitch on
   the input's own residual history rather than on the decoded
   excitation, which that mode's decoder generates.
@@ -90,6 +93,10 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   noise-weighted segmental SNR and encode / decode speed for every
   quality in each rate class, optionally beside a black-box encoder and
   with a black-box cross-decode of this crate's streams.
+- `tests/encoder_robustness.rs` — silence, full-scale square waves,
+  DC, white noise, clicks and abrupt switches through every rate class,
+  quality, rate mode and complexity extreme: no panic, every packet
+  decodes to a whole frame, silence stays silent.
 - `tests/encoder_rate_modes.rs` (the rate modes, sub-mode selection,
   complexity and the in-band channel through the crate's decoder) and
   `tests/encoder_blackbox.rs` (every quality, every 16 kHz sub-mode

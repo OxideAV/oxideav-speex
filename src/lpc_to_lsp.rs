@@ -182,6 +182,33 @@ fn eval_on_circle(coeffs: &[f64], omega: f64) -> f64 {
     re
 }
 
+/// The cosines `cos((m/2 − k)·ω)` of [`eval_on_circle`] at every scan
+/// grid point `ω = π·step/LSP_SCAN_STEPS`, for a reduced polynomial of
+/// `len = m + 1` coefficients: `table[step·len + k]`. Tabulated once
+/// for the two lengths the encoders use (order 10 and order 8), with
+/// the angle formed exactly as `eval_on_circle` forms it.
+fn scan_grid_cosines(len: usize) -> Option<&'static [f64]> {
+    use std::sync::OnceLock;
+    static NARROWBAND: OnceLock<Vec<f64>> = OnceLock::new();
+    static HIGH_BAND: OnceLock<Vec<f64>> = OnceLock::new();
+    let cell = match len {
+        l if l == LPC_ORDER + 1 => &NARROWBAND,
+        l if l == crate::codebooks::HB_LPC_ORDER + 1 => &HIGH_BAND,
+        _ => return None,
+    };
+    Some(cell.get_or_init(|| {
+        let half = (len - 1) as f64 / 2.0;
+        let mut table = Vec::with_capacity((LSP_SCAN_STEPS + 1) * len);
+        for step in 0..=LSP_SCAN_STEPS {
+            let omega = std::f64::consts::PI * (step as f64) / (LSP_SCAN_STEPS as f64);
+            for k in 0..len {
+                table.push((half * omega - (k as f64) * omega).cos());
+            }
+        }
+        table
+    }))
+}
+
 /// Find the LSP angular frequencies of an order-`LPC_ORDER` predictor by
 /// root-finding on its auxiliary polynomials.
 ///
@@ -259,11 +286,30 @@ fn lpc_to_lsp_general(a: &[f64], out: &mut [f64]) -> Result<(), LpcToLspError> {
 /// roots in ascending order.
 fn scan_roots(reduced: &[f64]) -> Vec<f64> {
     let mut roots: Vec<f64> = Vec::with_capacity(LPC_ORDER / 2);
+    let grid = scan_grid_cosines(reduced.len());
+    let on_grid = |step: usize| -> f64 {
+        match grid {
+            // The same cosine sum as `eval_on_circle`, term for term,
+            // from the tabulated grid cosines.
+            Some(table) => {
+                let row = &table[step * reduced.len()..(step + 1) * reduced.len()];
+                let mut re = 0.0f64;
+                for (&g, &c) in reduced.iter().zip(row) {
+                    re += g * c;
+                }
+                re
+            }
+            None => eval_on_circle(
+                reduced,
+                std::f64::consts::PI * (step as f64) / (LSP_SCAN_STEPS as f64),
+            ),
+        }
+    };
     let mut prev_omega = 0.0f64;
-    let mut prev_val = eval_on_circle(reduced, prev_omega);
+    let mut prev_val = on_grid(0);
     for step in 1..=LSP_SCAN_STEPS {
         let omega = std::f64::consts::PI * (step as f64) / (LSP_SCAN_STEPS as f64);
-        let val = eval_on_circle(reduced, omega);
+        let val = on_grid(step);
         if prev_val == 0.0 {
             if prev_omega > 0.0 && prev_omega < std::f64::consts::PI {
                 roots.push(prev_omega);

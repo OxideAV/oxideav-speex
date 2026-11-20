@@ -285,8 +285,25 @@ impl SearchEffort {
 /// The complexity a fresh encoder searches at.
 pub const DEFAULT_COMPLEXITY: u8 = 3;
 
-/// The search tables of one frame's four sub-frames, built on first use.
-type FrameTables = [Option<SubframeTables>; SUBFRAMES];
+/// One adaptive-codebook candidate: (pitch-only search error, period,
+/// gain-VQ index, contribution).
+type PitchCandidate = (f64, u16, u8, [f64; SUBFRAME_SAMPLES]);
+
+/// What one frame's sub-frame searches share across the frame-gain
+/// candidates: the per-sub-frame tables (built on first use), the first
+/// sub-frame's adaptive-codebook candidates (its history and target do
+/// not depend on the frame gain), and the innovation search's working
+/// buffers.
+#[derive(Debug, Default)]
+struct FrameScratch {
+    tables: [Option<SubframeTables>; SUBFRAMES],
+    first_pitch: Option<Vec<PitchCandidate>>,
+    /// Gain-scaled row responses and their running energies.
+    scaled: Vec<f64>,
+    energy: Vec<f64>,
+    /// Centre-tap synthesis responses by pitch lag.
+    centre: Vec<[f64; SUBFRAME_SAMPLES]>,
+}
 
 /// Stateful narrowband CELP encoder. One instance encodes a continuous
 /// stream of 160-sample frames, carrying LSP / excitation / analysis
@@ -671,7 +688,7 @@ impl NarrowbandEncoder {
         stages: u8,
         plan: &PitchPlan,
         submode: &NarrowbandSubmode,
-        tables: &mut FrameTables,
+        scratch: &mut FrameScratch,
     ) -> ([NarrowbandSubFrameIndices; SUBFRAMES], f64) {
         let pitch_quant = submode.pitch_gain;
         let has_fine_pitch = submode.fine_pitch_bits > 0;
@@ -692,15 +709,7 @@ impl NarrowbandEncoder {
             if let Some(dl) = dec_lpcs {
                 let a = &dl[sf];
                 let (fields, exc, sf_err) = self.abs_subframe(
-                    block,
-                    a,
-                    g_frame,
-                    codebook,
-                    count,
-                    stages,
-                    plan,
-                    submode,
-                    &mut tables[sf],
+                    block, a, g_frame, codebook, count, stages, plan, submode, scratch, sf,
                 );
                 let pitch = fields.3;
                 let base = sf * SUBFRAME_SAMPLES;
@@ -857,7 +866,7 @@ impl NarrowbandEncoder {
         }
 
         let mut best: Option<(f64, Idx, [NarrowbandSubFrameIndices; SUBFRAMES], Self)> = None;
-        let mut tables: FrameTables = [None, None, None, None];
+        let mut scratch = FrameScratch::default();
         for cand in candidates {
             let g = f64::from(reconstruct_frame_ol_exc_gain(cand));
             let mut trial = self.clone();
@@ -871,7 +880,7 @@ impl NarrowbandEncoder {
                 stages,
                 plan,
                 submode,
-                &mut tables,
+                &mut scratch,
             );
             if best.as_ref().is_none_or(|(e, _, _, _)| err < *e) {
                 best = Some((err, cand, subframes, trial));
@@ -1112,7 +1121,8 @@ impl NarrowbandEncoder {
         stages: u8,
         plan: &PitchPlan,
         submode: &NarrowbandSubmode,
-        tables: &mut Option<SubframeTables>,
+        scratch: &mut FrameScratch,
+        sf: usize,
     ) -> (
         (u16, u8, (u8, u128), [f64; SUBFRAME_SAMPLES]),
         [f64; SUBFRAME_SAMPLES],
@@ -1122,8 +1132,15 @@ impl NarrowbandEncoder {
         const N: usize = SUBFRAME_SAMPLES;
         let effort = self.effort;
         let weights = self.weighting.map(|(g1, g2)| weighting_taps(a, g1, g2));
+        let FrameScratch {
+            tables,
+            first_pitch,
+            scaled: fg,
+            energy,
+            centre,
+        } = scratch;
         let tabs =
-            tables.get_or_insert_with(|| SubframeTables::build(a, weights.as_ref(), codebook));
+            tables[sf].get_or_insert_with(|| SubframeTables::build(a, weights.as_ref(), codebook));
         let h = tabs.h;
         // Target: the input less the mirror's zero-input response, in the
         // search domain.
@@ -1156,167 +1173,198 @@ impl NarrowbandEncoder {
         // --- Adaptive codebook: the candidates to carry forward. ---
         let has_fine = submode.fine_pitch_bits > 0;
         let ol_period = plan.ol_period.unwrap_or(PITCH_PERIOD_MIN);
-        // (pitch-only error, period, gain index, contribution)
-        let mut cands: Vec<(f64, u16, u8, [f64; N])> = Vec::new();
-        match submode.pitch_gain {
-            PitchGainQuant::None => {
-                let mut pitch = [0.0f64; N];
-                if let Some(q) = plan.forced_q {
-                    // The decoder's forced path: a centre-tap recursion
-                    // over the pitch partial at the float coefficient.
-                    let coef = f64::from(crate::forced_pitch_gain::forced_pitch_coef(q));
-                    let hlen = self.exc_hist.len() as i32;
-                    let t = i32::from(ol_period);
-                    for n in 0..N as i32 {
-                        let k = n - t;
-                        pitch[n as usize] = coef
-                            * if k >= 0 {
-                                pitch[k as usize]
-                            } else if hlen + k >= 0 {
-                                self.exc_hist[(hlen + k) as usize]
-                            } else {
-                                0.0
-                            };
-                    }
-                }
-                cands.push((0.0, ol_period, 0, pitch));
-            }
-            quant => {
-                let n_entries: u16 = if quant == PitchGainQuant::Vq7Bit {
-                    128
-                } else {
-                    32
-                };
-                // Centre-tap synthesis responses for every lag whose three
-                // taps read the history without folding (T ≥ 41): the
-                // response at lag T+1 is the response at T delayed by one
-                // sample plus the newly exposed history sample's.
-                const FIRST: usize = SUBFRAME_SAMPLES;
-                const LAST: usize = PITCH_PERIOD_MAX as usize + 1;
-                let mut centre: Vec<[f64; N]> = Vec::new();
-                if has_fine {
-                    let hlen = self.exc_hist.len();
-                    let mut y = filt(&self.pitch_basis(FIRST as u16)[1]);
-                    centre.reserve(LAST - FIRST + 1);
-                    centre.push(y);
-                    for t in FIRST..LAST {
-                        let x = self.exc_hist[hlen - t - 1];
-                        for n in (1..N).rev() {
-                            y[n] = y[n - 1] + h[n] * x;
+        // The first sub-frame's search does not depend on the frame
+        // gain, so the frame's gain candidates share it.
+        let cands: Vec<PitchCandidate> = if let (0, Some(shared)) = (sf, first_pitch.as_ref()) {
+            shared.clone()
+        } else {
+            let mut cands: Vec<PitchCandidate> = Vec::new();
+            match submode.pitch_gain {
+                PitchGainQuant::None => {
+                    let mut pitch = [0.0f64; N];
+                    if let Some(q) = plan.forced_q {
+                        // The decoder's forced path: a centre-tap recursion
+                        // over the pitch partial at the float coefficient.
+                        let coef = f64::from(crate::forced_pitch_gain::forced_pitch_coef(q));
+                        let hlen = self.exc_hist.len() as i32;
+                        let t = i32::from(ol_period);
+                        for n in 0..N as i32 {
+                            let k = n - t;
+                            pitch[n as usize] = coef
+                                * if k >= 0 {
+                                    pitch[k as usize]
+                                } else if hlen + k >= 0 {
+                                    self.exc_hist[(hlen + k) as usize]
+                                } else {
+                                    0.0
+                                };
                         }
-                        y[0] = h[0] * x;
-                        centre.push(y);
                     }
+                    cands.push((0.0, ol_period, 0, pitch));
                 }
-                let taps_of = |t: u16| -> [[f64; N]; 3] {
-                    let ti = usize::from(t);
-                    if has_fine && ti > FIRST && ti < LAST {
-                        // Tap j reads the history at lag T − offset_j.
-                        [
-                            centre[ti + 1 - FIRST],
-                            centre[ti - FIRST],
-                            centre[ti - 1 - FIRST],
-                        ]
+                quant => {
+                    let n_entries: u16 = if quant == PitchGainQuant::Vq7Bit {
+                        128
                     } else {
-                        let b = self.pitch_basis(t);
-                        [filt(&b[0]), filt(&b[1]), filt(&b[2])]
-                    }
-                };
-                let lags: Vec<u16> = if has_fine {
-                    // Pre-select by the centre tap's normalised
-                    // synthesis-domain correlation, then search the
-                    // gain VQ exhaustively on the best few.
-                    let mut scored: Vec<(f64, u16)> = (PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX)
-                        .map(|t| {
-                            let ti = usize::from(t);
-                            let direct;
-                            let y = if ti >= FIRST {
-                                &centre[ti - FIRST]
-                            } else {
-                                direct = filt(&self.pitch_basis(t)[1]);
-                                &direct
-                            };
-                            let c = dot(&target, y);
-                            let e = dot(y, y).max(1e-9);
-                            (if c > 0.0 { c * c / e } else { 0.0 }, t)
-                        })
-                        .collect();
-                    scored.sort_by(|x, y| {
-                        y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal)
-                    });
-                    let mut l: Vec<u16> = scored
-                        .iter()
-                        .take(usize::from(effort.lags.max(1)))
-                        .map(|&(_, t)| t)
-                        .collect();
-                    l.sort_unstable();
-                    l.dedup();
-                    l
-                } else {
-                    vec![ol_period]
-                };
-                let keep = usize::from(effort.pitch_candidates.max(1));
-                // (error, period, gain index), best first.
-                let mut best: Vec<(f64, u16, u8)> = Vec::with_capacity(keep + 1);
-                for t in lags {
-                    let y = taps_of(t);
-                    let c = [
-                        dot(&target, &y[0]),
-                        dot(&target, &y[1]),
-                        dot(&target, &y[2]),
-                    ];
-                    let mut r = [[0.0f64; 3]; 3];
-                    for i in 0..3 {
-                        for j in i..3 {
-                            r[i][j] = dot(&y[i], &y[j]);
-                            r[j][i] = r[i][j];
+                        32
+                    };
+                    // Centre-tap synthesis responses for every lag whose three
+                    // taps read the history without folding (T ≥ 41): the
+                    // response at lag T+1 is the response at T delayed by one
+                    // sample plus the newly exposed history sample's.
+                    const FIRST: usize = SUBFRAME_SAMPLES;
+                    const LAST: usize = PITCH_PERIOD_MAX as usize + 1;
+                    centre.clear();
+                    if has_fine {
+                        let hlen = self.exc_hist.len();
+                        let mut y = filt(&self.pitch_tap(FIRST as u16, 0));
+                        centre.reserve(LAST - FIRST + 1);
+                        centre.push(y);
+                        for t in FIRST..LAST {
+                            let x = self.exc_hist[hlen - t - 1];
+                            for n in (1..N).rev() {
+                                y[n] = y[n - 1] + h[n] * x;
+                            }
+                            y[0] = h[0] * x;
+                            centre.push(y);
                         }
                     }
-                    for idx in 0..n_entries {
-                        let Some(taps) = pitch_gain::reconstruct(idx as u8, quant) else {
-                            continue;
-                        };
-                        let g = [
-                            f64::from(taps.taps[0]) / 64.0,
-                            f64::from(taps.taps[1]) / 64.0,
-                            f64::from(taps.taps[2]) / 64.0,
-                        ];
-                        let mut e = 0.0;
-                        for i in 0..3 {
-                            e -= 2.0 * g[i] * c[i];
-                            for j in 0..3 {
-                                e += g[i] * g[j] * r[i][j];
+                    // Shorter lags read the last T history samples twice
+                    // (once folded back by a period) and nothing after:
+                    // their centre response is the response `z` of those
+                    // T samples alone plus itself delayed by T, and `z`
+                    // obeys the same one-sample recursion from T = 0.
+                    let mut short = [[0.0f64; N]; FIRST];
+                    if has_fine {
+                        let hlen = self.exc_hist.len();
+                        let mut z = [0.0f64; N];
+                        for t in 0..FIRST - 1 {
+                            let x = self.exc_hist[hlen - t - 1];
+                            for n in (1..N).rev() {
+                                z[n] = z[n - 1] + h[n] * x;
+                            }
+                            z[0] = h[0] * x;
+                            // `z` is now the response at lag t + 1.
+                            let lag = t + 1;
+                            let folded = &mut short[lag];
+                            *folded = z;
+                            for n in lag..N {
+                                folded[n] += z[n - lag];
                             }
                         }
-                        if best.len() < keep || e < best[best.len() - 1].0 {
-                            let at = best.partition_point(|b| b.0 <= e);
-                            best.insert(at, (e, t, idx as u8));
-                            best.truncate(keep);
-                        }
                     }
-                }
-                for (e, t, idx) in best {
-                    let b = self.pitch_basis(t);
-                    let g = pitch_gain::reconstruct(idx, quant)
-                        .map(|taps| {
+                    let taps_of = |t: u16| -> [[f64; N]; 3] {
+                        let ti = usize::from(t);
+                        if has_fine && ti > FIRST && ti < LAST {
+                            // Tap j reads the history at lag T − offset_j.
                             [
+                                centre[ti + 1 - FIRST],
+                                centre[ti - FIRST],
+                                centre[ti - 1 - FIRST],
+                            ]
+                        } else {
+                            let b = self.pitch_basis(t);
+                            [filt(&b[0]), filt(&b[1]), filt(&b[2])]
+                        }
+                    };
+                    let lags: Vec<u16> = if has_fine {
+                        // Pre-select by the centre tap's normalised
+                        // synthesis-domain correlation, then search the
+                        // gain VQ exhaustively on the best few.
+                        let mut scored: Vec<(f64, u16)> = (PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX)
+                            .map(|t| {
+                                let ti = usize::from(t);
+                                let y = if ti >= FIRST {
+                                    &centre[ti - FIRST]
+                                } else {
+                                    &short[ti]
+                                };
+                                let c = dot(&target, y);
+                                let e = dot(y, y).max(1e-9);
+                                (if c > 0.0 { c * c / e } else { 0.0 }, t)
+                            })
+                            .collect();
+                        scored.sort_by(|x, y| {
+                            y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal)
+                        });
+                        let mut l: Vec<u16> = scored
+                            .iter()
+                            .take(usize::from(effort.lags.max(1)))
+                            .map(|&(_, t)| t)
+                            .collect();
+                        l.sort_unstable();
+                        l.dedup();
+                        l
+                    } else {
+                        vec![ol_period]
+                    };
+                    let keep = usize::from(effort.pitch_candidates.max(1));
+                    // (error, period, gain index), best first.
+                    let mut best: Vec<(f64, u16, u8)> = Vec::with_capacity(keep + 1);
+                    for t in lags {
+                        let y = taps_of(t);
+                        let c = [
+                            dot(&target, &y[0]),
+                            dot(&target, &y[1]),
+                            dot(&target, &y[2]),
+                        ];
+                        let mut r = [[0.0f64; 3]; 3];
+                        for i in 0..3 {
+                            for j in i..3 {
+                                r[i][j] = dot(&y[i], &y[j]);
+                                r[j][i] = r[i][j];
+                            }
+                        }
+                        for idx in 0..n_entries {
+                            let Some(taps) = pitch_gain::reconstruct(idx as u8, quant) else {
+                                continue;
+                            };
+                            let g = [
                                 f64::from(taps.taps[0]) / 64.0,
                                 f64::from(taps.taps[1]) / 64.0,
                                 f64::from(taps.taps[2]) / 64.0,
-                            ]
-                        })
-                        .unwrap_or([0.0; 3]);
-                    let mut pitch = [0.0f64; N];
-                    for n in 0..N {
-                        pitch[n] = g[0] * b[0][n] + g[1] * b[1][n] + g[2] * b[2][n];
+                            ];
+                            let mut e = 0.0;
+                            for i in 0..3 {
+                                e -= 2.0 * g[i] * c[i];
+                                for j in 0..3 {
+                                    e += g[i] * g[j] * r[i][j];
+                                }
+                            }
+                            if best.len() < keep || e < best[best.len() - 1].0 {
+                                let at = best.partition_point(|b| b.0 <= e);
+                                best.insert(at, (e, t, idx as u8));
+                                best.truncate(keep);
+                            }
+                        }
                     }
-                    cands.push((e, t, idx, pitch));
-                }
-                if cands.is_empty() {
-                    cands.push((0.0, ol_period, 0, [0.0; N]));
+                    for (e, t, idx) in best {
+                        let b = self.pitch_basis(t);
+                        let g = pitch_gain::reconstruct(idx, quant)
+                            .map(|taps| {
+                                [
+                                    f64::from(taps.taps[0]) / 64.0,
+                                    f64::from(taps.taps[1]) / 64.0,
+                                    f64::from(taps.taps[2]) / 64.0,
+                                ]
+                            })
+                            .unwrap_or([0.0; 3]);
+                        let mut pitch = [0.0f64; N];
+                        for n in 0..N {
+                            pitch[n] = g[0] * b[0][n] + g[1] * b[1][n] + g[2] * b[2][n];
+                        }
+                        cands.push((e, t, idx, pitch));
+                    }
+                    if cands.is_empty() {
+                        cands.push((0.0, ol_period, 0, [0.0; N]));
+                    }
                 }
             }
-        }
+            if sf == 0 {
+                *first_pitch = Some(cands.clone());
+            }
+            cands
+        };
 
         // --- Fixed codebook, once per carried adaptive candidate. ---
         let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
@@ -1342,12 +1390,14 @@ impl NarrowbandEncoder {
                 // a two-stage mode continues the same paths on the
                 // remainder at its weight. Returns (packed indices,
                 // decode-law shape).
-                let run = |g: f64| -> (u128, [f64; N]) {
+                fg.clear();
+                fg.resize(entries * N, 0.0);
+                energy.clear();
+                energy.resize(entries * (N + 1), 0.0);
+                let mut run = |g: f64| -> (u128, [f64; N]) {
                     // (metric, remainder, packed, shape)
                     let mut paths: Vec<(f64, [f64; N], u128, [f64; N])> =
                         vec![(0.0, t2, 0u128, [0.0f64; N])];
-                    let mut fg = vec![0.0f64; entries * N];
-                    let mut energy = vec![0.0f64; entries * (N + 1)];
                     for stage in 0..stages {
                         let (gs, ws) = if stage == 0 { (g, 1.0) } else { (g * w2, w2) };
                         for (dst, &f) in fg.iter_mut().zip(&tabs.fs) {
@@ -1486,24 +1536,32 @@ impl NarrowbandEncoder {
     /// Three adaptive-codebook basis vectors (offsets −T−1, −T, −T+1) for
     /// pitch period `t`.
     fn pitch_basis(&self, t: u16) -> [[f64; SUBFRAME_SAMPLES]; 3] {
-        let mut basis = [[0.0_f64; SUBFRAME_SAMPLES]; 3];
+        [
+            self.pitch_tap(t, TAP_PITCH_OFFSETS[0]),
+            self.pitch_tap(t, TAP_PITCH_OFFSETS[1]),
+            self.pitch_tap(t, TAP_PITCH_OFFSETS[2]),
+        ]
+    }
+
+    /// One adaptive-codebook basis vector: the excitation history read
+    /// at lag `t` shifted by the tap offset `off`.
+    fn pitch_tap(&self, t: u16, off: i32) -> [f64; SUBFRAME_SAMPLES] {
+        let mut row = [0.0_f64; SUBFRAME_SAMPLES];
         let hlen = self.exc_hist.len();
-        for (row, off) in basis.iter_mut().zip(TAP_PITCH_OFFSETS.iter()) {
-            for (n, slot) in row.iter_mut().enumerate() {
-                // The decoder folds a lag reaching into the sub-frame back
-                // by one period once, and reads nothing for a lag still
-                // inside it (T ≤ 19 tail; nb-pitch-short-lag.md).
-                let mut k = n as i32 - i32::from(t) + off;
-                if k >= 0 {
-                    k -= i32::from(t);
-                }
-                let idx = hlen as i32 + k;
-                if k < 0 && idx >= 0 {
-                    *slot = self.exc_hist[idx as usize];
-                }
+        for (n, slot) in row.iter_mut().enumerate() {
+            // The decoder folds a lag reaching into the sub-frame back
+            // by one period once, and reads nothing for a lag still
+            // inside it (T ≤ 19 tail; nb-pitch-short-lag.md).
+            let mut k = n as i32 - i32::from(t) + off;
+            if k >= 0 {
+                k -= i32::from(t);
+            }
+            let idx = hlen as i32 + k;
+            if k < 0 && idx >= 0 {
+                *slot = self.exc_hist[idx as usize];
             }
         }
-        basis
+        row
     }
 
     /// The reconstructed pitch contribution `p[n] = Σ (g_j/64)·basis_j[n]`.
@@ -1927,7 +1985,7 @@ mod tests {
                 1,
                 &plan,
                 &submode,
-                &mut [None, None, None, None],
+                &mut FrameScratch::default(),
             );
 
             // Closed-loop refinement.
