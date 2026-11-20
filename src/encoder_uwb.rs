@@ -182,6 +182,23 @@ impl UltraWidebandEncoder {
         }
     }
 
+    /// Set the search complexity, 1..=10 (see
+    /// [`crate::NarrowbandEncoder::set_complexity`]).
+    pub fn set_complexity(&mut self, complexity: u8) {
+        self.wideband.set_complexity(complexity);
+    }
+
+    /// The current search complexity.
+    pub fn complexity(&self) -> u8 {
+        self.wideband.complexity()
+    }
+
+    /// Noise-weighted search for the embedded narrowband layer (see
+    /// [`crate::NarrowbandEncoder::set_noise_weighting`]).
+    pub fn set_noise_weighting(&mut self, gammas: Option<(f64, f64)>) {
+        self.wideband.set_noise_weighting(gammas);
+    }
+
     /// Encode one 640-sample 32 kHz frame, returning the packed frame
     /// bytes (embedded wideband frame, then the second high-band frame)
     /// — the exact layout [`crate::UltraWidebandDecoder`] walks.

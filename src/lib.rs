@@ -179,7 +179,7 @@ pub use codebooks::{
 // ([`NarrowbandFrameBody::reconstructed_lsp_q10`] / [`WidebandHighBandBody::hb_lpc`])
 pub use codebooks::{HB_LPC_ORDER, NB_LSP_ORDER};
 pub use decoder::{ControlMessage, DecodeError, DecodedFrame, SpeexDecoder};
-pub use encoder_nb::{EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
+pub use encoder_nb::{DEFAULT_COMPLEXITY, EncodeError, NB_FRAME_SAMPLES, NarrowbandEncoder};
 pub use encoder_uwb::{
     UWB_HB_SUBFRAME_SAMPLES, UltraWidebandEncoder, UwbEncodeError, UwbFrameBodies,
 };

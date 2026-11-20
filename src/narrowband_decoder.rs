@@ -588,6 +588,23 @@ impl NarrowbandDecoder {
     pub fn synthesis_history(&self) -> &[f64; LPC_ORDER] {
         &self.synth
     }
+
+    /// The most recent `n` excitation samples (oldest first) — what the
+    /// next frame's adaptive codebook reads.
+    pub(crate) fn excitation_tail(&self, n: usize) -> &[f64] {
+        &self.exc[self.exc.len() - n..]
+    }
+
+    /// The synthesis state the next frame's first new excitation sample
+    /// meets: the current state run over the 40 pending samples through
+    /// the pending LPC (the one-sub-frame synthesis lag, enhancer off).
+    pub(crate) fn synthesis_state_ahead(&self) -> [f64; LPC_ORDER] {
+        let mut m = self.synth;
+        for &v in self.excitation_tail(SUBFRAME_SAMPLES) {
+            synth_step(&mut m, &self.pending_lpc, v);
+        }
+        m
+    }
 }
 
 /// One sample of the transposed-direct-form all-pole synthesis

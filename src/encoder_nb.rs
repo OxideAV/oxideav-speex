@@ -139,6 +139,155 @@ struct PitchPlan {
     forced_q: Option<u8>,
 }
 
+/// Per-sub-frame search tables that depend only on the sub-frame's
+/// decoder LPC, shared by every frame-gain candidate of a frame.
+#[derive(Debug, Clone)]
+struct SubframeTables {
+    /// Impulse response of the search-domain filter: the decoder's
+    /// synthesis `1/A(z)`, through the noise-weighting filter when one
+    /// is configured.
+    h: [f64; SUBFRAME_SAMPLES],
+    /// Every codebook row through `h`, in the decode-law scale:
+    /// `fs[idx·N + m] = scale · Σ_k h[m−k]·row[k]`.
+    fs: Vec<f64>,
+}
+
+impl SubframeTables {
+    fn build(
+        a: &[f64; LPC_ORDER],
+        weights: Option<&WeightingTaps>,
+        cb: Option<InnovationCodebook>,
+    ) -> Self {
+        const N: usize = SUBFRAME_SAMPLES;
+        let mut h = [0.0f64; N];
+        {
+            let mut m = [0.0f64; LPC_ORDER];
+            let (mut fir, mut iir) = ([0.0f64; LPC_ORDER], [0.0f64; LPC_ORDER]);
+            for (n, v) in h.iter_mut().enumerate() {
+                let y = crate::narrowband_decoder::synth_step(
+                    &mut m,
+                    a,
+                    if n == 0 { 1.0 } else { 0.0 },
+                );
+                *v = match weights {
+                    Some(w) => weighting_step(w, &mut fir, &mut iir, y),
+                    None => y,
+                };
+            }
+        }
+        let Some(cb) = cb else {
+            return Self { h, fs: Vec::new() };
+        };
+        let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        let entries = cb.entries() as usize;
+        let mut fs = vec![0.0f64; entries * N];
+        for (idx, out) in fs.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+            let Some(row) = sub_vector(cb, idx as u32) else {
+                continue;
+            };
+            for (m, slot) in out.iter_mut().enumerate() {
+                let mut f = 0.0;
+                for (k, &rv) in row.iter().enumerate() {
+                    if k <= m {
+                        f += h[m - k] * f64::from(rv);
+                    }
+                }
+                *slot = f * scale;
+            }
+        }
+        Self { h, fs }
+    }
+}
+
+/// The two tap sets of the noise-weighting filter
+/// `W(z) = A(z/γ1)/A(z/γ2)` (manual Eq. 8.1) for one sub-frame's LPC in
+/// the decoder's `A(z) = 1 + Σ a_k z^{−k}` convention.
+#[derive(Debug, Clone, Copy)]
+struct WeightingTaps {
+    num: [f64; LPC_ORDER],
+    den: [f64; LPC_ORDER],
+}
+
+fn weighting_taps(a: &[f64; LPC_ORDER], gamma1: f64, gamma2: f64) -> WeightingTaps {
+    let mut w = WeightingTaps {
+        num: [0.0; LPC_ORDER],
+        den: [0.0; LPC_ORDER],
+    };
+    let (mut p1, mut p2) = (gamma1, gamma2);
+    for k in 0..LPC_ORDER {
+        w.num[k] = a[k] * p1;
+        w.den[k] = a[k] * p2;
+        p1 *= gamma1;
+        p2 *= gamma2;
+    }
+    w
+}
+
+/// One sample through `W(z)`; `fir` / `iir` hold the previous inputs /
+/// outputs, most recent first.
+#[inline]
+fn weighting_step(
+    w: &WeightingTaps,
+    fir: &mut [f64; LPC_ORDER],
+    iir: &mut [f64; LPC_ORDER],
+    x: f64,
+) -> f64 {
+    let mut y = x;
+    for k in 0..LPC_ORDER {
+        y += w.num[k] * fir[k] - w.den[k] * iir[k];
+    }
+    fir.copy_within(0..LPC_ORDER - 1, 1);
+    fir[0] = x;
+    iir.copy_within(0..LPC_ORDER - 1, 1);
+    iir[0] = y;
+    y
+}
+
+/// How deep the encoder's searches go — the knobs behind the 1..=10
+/// complexity setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchEffort {
+    /// Frame-gain levels tried on each side of the open-loop estimate.
+    pub gain_span: u8,
+    /// Pitch lags kept from the open-loop pre-selection for the
+    /// exhaustive gain-VQ search.
+    pub lags: u8,
+    /// Adaptive-codebook candidates carried through the innovation
+    /// search (the pair with the lowest final error wins).
+    pub pitch_candidates: u8,
+    /// Partial paths kept by the innovation sub-vector search.
+    pub innovation_paths: u8,
+    /// Innovation passes: 2 re-searches at the quantised sub-frame gain.
+    pub gain_passes: u8,
+    /// Candidates kept per stage by the LSP quantiser.
+    pub lsp_paths: u8,
+}
+
+impl SearchEffort {
+    /// The search depths of complexity `c` (clamped to 1..=10).
+    pub(crate) fn for_complexity(c: u8) -> Self {
+        let c = c.clamp(1, 10);
+        Self {
+            gain_span: match c {
+                1..=2 => 0,
+                3..=7 => 1,
+                _ => 2,
+            },
+            lags: [2, 4, 6, 6, 8, 8, 10, 12, 14, 16][usize::from(c) - 1],
+            pitch_candidates: [1, 1, 1, 1, 1, 2, 2, 3, 3, 4][usize::from(c) - 1],
+            innovation_paths: [1, 1, 1, 2, 3, 4, 5, 6, 8, 10][usize::from(c) - 1],
+            gain_passes: if c == 1 { 1 } else { 2 },
+            lsp_paths: [1, 1, 1, 2, 3, 4, 5, 6, 8, 8][usize::from(c) - 1],
+        }
+    }
+}
+
+/// The complexity a fresh encoder searches at.
+pub const DEFAULT_COMPLEXITY: u8 = 3;
+
+/// The search tables of one frame's four sub-frames, built on first use.
+type FrameTables = [Option<SubframeTables>; SUBFRAMES];
+
 /// Stateful narrowband CELP encoder. One instance encodes a continuous
 /// stream of 160-sample frames, carrying LSP / excitation / analysis
 /// state across frames.
@@ -159,6 +308,10 @@ pub struct NarrowbandEncoder {
     last_api: [f64; 4],
     /// Excitation history (`f64`), most-recent last.
     exc_hist: Vec<f64>,
+    /// The input's own LPC-residual history, most-recent last — the
+    /// open-loop pitch reference of the vocoder mode, whose decoded
+    /// excitation is generated rather than matched.
+    res_hist: Vec<f64>,
     /// Analysis (prediction-error) filter input history, most-recent last.
     analysis_hist: [f64; LPC_ORDER],
     /// Decoder mirror: the decoder's transposed-form synthesis state
@@ -168,6 +321,22 @@ pub struct NarrowbandEncoder {
     /// Decoder mirror: the previous frame's decoded LSPs on the decoder's
     /// own float path (`None` = interpolation restart).
     prev_lsp_dec: Option<[f64; LPC_ORDER]>,
+    /// The decoder itself, fed every encoded frame: the source of truth
+    /// for the state after frames whose excitation the decoder generates
+    /// (vocoder and null frames).
+    mirror: crate::narrowband_decoder::NarrowbandDecoder,
+    /// Search depths (the complexity setting).
+    effort: SearchEffort,
+    /// The complexity setting `effort` was derived from.
+    complexity: u8,
+    /// Noise-weighting factors `(γ1, γ2)` of the search domain (the
+    /// manual's by default); `None` searches on the plain waveform
+    /// error.
+    weighting: Option<(f64, f64)>,
+    /// Noise-weighting filter memory over the coding error (inputs /
+    /// outputs, most recent first).
+    w_fir: [f64; LPC_ORDER],
+    w_iir: [f64; LPC_ORDER],
 }
 
 impl Default for NarrowbandEncoder {
@@ -185,10 +354,59 @@ impl NarrowbandEncoder {
             last_inn: [0.0; NB_FRAME_SAMPLES],
             last_api: [1.0; 4],
             exc_hist: vec![0.0; EXC_HIST_LEN],
+            res_hist: vec![0.0; EXC_HIST_LEN],
             analysis_hist: [0.0; LPC_ORDER],
             synth_mem: [0.0; LPC_ORDER],
             prev_lsp_dec: None,
+            mirror: {
+                let mut m = crate::narrowband_decoder::NarrowbandDecoder::new();
+                m.set_enhancer(false);
+                m
+            },
+            effort: SearchEffort::for_complexity(DEFAULT_COMPLEXITY),
+            complexity: DEFAULT_COMPLEXITY,
+            weighting: Some((
+                crate::weighting::WEIGHT_GAMMA1,
+                crate::weighting::WEIGHT_GAMMA2,
+            )),
+            w_fir: [0.0; LPC_ORDER],
+            w_iir: [0.0; LPC_ORDER],
         }
+    }
+
+    /// Set the search complexity, 1..=10 (out-of-range values clamp).
+    /// Higher settings search deeper — more pitch lags, several
+    /// innovation paths, joint pitch / innovation candidates, a wider
+    /// frame-gain neighbourhood — for a lower coding error at a higher
+    /// CPU cost; the stream format is unaffected.
+    /// [`DEFAULT_COMPLEXITY`] is the default.
+    pub fn set_complexity(&mut self, complexity: u8) {
+        self.complexity = complexity.clamp(1, 10);
+        self.effort = SearchEffort::for_complexity(self.complexity);
+    }
+
+    /// The current search complexity.
+    pub fn complexity(&self) -> u8 {
+        self.complexity
+    }
+
+    /// Choose the search domain: `Some((γ1, γ2))` searches through the
+    /// noise-weighting filter `W(z) = A(z/γ1)/A(z/γ2)` of manual §8.5
+    /// (Eq. 8.1), which pushes coding noise under the formants; `None`
+    /// minimises the plain waveform error. The default is the manual's
+    /// pair, [`crate::WEIGHT_GAMMA1`] / [`crate::WEIGHT_GAMMA2`]
+    /// (0.9 / 0.6) — on speech it measures better than the plain search
+    /// on waveform SNR as well as on weighted SNR (README, "Encoder
+    /// quality").
+    pub fn set_noise_weighting(&mut self, gammas: Option<(f64, f64)>) {
+        self.weighting = gammas.map(|(g1, g2)| (g1.clamp(0.0, 1.0), g2.clamp(0.0, 1.0)));
+        self.w_fir = [0.0; LPC_ORDER];
+        self.w_iir = [0.0; LPC_ORDER];
+    }
+
+    /// The noise-weighting factors in use, if any.
+    pub fn noise_weighting(&self) -> Option<(f64, f64)> {
+        self.weighting
     }
 
     /// Encode one 160-sample narrowband frame in the given mode, returning
@@ -308,7 +526,8 @@ impl NarrowbandEncoder {
         // the real per-sub-frame residual pass below stays continuous),
         // then refined closed-loop over the estimate's neighbourhood
         // (round r389 — see `refine_frame_gain`).
-        let frame_gain_target = self.frame_gain_estimate(&input, &lpc_sets, submode);
+        let scratch = self.scratch_frame_residual(&input, &lpc_sets);
+        let frame_gain_target = self.frame_gain_estimate(&scratch, submode);
         // r440: the exact staged float-build quantiser law
         // (qe = floor(0.5 + 3.5*ln g), provenance/02) replaces the
         // Q15 threshold walk for the first estimate; the closed-loop
@@ -328,8 +547,9 @@ impl NarrowbandEncoder {
 
         // Frame-level OL pitch fields (modes 1 / 2 / 8), estimated on
         // the whole-frame scratch residual before the real pass.
-        let (ol_pitch_index, ol_pitch_gain_index, plan) =
-            self.plan_ol_pitch(&input, &lpc_sets, submode);
+        let (ol_pitch_index, ol_pitch_gain_index, plan) = self.plan_ol_pitch(&scratch, submode);
+        self.res_hist.drain(..NB_FRAME_SAMPLES);
+        self.res_hist.extend_from_slice(&scratch);
 
         let (frame_gain_idx, subframes, _err) = self.refine_frame_gain(
             &input,
@@ -353,13 +573,34 @@ impl NarrowbandEncoder {
             self.prev_lsp_dec = None;
         }
 
-        Ok(NarrowbandFrameBody {
+        let body = NarrowbandFrameBody {
             lsp_index,
             ol_pitch_index,
             ol_pitch_gain_index,
             ol_exc_gain_index: frame_gain_field(frame_gain_idx),
             subframes,
-        })
+        };
+        // Keep the decoder mirror in step. A frame the searches did not
+        // synthesise themselves (the vocoder's generated excitation, a
+        // null frame's comfort noise) hands its decoded state back, so
+        // the next frame's adaptive codebook and zero-input response are
+        // the decoder's.
+        if self.mirror.decode_frame(&body, submode).is_ok() && abs_lpcs.is_none() {
+            self.exc_hist.clear();
+            self.exc_hist
+                .extend_from_slice(self.mirror.excitation_tail(EXC_HIST_LEN));
+            self.synth_mem = self.mirror.synthesis_state_ahead();
+            for (d, &s) in self
+                .last_inn
+                .iter_mut()
+                .zip(self.mirror.last_frame_innovation())
+            {
+                *d = f64::from(s);
+            }
+            self.w_fir = [0.0; LPC_ORDER];
+            self.w_iir = [0.0; LPC_ORDER];
+        }
+        Ok(body)
     }
 
     /// Estimate the frame-level open-loop pitch fields (Table 9.1 `OL
@@ -376,17 +617,23 @@ impl NarrowbandEncoder {
     /// `15 · coef` on the 4-bit grid.
     fn plan_ol_pitch(
         &self,
-        input: &[f64],
-        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+        residual: &[f64; NB_FRAME_SAMPLES],
         submode: &NarrowbandSubmode,
     ) -> (u8, u8, PitchPlan) {
         if submode.ol_pitch_bits == 0 {
             return (0, 0, PitchPlan::default());
         }
-        let residual = self.scratch_frame_residual(input, lpc_sets);
-        let ol = estimate_open_loop_pitch(&self.exc_hist, &residual);
+        // The vocoder's excitation is generated by the decoder, so its
+        // pitch is measured on the input's own residual; the other
+        // modes predict from the decoded excitation.
+        let hist = if submode.mode_id == 1 {
+            &self.res_hist
+        } else {
+            &self.exc_hist
+        };
+        let ol = estimate_open_loop_pitch(hist, residual);
         let (gain_quant, forced_taps) = if submode.ol_pitch_gain_bits > 0 {
-            let q = forced_gain_quant(&self.exc_hist, &residual, ol.period);
+            let q = forced_gain_quant(hist, residual, ol.period);
             (q, Some(crate::forced_pitch_gain::forced_pitch_gain_taps(q)))
         } else {
             (0, None)
@@ -419,6 +666,7 @@ impl NarrowbandEncoder {
         stages: u8,
         plan: &PitchPlan,
         submode: &NarrowbandSubmode,
+        tables: &mut FrameTables,
     ) -> ([NarrowbandSubFrameIndices; SUBFRAMES], f64) {
         let pitch_quant = submode.pitch_gain;
         let has_fine_pitch = submode.fine_pitch_bits > 0;
@@ -438,8 +686,17 @@ impl NarrowbandEncoder {
             // excitation-domain match otherwise.
             if let Some(dl) = dec_lpcs {
                 let a = &dl[sf];
-                let (fields, exc, sf_err) =
-                    self.abs_subframe(block, a, g_frame, codebook, count, stages, plan, submode);
+                let (fields, exc, sf_err) = self.abs_subframe(
+                    block,
+                    a,
+                    g_frame,
+                    codebook,
+                    count,
+                    stages,
+                    plan,
+                    submode,
+                    &mut tables[sf],
+                );
                 let pitch = fields.3;
                 let base = sf * SUBFRAME_SAMPLES;
                 for n in 0..SUBFRAME_SAMPLES {
@@ -576,26 +833,40 @@ impl NarrowbandEncoder {
         // Candidate set: the estimate plus its immediate quantiser
         // neighbours (clamped to the 5-bit grid). Silence (mode 0 /
         // zero residual) has no meaningful neighbourhood.
-        let mut candidates: Vec<Idx> = Vec::with_capacity(3);
+        let span = i32::from(if dec_lpcs.is_some() {
+            self.effort.gain_span
+        } else {
+            1
+        });
+        let mut candidates: Vec<Idx> = Vec::with_capacity(5);
         match estimate {
             Idx::Silence => candidates.push(Idx::Silence),
             Idx::Indexed(i) => {
-                if i > 0 {
-                    candidates.push(Idx::Indexed(i - 1));
-                }
-                candidates.push(Idx::Indexed(i));
-                if i < 31 {
-                    candidates.push(Idx::Indexed(i + 1));
+                for d in -span..=span {
+                    let c = i32::from(i) + d;
+                    if (0..=31).contains(&c) {
+                        candidates.push(Idx::Indexed(c as u8));
+                    }
                 }
             }
         }
 
         let mut best: Option<(f64, Idx, [NarrowbandSubFrameIndices; SUBFRAMES], Self)> = None;
+        let mut tables: FrameTables = [None, None, None, None];
         for cand in candidates {
             let g = f64::from(reconstruct_frame_ol_exc_gain(cand));
             let mut trial = self.clone();
             let (subframes, err) = trial.encode_subframes(
-                input, lpc_sets, dec_lpcs, g, codebook, count, stages, plan, submode,
+                input,
+                lpc_sets,
+                dec_lpcs,
+                g,
+                codebook,
+                count,
+                stages,
+                plan,
+                submode,
+                &mut tables,
             );
             if best.as_ref().is_none_or(|(e, _, _, _)| err < *e) {
                 best = Some((err, cand, subframes, trial));
@@ -659,11 +930,9 @@ impl NarrowbandEncoder {
     /// perturbed).
     fn frame_gain_estimate(
         &self,
-        input: &[f64],
-        lpc_sets: &[[f64; LPC_ORDER]; SUBFRAMES],
+        residual: &[f64; NB_FRAME_SAMPLES],
         submode: &NarrowbandSubmode,
     ) -> f64 {
-        let residual = self.scratch_frame_residual(input, lpc_sets);
         let energy: f64 = residual.iter().map(|&r| r * r).sum();
         let rms = (energy / NB_FRAME_SAMPLES as f64).sqrt();
         // The decode law scales codebook rows by INNOVATION_CODEBOOK_SCALE
@@ -811,12 +1080,13 @@ impl NarrowbandEncoder {
     }
 
     /// One sub-frame by **analysis-by-synthesis** against the decoder's
-    /// own synthesis (r483): the target is the input minus the decoder
-    /// mirror's zero-input response, every candidate excitation is
-    /// scored through the sub-frame's impulse response, and the chosen
-    /// excitation advances the mirror. Returns
-    /// `((period, pitch-gain index, (gain field, packed VQ), pitch
-    /// contribution), excitation, synthesis-domain squared error)`.
+    /// own synthesis: the target is the input minus the decoder mirror's
+    /// zero-input response (through the noise-weighting filter when one
+    /// is configured), every candidate excitation is scored through the
+    /// sub-frame's impulse response, and the chosen excitation advances
+    /// the mirror. Returns `((period, pitch-gain index, (gain field,
+    /// packed VQ), pitch contribution), excitation, search-domain
+    /// squared error)`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn abs_subframe(
         &mut self,
@@ -828,6 +1098,7 @@ impl NarrowbandEncoder {
         stages: u8,
         plan: &PitchPlan,
         submode: &NarrowbandSubmode,
+        tables: &mut Option<SubframeTables>,
     ) -> (
         (u16, u8, (u8, u128), [f64; SUBFRAME_SAMPLES]),
         [f64; SUBFRAME_SAMPLES],
@@ -835,19 +1106,24 @@ impl NarrowbandEncoder {
     ) {
         use crate::narrowband_decoder::synth_step;
         const N: usize = SUBFRAME_SAMPLES;
-        // Impulse response of 1/A(z) and the zero-input response.
-        let mut h = [0.0f64; N];
-        {
-            let mut m = [0.0f64; LPC_ORDER];
-            for (n, v) in h.iter_mut().enumerate() {
-                *v = synth_step(&mut m, a, if n == 0 { 1.0 } else { 0.0 });
-            }
-        }
+        let effort = self.effort;
+        let weights = self.weighting.map(|(g1, g2)| weighting_taps(a, g1, g2));
+        let tabs =
+            tables.get_or_insert_with(|| SubframeTables::build(a, weights.as_ref(), codebook));
+        let h = tabs.h;
+        // Target: the input less the mirror's zero-input response, in the
+        // search domain.
         let mut target = [0.0f64; N];
         {
             let mut m = self.synth_mem;
             for (n, t) in target.iter_mut().enumerate() {
                 *t = block[n] - synth_step(&mut m, a, 0.0);
+            }
+            if let Some(w) = &weights {
+                let (mut fir, mut iir) = (self.w_fir, self.w_iir);
+                for t in target.iter_mut() {
+                    *t = weighting_step(w, &mut fir, &mut iir, *t);
+                }
             }
         }
         let filt = |x: &[f64; N]| -> [f64; N] {
@@ -863,19 +1139,20 @@ impl NarrowbandEncoder {
         };
         let dot = |x: &[f64; N], y: &[f64; N]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f64>();
 
-        // --- Adaptive codebook. ---
+        // --- Adaptive codebook: the candidates to carry forward. ---
         let has_fine = submode.fine_pitch_bits > 0;
-        let mut period = plan.ol_period.unwrap_or(PITCH_PERIOD_MIN);
-        let mut pg_idx = 0u8;
-        let mut pitch = [0.0f64; N];
+        let ol_period = plan.ol_period.unwrap_or(PITCH_PERIOD_MIN);
+        // (pitch-only error, period, gain index, contribution)
+        let mut cands: Vec<(f64, u16, u8, [f64; N])> = Vec::new();
         match submode.pitch_gain {
             PitchGainQuant::None => {
+                let mut pitch = [0.0f64; N];
                 if let Some(q) = plan.forced_q {
                     // The decoder's forced path: a centre-tap recursion
                     // over the pitch partial at the float coefficient.
                     let coef = f64::from(crate::forced_pitch_gain::forced_pitch_coef(q));
                     let hlen = self.exc_hist.len() as i32;
-                    let t = i32::from(period);
+                    let t = i32::from(ol_period);
                     for n in 0..N as i32 {
                         let k = n - t;
                         pitch[n as usize] = coef
@@ -888,6 +1165,7 @@ impl NarrowbandEncoder {
                             };
                     }
                 }
+                cands.push((0.0, ol_period, 0, pitch));
             }
             quant => {
                 let n_entries: u16 = if quant == PitchGainQuant::Vq7Bit {
@@ -895,32 +1173,79 @@ impl NarrowbandEncoder {
                 } else {
                     32
                 };
+                // Centre-tap synthesis responses for every lag whose three
+                // taps read the history without folding (T ≥ 41): the
+                // response at lag T+1 is the response at T delayed by one
+                // sample plus the newly exposed history sample's.
+                const FIRST: usize = SUBFRAME_SAMPLES;
+                const LAST: usize = PITCH_PERIOD_MAX as usize + 1;
+                let mut centre: Vec<[f64; N]> = Vec::new();
+                if has_fine {
+                    let hlen = self.exc_hist.len();
+                    let mut y = filt(&self.pitch_basis(FIRST as u16)[1]);
+                    centre.reserve(LAST - FIRST + 1);
+                    centre.push(y);
+                    for t in FIRST..LAST {
+                        let x = self.exc_hist[hlen - t - 1];
+                        for n in (1..N).rev() {
+                            y[n] = y[n - 1] + h[n] * x;
+                        }
+                        y[0] = h[0] * x;
+                        centre.push(y);
+                    }
+                }
+                let taps_of = |t: u16| -> [[f64; N]; 3] {
+                    let ti = usize::from(t);
+                    if has_fine && ti > FIRST && ti < LAST {
+                        // Tap j reads the history at lag T − offset_j.
+                        [
+                            centre[ti + 1 - FIRST],
+                            centre[ti - FIRST],
+                            centre[ti - 1 - FIRST],
+                        ]
+                    } else {
+                        let b = self.pitch_basis(t);
+                        [filt(&b[0]), filt(&b[1]), filt(&b[2])]
+                    }
+                };
                 let lags: Vec<u16> = if has_fine {
                     // Pre-select by the centre tap's normalised
                     // synthesis-domain correlation, then search the
                     // gain VQ exhaustively on the best few.
                     let mut scored: Vec<(f64, u16)> = (PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX)
                         .map(|t| {
-                            let y = filt(&self.pitch_basis(t)[1]);
-                            let c = dot(&target, &y);
-                            let e = dot(&y, &y).max(1e-9);
+                            let ti = usize::from(t);
+                            let direct;
+                            let y = if ti >= FIRST {
+                                &centre[ti - FIRST]
+                            } else {
+                                direct = filt(&self.pitch_basis(t)[1]);
+                                &direct
+                            };
+                            let c = dot(&target, y);
+                            let e = dot(y, y).max(1e-9);
                             (if c > 0.0 { c * c / e } else { 0.0 }, t)
                         })
                         .collect();
                     scored.sort_by(|x, y| {
                         y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal)
                     });
-                    let mut l: Vec<u16> = scored.iter().take(6).map(|&(_, t)| t).collect();
+                    let mut l: Vec<u16> = scored
+                        .iter()
+                        .take(usize::from(effort.lags.max(1)))
+                        .map(|&(_, t)| t)
+                        .collect();
                     l.sort_unstable();
                     l.dedup();
                     l
                 } else {
-                    vec![period]
+                    vec![ol_period]
                 };
-                let mut best = f64::INFINITY;
+                let keep = usize::from(effort.pitch_candidates.max(1));
+                // (error, period, gain index), best first.
+                let mut best: Vec<(f64, u16, u8)> = Vec::with_capacity(keep + 1);
                 for t in lags {
-                    let b = self.pitch_basis(t);
-                    let y = [filt(&b[0]), filt(&b[1]), filt(&b[2])];
+                    let y = taps_of(t);
                     let c = [
                         dot(&target, &y[0]),
                         dot(&target, &y[1]),
@@ -949,131 +1274,184 @@ impl NarrowbandEncoder {
                                 e += g[i] * g[j] * r[i][j];
                             }
                         }
-                        if e < best {
-                            best = e;
-                            period = t;
-                            pg_idx = idx as u8;
-                            for n in 0..N {
-                                pitch[n] = g[0] * b[0][n] + g[1] * b[1][n] + g[2] * b[2][n];
-                            }
+                        if best.len() < keep || e < best[best.len() - 1].0 {
+                            let at = best.partition_point(|b| b.0 <= e);
+                            best.insert(at, (e, t, idx as u8));
+                            best.truncate(keep);
                         }
                     }
                 }
+                for (e, t, idx) in best {
+                    let b = self.pitch_basis(t);
+                    let g = pitch_gain::reconstruct(idx, quant)
+                        .map(|taps| {
+                            [
+                                f64::from(taps.taps[0]) / 64.0,
+                                f64::from(taps.taps[1]) / 64.0,
+                                f64::from(taps.taps[2]) / 64.0,
+                            ]
+                        })
+                        .unwrap_or([0.0; 3]);
+                    let mut pitch = [0.0f64; N];
+                    for n in 0..N {
+                        pitch[n] = g[0] * b[0][n] + g[1] * b[1][n] + g[2] * b[2][n];
+                    }
+                    cands.push((e, t, idx, pitch));
+                }
+                if cands.is_empty() {
+                    cands.push((0.0, ol_period, 0, [0.0; N]));
+                }
             }
-        }
-        let yp = filt(&pitch);
-        let mut t2 = [0.0f64; N];
-        for n in 0..N {
-            t2[n] = target[n] - yp[n];
         }
 
-        // --- Fixed codebook. ---
-        let mut fields = (0u8, 0u128);
-        let mut innov = [0.0f64; N];
-        if let Some(cb) = codebook {
-            let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
-            let sv_len = cb.sub_vector_len();
-            let bits = u32::from(cb.index_bits());
-            let w2 = f64::from(crate::innovation::NB_MODE7_STAGE2_WEIGHT);
-            // Greedy sub-vector search of one stage at effective gain `g`
-            // against `t`; returns (packed indices, shape) and leaves the
-            // remainder in `t`.
-            let search_stage = |t: &mut [f64; N], g: f64| -> (u128, [f64; N]) {
-                let mut packed = 0u128;
-                let mut shape = [0.0f64; N];
-                for sv in 0..usize::from(count) {
-                    let o = sv * sv_len;
-                    let (mut best_i, mut best_e) = (0u32, f64::INFINITY);
-                    for idx in 0..cb.entries() {
-                        let Some(row) = sub_vector(cb, idx) else {
-                            continue;
-                        };
-                        let (mut c, mut e) = (0.0f64, 0.0f64);
-                        for n in o..N {
-                            let mut f = 0.0;
-                            for (k, &rv) in row.iter().enumerate() {
-                                if o + k <= n {
-                                    f += h[n - o - k] * f64::from(rv);
+        // --- Fixed codebook, once per carried adaptive candidate. ---
+        let scale = f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        let w2 = f64::from(crate::innovation::NB_MODE7_STAGE2_WEIGHT);
+        let survivors = usize::from(effort.innovation_paths.max(1));
+        let mut chosen: Option<(f64, u16, u8, (u8, u128), [f64; N], [f64; N])> = None;
+        for (_, period, pg_idx, pitch) in cands {
+            let yp = filt(&pitch);
+            let mut t2 = [0.0f64; N];
+            for n in 0..N {
+                t2[n] = target[n] - yp[n];
+            }
+            let mut fields = (0u8, 0u128);
+            let mut innov = [0.0f64; N];
+            let mut resid = dot(&t2, &t2);
+            if let Some(cb) = codebook {
+                let sv_len = cb.sub_vector_len();
+                let bits = u32::from(cb.index_bits());
+                let entries = cb.entries() as usize;
+                // One pass of the sub-vector search at frame-level gain
+                // `g`: `survivors` best partial paths are kept after
+                // every sub-vector (one = the greedy search); stage 2 of
+                // a two-stage mode continues the same paths on the
+                // remainder at its weight. Returns (packed indices,
+                // decode-law shape).
+                let run = |g: f64| -> (u128, [f64; N]) {
+                    // (metric, remainder, packed, shape)
+                    let mut paths: Vec<(f64, [f64; N], u128, [f64; N])> =
+                        vec![(0.0, t2, 0u128, [0.0f64; N])];
+                    let mut fg = vec![0.0f64; entries * N];
+                    let mut energy = vec![0.0f64; entries * (N + 1)];
+                    for stage in 0..stages {
+                        let (gs, ws) = if stage == 0 { (g, 1.0) } else { (g * w2, w2) };
+                        for (dst, &f) in fg.iter_mut().zip(&tabs.fs) {
+                            *dst = f * gs;
+                        }
+                        for (row, pe) in fg
+                            .as_chunks::<N>()
+                            .0
+                            .iter()
+                            .zip(energy.as_chunks_mut::<{ N + 1 }>().0.iter_mut())
+                        {
+                            let mut e = 0.0f64;
+                            for (m, &f) in row.iter().enumerate() {
+                                e += f * f;
+                                pe[m + 1] = e;
+                            }
+                        }
+                        for sv in 0..usize::from(count) {
+                            let o = sv * sv_len;
+                            // (metric, parent path, index), best first.
+                            let mut next: Vec<(f64, usize, u32)> =
+                                Vec::with_capacity(survivors + 1);
+                            for (pi, path) in paths.iter().enumerate() {
+                                for (idx, (row, pe)) in fg
+                                    .as_chunks::<N>()
+                                    .0
+                                    .iter()
+                                    .zip(energy.as_chunks::<{ N + 1 }>().0.iter())
+                                    .enumerate()
+                                {
+                                    let mut c = 0.0f64;
+                                    for (&tv, &f) in path.1[o..].iter().zip(row) {
+                                        c += tv * f;
+                                    }
+                                    let m = path.0 + pe[N - o] - 2.0 * c;
+                                    if next.len() < survivors || m < next[next.len() - 1].0 {
+                                        let at = next.partition_point(|b| b.0 <= m);
+                                        next.insert(at, (m, pi, idx as u32));
+                                        next.truncate(survivors);
+                                    }
                                 }
                             }
-                            let f = f * scale * g;
-                            c += t[n] * f;
-                            e += f * f;
-                        }
-                        let err = e - 2.0 * c;
-                        if err < best_e {
-                            best_e = err;
-                            best_i = idx;
-                        }
-                    }
-                    if let Some(row) = sub_vector(cb, best_i) {
-                        let mut x = [0.0f64; N];
-                        for (k, &rv) in row.iter().enumerate() {
-                            x[o + k] = f64::from(rv) * scale;
-                            shape[o + k] = x[o + k];
-                        }
-                        let y = filt(&x);
-                        for n in 0..N {
-                            t[n] -= g * y[n];
+                            paths = next
+                                .into_iter()
+                                .map(|(m, pi, idx)| {
+                                    let (_, mut t, packed, mut shape) = paths[pi];
+                                    let row = &fg[idx as usize * N..(idx as usize + 1) * N];
+                                    for (tv, &f) in t[o..].iter_mut().zip(row) {
+                                        *tv -= f;
+                                    }
+                                    if let Some(raw) = sub_vector(cb, idx) {
+                                        for (k, &rv) in raw.iter().enumerate() {
+                                            shape[o + k] += ws * f64::from(rv) * scale;
+                                        }
+                                    }
+                                    (m, t, (packed << bits) | u128::from(idx), shape)
+                                })
+                                .collect();
                         }
                     }
-                    packed = (packed << bits) | u128::from(best_i);
-                }
-                (packed, shape)
-            };
-            let run = |g: f64| -> (u128, [f64; N]) {
-                let mut t = t2;
-                let (p1, s1) = search_stage(&mut t, g);
-                if stages == 2 {
-                    let (p2, s2) = search_stage(&mut t, g * w2);
-                    let stage_bits = bits * u32::from(count);
-                    let mut s = s1;
-                    for n in 0..N {
-                        s[n] += w2 * s2[n];
-                    }
-                    ((p1 << stage_bits) | p2, s)
-                } else {
-                    (p1, s1)
-                }
-            };
-            // The gain correction the shape wants (synthesis-domain least
-            // squares), quantised on the field's grid.
-            let quantise = |shape: &[f64; N]| {
-                let y = filt(shape);
-                let alpha = (dot(&t2, &y) / dot(&y, &y).max(1e-9)).max(0.0);
-                let target = if g_frame > 0.0 {
-                    alpha / g_frame
-                } else {
-                    alpha
+                    let (_, _, packed, shape) = paths[0];
+                    (packed, shape)
                 };
-                quantise_subframe_gain_correction(target as f32, submode.innovation_gain_bits)
-                    .unwrap_or(crate::fixed_codebook_gain::SubFrameInnovationGainCorrection::Absent)
-            };
-            // Pass 1 at the frame gain, pass 2 at the quantised gain the
-            // first shape asked for; keep the better of the two.
-            let (p1, s1) = run(g_frame.max(1e-6));
-            let c1 = quantise(&s1);
-            let g1 = g_frame * f64::from(reconstruct_subframe_gain_correction(c1));
-            let (p2, s2) = run(g1.max(1e-6));
-            let c2 = quantise(&s2);
-            let g2 = g_frame * f64::from(reconstruct_subframe_gain_correction(c2));
-            let score = |s: &[f64; N], g: f64| {
-                let y = filt(s);
-                t2.iter()
-                    .zip(&y)
-                    .map(|(t, v)| (t - g * v).powi(2))
-                    .sum::<f64>()
-            };
-            let (packed, shape, corr, g) = if score(&s2, g2) <= score(&s1, g1) {
-                (p2, s2, c2, g2)
-            } else {
-                (p1, s1, c1, g1)
-            };
-            fields = (correction_field(corr), packed);
-            for n in 0..N {
-                innov[n] = g * shape[n];
+                // The gain correction the shape wants (search-domain
+                // least squares), quantised on the field's grid.
+                let quantise = |shape: &[f64; N]| {
+                    let y = filt(shape);
+                    let alpha = (dot(&t2, &y) / dot(&y, &y).max(1e-9)).max(0.0);
+                    let target = if g_frame > 0.0 {
+                        alpha / g_frame
+                    } else {
+                        alpha
+                    };
+                    quantise_subframe_gain_correction(target as f32, submode.innovation_gain_bits)
+                        .unwrap_or(
+                            crate::fixed_codebook_gain::SubFrameInnovationGainCorrection::Absent,
+                        )
+                };
+                let score = |s: &[f64; N], g: f64| {
+                    let y = filt(s);
+                    t2.iter()
+                        .zip(&y)
+                        .map(|(t, v)| (t - g * v).powi(2))
+                        .sum::<f64>()
+                };
+                // Pass 1 at the frame gain, pass 2 at the quantised gain
+                // the first shape asked for; keep the better of the two.
+                // (A second pass at an unchanged gain repeats the first.)
+                let (p1, s1) = run(g_frame.max(1e-6));
+                let c1 = quantise(&s1);
+                let g1 = g_frame * f64::from(reconstruct_subframe_gain_correction(c1));
+                let e1 = score(&s1, g1);
+                let (packed, shape, corr, g, e) =
+                    if effort.gain_passes < 2 || g1.max(1e-6) == g_frame.max(1e-6) {
+                        (p1, s1, c1, g1, e1)
+                    } else {
+                        let (p2, s2) = run(g1.max(1e-6));
+                        let c2 = quantise(&s2);
+                        let g2 = g_frame * f64::from(reconstruct_subframe_gain_correction(c2));
+                        let e2 = score(&s2, g2);
+                        if e2 <= e1 {
+                            (p2, s2, c2, g2, e2)
+                        } else {
+                            (p1, s1, c1, g1, e1)
+                        }
+                    };
+                fields = (correction_field(corr), packed);
+                for n in 0..N {
+                    innov[n] = g * shape[n];
+                }
+                resid = e;
+            }
+            if chosen.as_ref().is_none_or(|c| resid < c.0) {
+                chosen = Some((resid, period, pg_idx, fields, pitch, innov));
             }
         }
+        let (_, period, pg_idx, fields, pitch, innov) =
+            chosen.expect("at least one adaptive candidate");
 
         // Reconstruct, advance the mirror, score.
         let mut exc = [0.0f64; N];
@@ -1081,7 +1459,12 @@ impl NarrowbandEncoder {
         for n in 0..N {
             exc[n] = pitch[n] + innov[n];
             let y = synth_step(&mut self.synth_mem, a, exc[n]);
-            err += (block[n] - y).powi(2);
+            let d = block[n] - y;
+            let d = match &weights {
+                Some(w) => weighting_step(w, &mut self.w_fir, &mut self.w_iir, d),
+                None => d,
+            };
+            err += d * d;
         }
         ((period, pg_idx, fields, pitch), exc, err)
     }
@@ -1485,7 +1868,9 @@ mod tests {
             let sub_lsp = NbSubFrameLsp::new(&prev, &active);
             let lpc_sets = subframe_lpc_set_with_base(&sub_lsp);
             let est = quantise_frame_ol_exc_gain_exact(
-                probe.frame_gain_estimate(&input, &lpc_sets, &submode) as f32,
+                probe
+                    .frame_gain_estimate(&probe.scratch_frame_residual(&input, &lpc_sets), &submode)
+                    as f32,
             );
 
             // Single-pass baseline at the estimate's reconstructed gain.
@@ -1493,7 +1878,16 @@ mod tests {
             let plan = PitchPlan::default();
             let mut base = probe.clone();
             let (_, err_base) = base.encode_subframes(
-                &input, &lpc_sets, None, g_est, codebook, count, 1, &plan, &submode,
+                &input,
+                &lpc_sets,
+                None,
+                g_est,
+                codebook,
+                count,
+                1,
+                &plan,
+                &submode,
+                &mut [None, None, None, None],
             );
 
             // Closed-loop refinement.
@@ -1557,5 +1951,128 @@ mod tests {
             period, 40,
             "pitch search did not recover the planted period"
         );
+    }
+
+    /// A second of frames whose pitch and level move, so searches have
+    /// something to find.
+    fn moving_frames(n: usize) -> Vec<[i16; NB_FRAME_SAMPLES]> {
+        (0..n)
+            .map(|k| voiced_frame(48 + 3 * (k % 7), 2500.0 + 600.0 * (k % 5) as f64))
+            .collect()
+    }
+
+    /// SNR (dB) of encode → decode against the input, through the
+    /// packet decoder without its output filters' help: the decode
+    /// trails the input by one sub-frame.
+    fn round_trip_snr(enc: &mut NarrowbandEncoder, mode: u8) -> f64 {
+        let frames = moving_frames(24);
+        let submode = NarrowbandSubmode::for_id(mode).unwrap();
+        let mut dec = crate::narrowband_decoder::NarrowbandDecoder::new();
+        dec.set_enhancer(false);
+        dec.set_output_highpass(false);
+        let (mut x, mut y) = (Vec::new(), Vec::new());
+        for f in &frames {
+            let body = enc.encode_frame_body(f, mode).unwrap();
+            x.extend(f.iter().map(|&v| f64::from(v)));
+            y.extend(dec.decode_frame(&body, &submode).unwrap());
+        }
+        let (mut s, mut e) = (0.0f64, 0.0f64);
+        for i in NB_FRAME_SAMPLES..x.len() - SUBFRAME_SAMPLES {
+            s += x[i] * x[i];
+            e += (x[i] - y[i + SUBFRAME_SAMPLES]).powi(2);
+        }
+        10.0 * (s / e).log10()
+    }
+
+    #[test]
+    fn complexity_deepens_the_search() {
+        assert_eq!(NarrowbandEncoder::new().complexity(), DEFAULT_COMPLEXITY);
+        let mut snr = Vec::new();
+        for c in [1u8, DEFAULT_COMPLEXITY, 8] {
+            let mut enc = NarrowbandEncoder::new();
+            enc.set_complexity(c);
+            assert_eq!(enc.complexity(), c);
+            snr.push(round_trip_snr(&mut enc, 5));
+        }
+        assert!(
+            snr[0] < snr[1] && snr[1] < snr[2],
+            "SNR by complexity 1 / default / 8: {snr:?}"
+        );
+        // The effort ladder never shrinks a search with the setting.
+        for c in 2..=10u8 {
+            let (lo, hi) = (
+                SearchEffort::for_complexity(c - 1),
+                SearchEffort::for_complexity(c),
+            );
+            assert!(hi.gain_span >= lo.gain_span && hi.lags >= lo.lags);
+            assert!(hi.pitch_candidates >= lo.pitch_candidates);
+            assert!(hi.innovation_paths >= lo.innovation_paths);
+            assert!(hi.gain_passes >= lo.gain_passes && hi.lsp_paths >= lo.lsp_paths);
+        }
+        assert_eq!(
+            SearchEffort::for_complexity(0),
+            SearchEffort::for_complexity(1)
+        );
+        assert_eq!(
+            SearchEffort::for_complexity(99),
+            SearchEffort::for_complexity(10)
+        );
+    }
+
+    #[test]
+    fn noise_weighting_is_the_default_search_domain() {
+        let mut weighted = NarrowbandEncoder::new();
+        assert_eq!(
+            weighted.noise_weighting(),
+            Some((
+                crate::weighting::WEIGHT_GAMMA1,
+                crate::weighting::WEIGHT_GAMMA2
+            ))
+        );
+        let weighted_snr = round_trip_snr(&mut weighted, 4);
+        let mut plain = NarrowbandEncoder::new();
+        plain.set_noise_weighting(None);
+        assert_eq!(plain.noise_weighting(), None);
+        let plain_snr = round_trip_snr(&mut plain, 4);
+        // Two different criteria, two different streams — both track
+        // the input.
+        assert!((weighted_snr - plain_snr).abs() > 1e-3);
+        assert!(
+            weighted_snr > 8.0 && plain_snr > 8.0,
+            "{weighted_snr} / {plain_snr}"
+        );
+        // Equal factors make W(z) = 1: the plain search.
+        let mut unit = NarrowbandEncoder::new();
+        unit.set_noise_weighting(Some((0.8, 0.8)));
+        assert!((round_trip_snr(&mut unit, 4) - plain_snr).abs() < 1e-6);
+        // Factors are clamped to the stable range.
+        unit.set_noise_weighting(Some((1.5, -0.2)));
+        assert_eq!(unit.noise_weighting(), Some((1.0, 0.0)));
+    }
+
+    #[test]
+    fn the_mirror_stays_on_the_decoder_through_vocoder_and_null_frames() {
+        // Vocoder and null frames carry excitation the decoder generates
+        // itself; the frames after them must still predict from exactly
+        // what the decoder holds.
+        let frames = moving_frames(12);
+        let modes = [5u8, 5, 1, 1, 0, 0, 5, 5, 1, 4, 0, 6];
+        let mut enc = NarrowbandEncoder::new();
+        let mut dec = crate::narrowband_decoder::NarrowbandDecoder::new();
+        dec.set_enhancer(false);
+        for (f, &mode) in frames.iter().zip(&modes) {
+            let submode = NarrowbandSubmode::for_id(mode).unwrap();
+            let body = enc.encode_frame_body(f, mode).unwrap();
+            dec.decode_frame(&body, &submode).unwrap();
+            let ours = enc.last_frame_excitation();
+            let theirs = dec.last_frame_excitation();
+            let scale = theirs.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+            for (n, (&a, &b)) in ours.iter().zip(theirs.iter()).enumerate() {
+                assert!(
+                    (a as f32 - b).abs() <= 1e-4 * scale,
+                    "mode {mode} sample {n}: encoder {a} vs decoder {b}"
+                );
+            }
+        }
     }
 }

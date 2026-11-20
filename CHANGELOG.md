@@ -20,8 +20,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   packet no longer carries padding in the middle (its in-band message
   and its frame are written into one bit stream).
 
+### Changed
+
+- **The narrowband search runs in the manual's noise-weighted domain by
+  default** (`W(z) = A(z/0.9)/A(z/0.6)`, manual §8.5 Eq. 8.1, on the
+  decoder's quantised LPC, with the weighting memory carried over the
+  coding error). Against the plain waveform search it is better on all
+  three measures of `examples/encoder_report.rs` at qualities 2..=10 in
+  every rate class — e.g. 8 kHz speech-like material at quality 8:
+  SNR 16.15 → 17.04 dB, segmental SNR 18.34 → 20.36 dB, noise-weighted
+  segmental SNR 13.02 → 16.54 dB. `set_noise_weighting(None)` restores
+  the plain search.
+- **Encode speed**: the innovation search scores every codebook row
+  through one table of synthesis responses per sub-frame (shared by the
+  frame-gain candidates) with running energies, the high-band shape
+  search likewise, the pitch pre-selection builds each lag's response
+  from the previous lag's, and a second innovation pass at an unchanged
+  gain is skipped. Streams were bit-identical before / after on the
+  measurement set at the time of the change; 8 kHz quality 8 went
+  14.6× → 47× real time, 32 kHz quality 7 5.4× → 18× (one core, medians,
+  shared machine).
+- The vocoder mode (narrowband mode 1) estimates its open-loop pitch on
+  the input's own residual history rather than on the decoded
+  excitation, which that mode's decoder generates.
+
 ### Added
 
+- `NarrowbandEncoder::set_complexity` / `complexity` (and on
+  `WidebandEncoder`, `UltraWidebandEncoder`), `DEFAULT_COMPLEXITY`:
+  the manual's 1..=10 complexity setting. It scales the pitch lags
+  searched, the innovation paths kept per sub-vector, the adaptive /
+  innovation candidates searched jointly, the frame-gain neighbourhood
+  and the innovation passes; the bit-rate is unaffected.
+- `NarrowbandEncoder::set_noise_weighting` / `noise_weighting` (and on
+  the wider encoders).
+- The encoder keeps a decoder in step with its own output and takes the
+  excitation history, synthesis state and fold source from it after
+  vocoder and null frames — the frames whose excitation the decoder
+  generates — so a stream may switch sub-mode on any frame.
 - `NarrowbandEncoder::encode_frame_into`,
   `WidebandEncoder::encode_frame_into`,
   `UltraWidebandEncoder::encode_frame_into` — append one frame, without

@@ -527,6 +527,23 @@ impl WidebandEncoder {
     pub fn low_band_encoder(&self) -> &NarrowbandEncoder {
         &self.low_band
     }
+
+    /// Set the search complexity, 1..=10 (see
+    /// [`NarrowbandEncoder::set_complexity`]).
+    pub fn set_complexity(&mut self, complexity: u8) {
+        self.low_band.set_complexity(complexity);
+    }
+
+    /// The current search complexity.
+    pub fn complexity(&self) -> u8 {
+        self.low_band.complexity()
+    }
+
+    /// Noise-weighted search for the embedded narrowband layer (see
+    /// [`NarrowbandEncoder::set_noise_weighting`]).
+    pub fn set_noise_weighting(&mut self, gammas: Option<(f64, f64)>) {
+        self.low_band.set_noise_weighting(gammas);
+    }
 }
 
 /// The reference encoder's 4-bit high-band gain field for the
@@ -683,45 +700,67 @@ fn hb_abs_search(
     let sv_len = codebook.sub_vector_len();
     let slot_bits = u32::from(codebook.slot_bits());
     let has_sign = codebook.has_sign_bit();
+    // Every codebook row through the synthesis impulse response; a
+    // sub-vector at offset `o` contributes the row's response shifted
+    // by `o`.
+    let entries = codebook.entries() as usize;
+    let mut resp = vec![0.0f64; entries * N];
+    for (i, out) in resp.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+        let Some(row) = crate::hb_innovation::hb_innovation_sub_vector(codebook, i as u32) else {
+            continue;
+        };
+        for (m, slot) in out.iter_mut().enumerate() {
+            let mut f = 0.0;
+            for (k, &rv) in row.iter().enumerate() {
+                if k <= m {
+                    f += h[m - k] * f64::from(rv);
+                }
+            }
+            *slot = f;
+        }
+    }
     let stage = |t: &mut [f64; N], g: f64| -> u128 {
         let mut packed = 0u128;
+        let fg: Vec<f64> = resp.iter().map(|&f| f * g).collect();
+        let mut energy = vec![0.0f64; entries * (N + 1)];
+        for (row, pe) in fg
+            .as_chunks::<N>()
+            .0
+            .iter()
+            .zip(energy.as_chunks_mut::<{ N + 1 }>().0.iter_mut())
+        {
+            let mut e = 0.0f64;
+            for (m, &f) in row.iter().enumerate() {
+                e += f * f;
+                pe[m + 1] = e;
+            }
+        }
         for sv in 0..usize::from(count) {
             let o = sv * sv_len;
             let (mut best, mut best_e, mut best_neg) = (0u32, f64::INFINITY, false);
-            for i in 0..codebook.entries() {
-                let Some(row) = crate::hb_innovation::hb_innovation_sub_vector(codebook, i) else {
-                    continue;
-                };
-                let (mut c, mut e) = (0.0f64, 0.0f64);
-                for n in o..N {
-                    let mut f = 0.0;
-                    for (k, &rv) in row.iter().enumerate() {
-                        if o + k <= n {
-                            f += h[n - o - k] * f64::from(rv);
-                        }
-                    }
-                    let f = f * g;
-                    c += t[n] * f;
-                    e += f * f;
+            for (i, (row, pe)) in fg
+                .as_chunks::<N>()
+                .0
+                .iter()
+                .zip(energy.as_chunks::<{ N + 1 }>().0.iter())
+                .enumerate()
+            {
+                let mut c = 0.0f64;
+                for (&tv, &f) in t[o..].iter().zip(row) {
+                    c += tv * f;
                 }
+                let e = pe[N - o];
                 if e - 2.0 * c < best_e {
-                    (best, best_e, best_neg) = (i, e - 2.0 * c, false);
+                    (best, best_e, best_neg) = (i as u32, e - 2.0 * c, false);
                 }
                 if has_sign && e + 2.0 * c < best_e {
-                    (best, best_e, best_neg) = (i, e + 2.0 * c, true);
+                    (best, best_e, best_neg) = (i as u32, e + 2.0 * c, true);
                 }
             }
-            if let Some(row) = crate::hb_innovation::hb_innovation_sub_vector(codebook, best) {
-                let sg = if best_neg { -g } else { g };
-                for n in o..N {
-                    let mut f = 0.0;
-                    for (k, &rv) in row.iter().enumerate() {
-                        if o + k <= n {
-                            f += h[n - o - k] * f64::from(rv);
-                        }
-                    }
-                    t[n] -= sg * f;
-                }
+            let sg = if best_neg { -g } else { g };
+            let row = &resp[best as usize * N..(best as usize + 1) * N];
+            for (tv, &f) in t[o..].iter_mut().zip(row) {
+                *tv -= sg * f;
             }
             let slot = if has_sign {
                 (u128::from(best_neg) << u128::from(codebook.index_bits())) | u128::from(best)
