@@ -57,7 +57,7 @@ use crate::gain_reconstruction::reconstruct_hb_exc_gain;
 use crate::hb_encode::encode_wideband_frame;
 use crate::hb_innovation::{HB_SUBFRAME_SAMPLES, HbInnovationCodebook, HbInnovationMapping};
 use crate::hb_innovation_search::search_hb_innovation;
-use crate::hb_lsp::{pack_hb_lsp_index, quantise_q10 as quantise_hb_lsp_q10, reconstruct_q10};
+use crate::hb_lsp::{pack_hb_lsp_index, reconstruct_q10};
 use crate::hb_lsp_interp::HbSubFrameLsp;
 use crate::lpc_analysis::analyse_hb;
 use crate::lpc_to_lsp::hb_lpc_to_lsp;
@@ -170,6 +170,9 @@ pub struct WidebandEncoder {
     /// the decoder's float path + its transposed synthesis state), for
     /// the synthesis-domain shape search (r483).
     hb_mirror: crate::wb_synthesis::HbLayerState,
+    /// Noise-weighting filter memory over the high band's coding error
+    /// (inputs / outputs, most recent first).
+    hb_w_mem: HbWeightMemory,
 }
 
 impl Default for WidebandEncoder {
@@ -187,6 +190,7 @@ impl WidebandEncoder {
             prev_hb_tail: [0.0; HB_ANALYSIS_LOOKBACK],
             prev_hb_lsp_delta_q10: None,
             hb_mirror: crate::wb_synthesis::HbLayerState::new(),
+            hb_w_mem: ([0.0; HB_LPC_ORDER], [0.0; HB_LPC_ORDER]),
             hb_analysis_hist: [0.0; HB_LPC_ORDER],
         }
     }
@@ -364,6 +368,8 @@ impl WidebandEncoder {
         );
 
         // --- Excitation: per sub-frame gain (+ innovation). ---
+        let effort = self.low_band.effort();
+        let weighting = self.low_band.noise_weighting();
         let mut subframes = [HighBandSubFrameIndices::default(); HB_SUBFRAMES];
         for (sf, slot) in subframes.iter_mut().enumerate() {
             let block: &[f64] = &hb[sf * HB_SUBFRAME_SAMPLES..(sf + 1) * HB_SUBFRAME_SAMPLES];
@@ -393,24 +399,40 @@ impl WidebandEncoder {
                     );
                     let e_h =
                         crate::gain_scaled_hb_innovation::floored_rms(residual.iter().copied());
-                    let raw_gain = hb_encoder_gain_index(1.0 / inv_ratio, e_h, e_l);
+                    let rule_gain = hb_encoder_gain_index(1.0 / inv_ratio, e_h, e_l);
                     let base = (e_l * inv_ratio).max(1e-9);
-                    let packed = match &dec_lpcs {
-                        // Shape by analysis-by-synthesis through the
-                        // decoder's high-band synthesis (r483).
-                        Some(dl) => hb_abs_search(
-                            block,
-                            &dl[sf],
-                            &self.hb_mirror.synth,
-                            raw_gain,
-                            submode,
-                            cb,
-                            count,
-                            two_stage,
-                            base,
-                        ),
-                        None => hb_search_at_gain(
-                            &residual, raw_gain, submode, cb, count, two_stage, base,
+                    let (raw_gain, packed) = match &dec_lpcs {
+                        // Gain and shape by analysis-by-synthesis
+                        // through the decoder's high-band synthesis:
+                        // the rule's field and its neighbours are each
+                        // searched, the least error wins.
+                        Some(dl) => {
+                            let span = i32::from(effort.gain_span);
+                            let gains: Vec<u8> = (-span..=span)
+                                .map(|d| i32::from(rule_gain) + d)
+                                .filter(|g| (0..=15).contains(g))
+                                .map(|g| g as u8)
+                                .collect();
+                            let weights = weighting.map(|g| HbWeighting::new(&dl[sf], g));
+                            hb_abs_search(
+                                block,
+                                &dl[sf],
+                                &self.hb_mirror.synth,
+                                &gains,
+                                submode,
+                                cb,
+                                count,
+                                two_stage,
+                                base,
+                                usize::from(effort.innovation_paths),
+                                weights.as_ref().map(|w| (w, &self.hb_w_mem)),
+                            )
+                        }
+                        None => (
+                            rule_gain,
+                            hb_search_at_gain(
+                                &residual, rule_gain, submode, cb, count, two_stage, base,
+                            ),
                         ),
                     };
                     slot.excitation_gain_index = raw_gain;
@@ -452,8 +474,13 @@ impl WidebandEncoder {
                     self.low_band.last_crossover_response()[sf],
                     &dl[sf],
                 );
-                for &v in &x {
-                    crate::wb_synthesis::hb_synth_step(&mut self.hb_mirror.synth, &dl[sf], v);
+                let weights = weighting.map(|g| HbWeighting::new(&dl[sf], g));
+                for (&v, &target) in x.iter().zip(block) {
+                    let y =
+                        crate::wb_synthesis::hb_synth_step(&mut self.hb_mirror.synth, &dl[sf], v);
+                    if let Some(w) = &weights {
+                        w.step(&mut self.hb_w_mem, target - y);
+                    }
                 }
             }
         }
@@ -496,7 +523,10 @@ impl WidebandEncoder {
             delta[i] = radians_to_lsp_q10(lsp_rad[i]) - base[i];
         }
 
-        let stages = quantise_hb_lsp_q10(&delta);
+        let stages = crate::hb_lsp::quantise_q10_search(
+            &delta,
+            usize::from(self.low_band.effort().lsp_paths),
+        );
         let lsp_index = pack_hb_lsp_index(&stages);
         let active = reconstruct_q10(stages).unwrap_or(delta);
         (lsp_index, active)
@@ -539,10 +569,11 @@ impl WidebandEncoder {
         self.low_band.complexity()
     }
 
-    /// Noise-weighted search for the embedded narrowband layer (see
+    /// Choose the search domain of both layers (see
     /// [`NarrowbandEncoder::set_noise_weighting`]).
     pub fn set_noise_weighting(&mut self, gammas: Option<(f64, f64)>) {
         self.low_band.set_noise_weighting(gammas);
+        self.hb_w_mem = ([0.0; HB_LPC_ORDER], [0.0; HB_LPC_ORDER]);
     }
 }
 
@@ -657,52 +688,106 @@ fn hb_decoded_excitation(
     x
 }
 
-/// High-band shape search by **analysis-by-synthesis** (r483): at the
-/// decoder's gain for `raw_gain`, pick each sub-vector (and sign) to
-/// minimise the error between the input block and the decoder's
-/// synthesis of the excitation (its LPC `a`, from its state `mem`) —
-/// stage 2 of mode 4 at its 0.4 weight on the stage-1 remainder.
+/// Noise-weighting filter memory: previous inputs and outputs, most
+/// recent first.
+type HbWeightMemory = ([f64; HB_LPC_ORDER], [f64; HB_LPC_ORDER]);
+
+/// Noise-weighting taps `A_hb(z/γ1)` / `A_hb(z/γ2)` of one high-band
+/// sub-frame (manual Eq. 8.1 on the order-8 LPC).
+#[derive(Debug, Clone, Copy)]
+struct HbWeighting {
+    num: [f64; HB_LPC_ORDER],
+    den: [f64; HB_LPC_ORDER],
+}
+
+impl HbWeighting {
+    fn new(a: &[f64; HB_LPC_ORDER], gammas: (f64, f64)) -> Self {
+        let mut w = Self {
+            num: [0.0; HB_LPC_ORDER],
+            den: [0.0; HB_LPC_ORDER],
+        };
+        let (mut p1, mut p2) = gammas;
+        for k in 0..HB_LPC_ORDER {
+            w.num[k] = a[k] * p1;
+            w.den[k] = a[k] * p2;
+            p1 *= gammas.0;
+            p2 *= gammas.1;
+        }
+        w
+    }
+
+    /// One sample through `W(z)`; the memories hold the previous inputs
+    /// / outputs, most recent first.
+    fn step(&self, mem: &mut HbWeightMemory, x: f64) -> f64 {
+        let mut y = x;
+        for k in 0..HB_LPC_ORDER {
+            y += self.num[k] * mem.0[k] - self.den[k] * mem.1[k];
+        }
+        mem.0.copy_within(0..HB_LPC_ORDER - 1, 1);
+        mem.0[0] = x;
+        mem.1.copy_within(0..HB_LPC_ORDER - 1, 1);
+        mem.1[0] = y;
+        y
+    }
+}
+
+/// High-band gain + shape search by **analysis-by-synthesis**: for each
+/// candidate gain field, pick the sub-vectors (and signs) minimising
+/// the error between the input block and the decoder's synthesis of the
+/// excitation (its LPC `a`, from its state `mem`) — stage 2 of mode 4
+/// at its 0.4 weight on the stage-1 remainder — and keep the gain whose
+/// best shape leaves the least error. `paths` partial shapes survive
+/// each sub-vector (one = the greedy search); with `weighting` the
+/// error is measured through the noise-weighting filter from its
+/// memory. Returns `(gain field, packed shape)`.
 #[allow(clippy::too_many_arguments)]
 fn hb_abs_search(
     block: &[f64],
     a: &[f64; HB_LPC_ORDER],
     mem: &[f64; HB_LPC_ORDER],
-    raw_gain: u8,
+    gains: &[u8],
     submode: &WidebandHighBandSubmode,
     codebook: HbInnovationCodebook,
     count: u8,
     two_stage: bool,
     base: f64,
-) -> u128 {
+    paths: usize,
+    weighting: Option<(&HbWeighting, &HbWeightMemory)>,
+) -> (u8, u128) {
     use crate::wb_synthesis::hb_synth_step;
     const N: usize = HB_SUBFRAME_SAMPLES;
-    let Some(idx) = crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, submode)
-    else {
-        return 0;
-    };
-    let ge = f64::from(reconstruct_hb_exc_gain(idx))
-        * base
-        * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+    let paths = paths.max(1);
+    // Search-domain impulse response and target.
     let mut h = [0.0f64; N];
     {
         let mut m = [0.0f64; HB_LPC_ORDER];
+        let mut wm: HbWeightMemory = ([0.0; HB_LPC_ORDER], [0.0; HB_LPC_ORDER]);
         for (n, v) in h.iter_mut().enumerate() {
-            *v = hb_synth_step(&mut m, a, if n == 0 { 1.0 } else { 0.0 });
+            let y = hb_synth_step(&mut m, a, if n == 0 { 1.0 } else { 0.0 });
+            *v = match weighting {
+                Some((w, _)) => w.step(&mut wm, y),
+                None => y,
+            };
         }
     }
-    let mut t = [0.0f64; N];
+    let mut target = [0.0f64; N];
     {
         let mut m = *mem;
-        for (n, v) in t.iter_mut().enumerate() {
-            *v = block[n] - hb_synth_step(&mut m, a, 0.0);
+        let mut wm = weighting.map(|(_, state)| *state);
+        for (n, v) in target.iter_mut().enumerate() {
+            let d = block[n] - hb_synth_step(&mut m, a, 0.0);
+            *v = match (weighting, wm.as_mut()) {
+                (Some((w, _)), Some(state)) => w.step(state, d),
+                _ => d,
+            };
         }
     }
     let sv_len = codebook.sub_vector_len();
     let slot_bits = u32::from(codebook.slot_bits());
+    let index_bits = u32::from(codebook.index_bits());
     let has_sign = codebook.has_sign_bit();
-    // Every codebook row through the synthesis impulse response; a
-    // sub-vector at offset `o` contributes the row's response shifted
-    // by `o`.
+    // Every codebook row through the impulse response; a sub-vector at
+    // offset `o` contributes the row's response shifted by `o`.
     let entries = codebook.entries() as usize;
     let mut resp = vec![0.0f64; entries * N];
     for (i, out) in resp.as_chunks_mut::<N>().0.iter_mut().enumerate() {
@@ -719,65 +804,93 @@ fn hb_abs_search(
             *slot = f;
         }
     }
-    let stage = |t: &mut [f64; N], g: f64| -> u128 {
-        let mut packed = 0u128;
-        let fg: Vec<f64> = resp.iter().map(|&f| f * g).collect();
-        let mut energy = vec![0.0f64; entries * (N + 1)];
-        for (row, pe) in fg
-            .as_chunks::<N>()
-            .0
-            .iter()
-            .zip(energy.as_chunks_mut::<{ N + 1 }>().0.iter_mut())
-        {
-            let mut e = 0.0f64;
-            for (m, &f) in row.iter().enumerate() {
-                e += f * f;
-                pe[m + 1] = e;
+    let mut fg = vec![0.0f64; entries * N];
+    let mut energy = vec![0.0f64; entries * (N + 1)];
+    let w2 = f64::from(crate::hb_innovation::HB_MODE4_STAGE2_WEIGHT);
+    let stages = if two_stage { 2 } else { 1 };
+    let mut best: Option<(f64, u8, u128)> = None;
+    for &raw_gain in gains {
+        let Some(idx) =
+            crate::hb_excitation_gain::HbExcitationGainIndex::resolve(raw_gain, submode)
+        else {
+            continue;
+        };
+        let ge = f64::from(reconstruct_hb_exc_gain(idx))
+            * base
+            * f64::from(crate::gain_scaled_innovation::INNOVATION_CODEBOOK_SCALE);
+        // (metric, remainder, packed)
+        let mut live: Vec<(f64, [f64; N], u128)> = vec![(0.0, target, 0u128)];
+        for stage in 0..stages {
+            let g = if stage == 0 { ge } else { ge * w2 };
+            for (dst, &f) in fg.iter_mut().zip(&resp) {
+                *dst = f * g;
             }
-        }
-        for sv in 0..usize::from(count) {
-            let o = sv * sv_len;
-            let (mut best, mut best_e, mut best_neg) = (0u32, f64::INFINITY, false);
-            for (i, (row, pe)) in fg
+            for (row, pe) in fg
                 .as_chunks::<N>()
                 .0
                 .iter()
-                .zip(energy.as_chunks::<{ N + 1 }>().0.iter())
-                .enumerate()
+                .zip(energy.as_chunks_mut::<{ N + 1 }>().0.iter_mut())
             {
-                let mut c = 0.0f64;
-                for (&tv, &f) in t[o..].iter().zip(row) {
-                    c += tv * f;
-                }
-                let e = pe[N - o];
-                if e - 2.0 * c < best_e {
-                    (best, best_e, best_neg) = (i as u32, e - 2.0 * c, false);
-                }
-                if has_sign && e + 2.0 * c < best_e {
-                    (best, best_e, best_neg) = (i as u32, e + 2.0 * c, true);
+                let mut e = 0.0f64;
+                for (m, &f) in row.iter().enumerate() {
+                    e += f * f;
+                    pe[m + 1] = e;
                 }
             }
-            let sg = if best_neg { -g } else { g };
-            let row = &resp[best as usize * N..(best as usize + 1) * N];
-            for (tv, &f) in t[o..].iter_mut().zip(row) {
-                *tv -= sg * f;
+            for sv in 0..usize::from(count) {
+                let o = sv * sv_len;
+                // (metric, parent, index, negated), best first.
+                let mut next: Vec<(f64, usize, u32, bool)> = Vec::with_capacity(paths + 1);
+                let mut offer = |m: f64, pi: usize, i: u32, neg: bool| {
+                    if next.len() < paths || m < next[next.len() - 1].0 {
+                        let at = next.partition_point(|b| b.0 <= m);
+                        next.insert(at, (m, pi, i, neg));
+                        next.truncate(paths);
+                    }
+                };
+                for (pi, path) in live.iter().enumerate() {
+                    for (i, (row, pe)) in fg
+                        .as_chunks::<N>()
+                        .0
+                        .iter()
+                        .zip(energy.as_chunks::<{ N + 1 }>().0.iter())
+                        .enumerate()
+                    {
+                        let mut c = 0.0f64;
+                        for (&tv, &f) in path.1[o..].iter().zip(row) {
+                            c += tv * f;
+                        }
+                        let e = pe[N - o];
+                        offer(path.0 + e - 2.0 * c, pi, i as u32, false);
+                        if has_sign {
+                            offer(path.0 + e + 2.0 * c, pi, i as u32, true);
+                        }
+                    }
+                }
+                live = next
+                    .into_iter()
+                    .map(|(m, pi, i, neg)| {
+                        let (_, mut t, packed) = live[pi];
+                        let row = &fg[i as usize * N..(i as usize + 1) * N];
+                        for (tv, &f) in t[o..].iter_mut().zip(row) {
+                            *tv -= if neg { -f } else { f };
+                        }
+                        let slot = if has_sign {
+                            (u128::from(neg) << index_bits) | u128::from(i)
+                        } else {
+                            u128::from(i)
+                        };
+                        (m, t, (packed << slot_bits) | slot)
+                    })
+                    .collect();
             }
-            let slot = if has_sign {
-                (u128::from(best_neg) << u128::from(codebook.index_bits())) | u128::from(best)
-            } else {
-                u128::from(best)
-            };
-            packed = (packed << slot_bits) | slot;
         }
-        packed
-    };
-    let p1 = stage(&mut t, ge);
-    if !two_stage {
-        return p1;
+        let (metric, _, packed) = live[0];
+        if best.as_ref().is_none_or(|b| metric < b.0) {
+            best = Some((metric, raw_gain, packed));
+        }
     }
-    let w2 = f64::from(crate::hb_innovation::HB_MODE4_STAGE2_WEIGHT);
-    let p2 = stage(&mut t, ge * w2);
-    (p1 << (slot_bits * u32::from(count))) | p2
+    best.map_or((gains.first().copied().unwrap_or(0), 0), |b| (b.1, b.2))
 }
 
 /// Stage-2 field filled with the all-zero codebook row (index 43,

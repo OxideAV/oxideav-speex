@@ -184,6 +184,126 @@ pub fn quantise_lsp_q10(target: &[i32; NB_LSP_ORDER], quant: LspQuant) -> Option
     })
 }
 
+/// The `keep` rows of `cb` (each scaled by `factor`) closest to
+/// `target` under the per-coefficient `weights`, best first, as
+/// `(weighted squared error, index)`.
+fn nearest_rows<const D: usize>(
+    target: &[i32; D],
+    cb: &[[i16; D]],
+    factor: i32,
+    weights: &[f64; D],
+    keep: usize,
+) -> Vec<(f64, u8)> {
+    let mut best: Vec<(f64, u8)> = Vec::with_capacity(keep + 1);
+    for (idx, row) in cb.iter().enumerate() {
+        let mut err = 0.0f64;
+        for ((&t, &v), &w) in target.iter().zip(row).zip(weights) {
+            let d = f64::from(t - i32::from(v) * factor);
+            err += w * d * d;
+        }
+        if best.len() < keep || err < best[best.len() - 1].0 {
+            let at = best.partition_point(|b| b.0 <= err);
+            best.insert(at, (err, idx as u8));
+            best.truncate(keep);
+        }
+    }
+    best
+}
+
+/// [`quantise_lsp_q10`] with a deeper search and a weighted error:
+/// the `paths` best stage-0 rows are each refined, a 30-bit half keeps
+/// its `paths` best first-refinement rows through the second, and the
+/// combination with the lowest total error
+/// `Σ weights[i]·(target[i] − reconstruction[i])²` wins.
+///
+/// `paths == 1` with unit weights is exactly the sequential search of
+/// [`quantise_lsp_q10`].
+pub(crate) fn quantise_lsp_q10_search(
+    target: &[i32; NB_LSP_ORDER],
+    quant: LspQuant,
+    paths: usize,
+    weights: &[f64; NB_LSP_ORDER],
+) -> Option<NbLspStages> {
+    if quant == LspQuant::None {
+        return None;
+    }
+    let paths = paths.max(1);
+    let factor = |stage: u8| stage_factor(nb_lsp_scale(stage).expect("staged LSP scale"));
+    let mut w_low = [0.0f64; NB_LSP_SPLIT_HALF];
+    let mut w_high = [0.0f64; NB_LSP_SPLIT_HALF];
+    w_low.copy_from_slice(&weights[..NB_LSP_SPLIT_HALF]);
+    w_high.copy_from_slice(&weights[NB_LSP_SPLIT_HALF..]);
+    // One half: its first-refinement row and, in the 30-bit regime, the
+    // second, as (error, first index, second index).
+    let refine = |half: &[i32; NB_LSP_SPLIT_HALF],
+                  w: &[f64; NB_LSP_SPLIT_HALF],
+                  cb1: &[[i16; NB_LSP_SPLIT_HALF]],
+                  f1: i32,
+                  cb2: &[[i16; NB_LSP_SPLIT_HALF]],
+                  f2: i32|
+     -> (f64, u8, Option<u8>) {
+        if quant == LspQuant::Bits18 {
+            let (e, i) = nearest_rows(half, cb1, f1, w, 1)[0];
+            return (e, i, None);
+        }
+        let mut best = (f64::INFINITY, 0u8, Some(0u8));
+        for (_, i1) in nearest_rows(half, cb1, f1, w, paths) {
+            let mut rest = *half;
+            for (r, &v) in rest.iter_mut().zip(&cb1[usize::from(i1)]) {
+                *r -= i32::from(v) * f1;
+            }
+            let (e, i2) = nearest_rows(&rest, cb2, f2, w, 1)[0];
+            if e < best.0 {
+                best = (e, i1, Some(i2));
+            }
+        }
+        best
+    };
+    let mut best: Option<(f64, NbLspStages)> = None;
+    for (_, stage0) in nearest_rows(target, nb_lsp_stage0(), factor(0), weights, paths) {
+        let mut residual = *target;
+        for (r, &v) in residual
+            .iter_mut()
+            .zip(&nb_lsp_stage0()[usize::from(stage0)])
+        {
+            *r -= i32::from(v) * factor(0);
+        }
+        let mut low = [0i32; NB_LSP_SPLIT_HALF];
+        let mut high = [0i32; NB_LSP_SPLIT_HALF];
+        low.copy_from_slice(&residual[..NB_LSP_SPLIT_HALF]);
+        high.copy_from_slice(&residual[NB_LSP_SPLIT_HALF..]);
+        let (el, low1, low2) = refine(
+            &low,
+            &w_low,
+            nb_lsp_low1(),
+            factor(1),
+            nb_lsp_low2(),
+            factor(2),
+        );
+        let (eh, high1, high2) = refine(
+            &high,
+            &w_high,
+            nb_lsp_high1(),
+            factor(3),
+            nb_lsp_high2(),
+            factor(4),
+        );
+        if best.as_ref().is_none_or(|b| el + eh < b.0) {
+            best = Some((
+                el + eh,
+                NbLspStages {
+                    stage0,
+                    low1,
+                    high1,
+                    low2,
+                    high2,
+                },
+            ));
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// Pack the per-stage 6-bit indices of [`NbLspStages`] into the on-wire
 /// `lsp_index` bit-field, MSB-first, matching the layout
 /// [`NbLspStages::from_packed`] parses.
@@ -208,6 +328,58 @@ pub fn pack_lsp_index(stages: &NbLspStages) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_path_with_unit_weights_is_the_sequential_search() {
+        let mut seed = 99u32;
+        for regime in [LspQuant::Bits18, LspQuant::Bits30] {
+            for _ in 0..200 {
+                let mut target = [0i32; NB_LSP_ORDER];
+                for t in target.iter_mut() {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *t = (seed >> 22) as i32 - 512;
+                }
+                assert_eq!(
+                    quantise_lsp_q10_search(&target, regime, 1, &[1.0; NB_LSP_ORDER]),
+                    quantise_lsp_q10(&target, regime)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn more_paths_never_raise_the_error() {
+        let err = |target: &[i32; NB_LSP_ORDER], st: NbLspStages| -> i64 {
+            let rec = crate::lsp::reconstruct_q10(st).unwrap();
+            target
+                .iter()
+                .zip(&rec)
+                .map(|(&t, &r)| i64::from(t - r).pow(2))
+                .sum()
+        };
+        let mut seed = 7u32;
+        let (mut total1, mut total6) = (0i64, 0i64);
+        for _ in 0..300 {
+            let mut target = [0i32; NB_LSP_ORDER];
+            for t in target.iter_mut() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *t = (seed >> 22) as i32 - 512;
+            }
+            let w = [1.0; NB_LSP_ORDER];
+            let e1 = err(
+                &target,
+                quantise_lsp_q10_search(&target, LspQuant::Bits30, 1, &w).unwrap(),
+            );
+            let e6 = err(
+                &target,
+                quantise_lsp_q10_search(&target, LspQuant::Bits30, 6, &w).unwrap(),
+            );
+            assert!(e6 <= e1);
+            total1 += e1;
+            total6 += e6;
+        }
+        assert!(total6 < total1, "{total6} vs {total1}");
+    }
     use crate::codebooks::NB_LSP_STAGE_ENTRIES;
     use crate::lsp::reconstruct_q10;
 

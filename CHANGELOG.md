@@ -31,6 +31,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   SNR 16.15 → 17.04 dB, segmental SNR 18.34 → 20.36 dB, noise-weighted
   segmental SNR 13.02 → 16.54 dB. `set_noise_weighting(None)` restores
   the plain search.
+- **High-band gain and shape are searched together**: the 4-bit gain
+  field of high-band modes 2 / 3 / 4 is chosen by analysis-by-synthesis
+  among the energy rule's value and its neighbours (each with its own
+  shape search, through the same noise-weighting filter on the order-8
+  LPC) instead of from the energy rule alone. 16 kHz speech-like
+  material, mean over qualities 1..=10: SNR 9.55 → 9.59 dB; the 32 kHz
+  pitch-glide fixture 7.22 → 7.37 dB SNR, 7.50 → 7.71 dB segmental.
+- **The narrowband LSP quantiser weights its error by formant
+  proximity** (each coefficient by the inverse square root of the
+  distance to its nearer neighbour) and, above the default complexity,
+  keeps several candidates per stage (`lsp_paths`); the high-band LSP
+  quantiser likewise searches several stage-1 rows at higher
+  complexity.
 - **Encode speed**: the innovation search scores every codebook row
   through one table of synthesis responses per sub-frame (shared by the
   frame-gain candidates) with running energies, the high-band shape

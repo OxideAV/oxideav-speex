@@ -69,7 +69,7 @@ use crate::innovation_search::search_innovation;
 use crate::lpc_to_lsp::lpc_to_lsp;
 use crate::lsp_base::nb_lsp_base_q10;
 use crate::lsp_interp::NbSubFrameLsp;
-use crate::lsp_quant::{pack_lsp_index, quantise_lsp_q10};
+use crate::lsp_quant::pack_lsp_index;
 use crate::lsp_to_lpc::{LPC_ORDER, lsp_vector_radians_to_q10, subframe_lpc_set_with_base};
 use crate::narrowband_body::{
     NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX, PITCH_PERIOD_MIN,
@@ -388,6 +388,11 @@ impl NarrowbandEncoder {
     /// The current search complexity.
     pub fn complexity(&self) -> u8 {
         self.complexity
+    }
+
+    /// The search depths in force (shared with the high-band layer).
+    pub(crate) fn effort(&self) -> SearchEffort {
+        self.effort
     }
 
     /// Choose the search domain: `Some((γ1, γ2))` searches through the
@@ -916,7 +921,16 @@ impl NarrowbandEncoder {
             delta[i] = absolute[i] - base[i];
         }
 
-        let Some(stages) = quantise_lsp_q10(&delta, regime) else {
+        // Spectral sensitivity is highest where two LSPs sit close (a
+        // formant), so each coefficient's error is weighted by its
+        // closeness to its nearer neighbour.
+        let weights = lsp_error_weights(&absolute);
+        let Some(stages) = crate::lsp_quant::quantise_lsp_q10_search(
+            &delta,
+            regime,
+            usize::from(self.effort.lsp_paths),
+            &weights,
+        ) else {
             let active = self.prev_lsp_q10.unwrap_or(delta);
             return (0, active);
         };
@@ -1651,6 +1665,32 @@ impl NarrowbandEncoder {
     fn commit_lsp(&mut self, active: [i32; LPC_ORDER]) {
         self.prev_lsp_q10 = Some(active);
     }
+}
+
+/// Per-coefficient LSP error weights (unit mean): the inverse square
+/// root of each coefficient's distance to its nearer neighbour (the
+/// full inverse over-commits to sharp formants), with the band edges
+/// `0` and `π` (Q10) standing in for the missing neighbours.
+fn lsp_error_weights(lsp_q10: &[i32; LPC_ORDER]) -> [f64; LPC_ORDER] {
+    let top = core::f64::consts::PI * 1024.0;
+    let mut w = [0.0f64; LPC_ORDER];
+    for i in 0..LPC_ORDER {
+        let below = if i == 0 {
+            0.0
+        } else {
+            f64::from(lsp_q10[i - 1])
+        };
+        let above = if i + 1 == LPC_ORDER {
+            top
+        } else {
+            f64::from(lsp_q10[i + 1])
+        };
+        let here = f64::from(lsp_q10[i]);
+        let gap = (here - below).min(above - here).max(8.0);
+        w[i] = 1.0 / gap.sqrt();
+    }
+    let mean = w.iter().sum::<f64>() / LPC_ORDER as f64;
+    w.map(|v| v / mean)
 }
 
 /// Quantise the frame's forced (open-loop) pitch coefficient at lag

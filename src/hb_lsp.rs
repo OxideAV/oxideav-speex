@@ -234,6 +234,49 @@ pub fn quantise_q10(target: &[i32; HB_LPC_ORDER]) -> HbLspStages {
     HbLspStages { stage1, stage2 }
 }
 
+/// [`quantise_q10`] with a deeper search: the `paths` best stage-1 rows
+/// are each refined by stage 2 and the pair with the lowest total
+/// squared error wins. `paths == 1` is the sequential search.
+pub(crate) fn quantise_q10_search(target: &[i32; HB_LPC_ORDER], paths: usize) -> HbLspStages {
+    let s1_factor = stage_shift_factor(hb_lsp_scale(1).expect("hb stage 1 scale"));
+    let s2_factor = stage_shift_factor(hb_lsp_scale(2).expect("hb stage 2 scale"));
+    let error = |t: &[i32; HB_LPC_ORDER], row: &[i16; HB_LPC_ORDER], factor: i32| -> i64 {
+        t.iter()
+            .zip(row)
+            .map(|(&a, &v)| i64::from(a - i32::from(v) * factor).pow(2))
+            .sum()
+    };
+    // Stage-1 rows, nearest first.
+    let mut order: Vec<(i64, u8)> = hb_lsp_stage1()
+        .iter()
+        .enumerate()
+        .map(|(i, row)| (error(target, row, s1_factor), i as u8))
+        .collect();
+    order.sort();
+    let mut best = (
+        i64::MAX,
+        HbLspStages {
+            stage1: 0,
+            stage2: 0,
+        },
+    );
+    for &(_, stage1) in order.iter().take(paths.max(1)) {
+        let mut residual = *target;
+        for (r, &v) in residual
+            .iter_mut()
+            .zip(&hb_lsp_stage1()[usize::from(stage1)])
+        {
+            *r -= i32::from(v) * s1_factor;
+        }
+        let stage2 = search_hb_stage(&residual, hb_lsp_stage2(), s2_factor);
+        let e = error(&residual, &hb_lsp_stage2()[usize::from(stage2)], s2_factor);
+        if e < best.0 {
+            best = (e, HbLspStages { stage1, stage2 });
+        }
+    }
+    best.1
+}
+
 /// Find the codebook row whose scaled contribution best matches `target`
 /// (least squared error) among an 8-coefficient high-band codebook.
 fn search_hb_stage(target: &[i32; HB_LPC_ORDER], cb: &[[i16; HB_LPC_ORDER]], factor: i32) -> u8 {
@@ -263,6 +306,35 @@ pub fn pack_hb_lsp_index(stages: &HbLspStages) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeper_search_matches_or_beats_the_sequential_one() {
+        let err = |t: &[i32; HB_LPC_ORDER], st: HbLspStages| -> i64 {
+            let rec = reconstruct_q10(st).unwrap();
+            t.iter()
+                .zip(&rec)
+                .map(|(&a, &b)| i64::from(a - b).pow(2))
+                .sum()
+        };
+        let mut seed = 41u32;
+        let (mut sum1, mut sum8) = (0i64, 0i64);
+        for _ in 0..300 {
+            let mut t = [0i32; HB_LPC_ORDER];
+            for v in t.iter_mut() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *v = (seed >> 22) as i32 - 512;
+            }
+            assert_eq!(quantise_q10_search(&t, 1), quantise_q10(&t));
+            let (e1, e8) = (
+                err(&t, quantise_q10(&t)),
+                err(&t, quantise_q10_search(&t, 8)),
+            );
+            assert!(e8 <= e1);
+            sum1 += e1;
+            sum8 += e8;
+        }
+        assert!(sum8 < sum1, "{sum8} vs {sum1}");
+    }
     use crate::wideband::WIDEBAND_HIGH_BAND_SUBMODES;
 
     #[test]
