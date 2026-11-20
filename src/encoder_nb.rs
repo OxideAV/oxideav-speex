@@ -261,6 +261,10 @@ pub(crate) struct SearchEffort {
     pub gain_passes: u8,
     /// Candidates kept per stage by the LSP quantiser.
     pub lsp_paths: u8,
+    /// Centre the frame-gain candidates by a probe pass with
+    /// unquantised innovation gains (otherwise on the open-loop
+    /// estimate).
+    pub gain_probe: bool,
 }
 
 impl SearchEffort {
@@ -273,11 +277,12 @@ impl SearchEffort {
                 3..=7 => 1,
                 _ => 2,
             },
-            lags: [2, 4, 6, 6, 8, 8, 10, 12, 14, 16][usize::from(c) - 1],
-            pitch_candidates: [1, 1, 1, 1, 1, 2, 2, 3, 3, 4][usize::from(c) - 1],
-            innovation_paths: [1, 1, 1, 2, 3, 4, 5, 6, 8, 10][usize::from(c) - 1],
+            lags: [2, 4, 8, 8, 8, 10, 12, 12, 14, 16][usize::from(c) - 1],
+            pitch_candidates: [1, 1, 1, 2, 2, 2, 3, 3, 3, 4][usize::from(c) - 1],
+            innovation_paths: [1, 1, 3, 3, 4, 5, 5, 6, 8, 10][usize::from(c) - 1],
             gain_passes: if c == 1 { 1 } else { 2 },
-            lsp_paths: [1, 1, 1, 2, 3, 4, 5, 6, 8, 8][usize::from(c) - 1],
+            lsp_paths: [1, 1, 3, 3, 4, 4, 5, 6, 8, 8][usize::from(c) - 1],
+            gain_probe: c >= 2,
         }
     }
 }
@@ -303,6 +308,12 @@ struct FrameScratch {
     energy: Vec<f64>,
     /// Centre-tap synthesis responses by pitch lag.
     centre: Vec<[f64; SUBFRAME_SAMPLES]>,
+    /// Probe pass: innovation gains are left unquantised and recorded
+    /// in `ideal` instead of being coded.
+    probe: bool,
+    /// Per-sub-frame `(least-squares innovation gain, energy of the
+    /// shape's synthesis response)` from the probe pass, once it ran.
+    ideal: Option<[(f64, f64); SUBFRAMES]>,
 }
 
 /// Stateful narrowband CELP encoder. One instance encodes a continuous
@@ -844,16 +855,66 @@ impl NarrowbandEncoder {
     ) {
         use crate::fixed_codebook_gain::FrameInnovationGainIndex as Idx;
 
-        // Candidate set: the estimate plus its immediate quantiser
-        // neighbours (clamped to the 5-bit grid). Silence (mode 0 /
-        // zero residual) has no meaningful neighbourhood.
+        let mut scratch = FrameScratch::default();
+        // Where to centre the candidates. The open-loop estimate reads
+        // the frame gain off the residual level, but what the frame
+        // gain has to do is put every sub-frame's innovation gain
+        // within reach of the sub-frame correction grid. So a probe
+        // pass codes the frame with unquantised innovation gains, and
+        // the frame level whose grid then quantises those gains with
+        // the least (shape-energy-weighted) error becomes the centre.
+        let mut centre = estimate;
+        if let (Some(_), Some(_), Idx::Indexed(_), true) =
+            (dec_lpcs, codebook, estimate, self.effort.gain_probe)
+        {
+            scratch.probe = true;
+            scratch.ideal = Some([(0.0, 0.0); SUBFRAMES]);
+            let mut trial = self.clone();
+            trial.encode_subframes(
+                input,
+                lpc_sets,
+                dec_lpcs,
+                f64::from(reconstruct_frame_ol_exc_gain(estimate)),
+                codebook,
+                count,
+                stages,
+                plan,
+                submode,
+                &mut scratch,
+            );
+            scratch.probe = false;
+            let levels = correction_levels(submode.innovation_gain_bits);
+            let ideal = scratch.ideal.unwrap_or([(0.0, 0.0); SUBFRAMES]);
+            let mut best = (f64::INFINITY, 0u8);
+            for i in 0..=31u8 {
+                let g = f64::from(reconstruct_frame_ol_exc_gain(Idx::Indexed(i)));
+                let cost: f64 = ideal
+                    .iter()
+                    .map(|&(alpha, weight)| {
+                        weight
+                            * levels
+                                .iter()
+                                .map(|&c| (alpha - g * c).powi(2))
+                                .fold(f64::INFINITY, f64::min)
+                    })
+                    .sum();
+                if cost < best.0 {
+                    best = (cost, i);
+                }
+            }
+            centre = Idx::Indexed(best.1);
+        }
+
+        // Candidate set: the centre plus its quantiser neighbours
+        // (clamped to the 5-bit grid). Silence (mode 0 / zero residual)
+        // has no meaningful neighbourhood.
         let span = i32::from(if dec_lpcs.is_some() {
             self.effort.gain_span
         } else {
             1
         });
-        let mut candidates: Vec<Idx> = Vec::with_capacity(5);
-        match estimate {
+        let mut candidates: Vec<Idx> = Vec::with_capacity(6);
+        match centre {
             Idx::Silence => candidates.push(Idx::Silence),
             Idx::Indexed(i) => {
                 for d in -span..=span {
@@ -864,9 +925,14 @@ impl NarrowbandEncoder {
                 }
             }
         }
+        // The probe's least-squares gains shrink where the codebook
+        // matches the target poorly, so the open-loop estimate stays in
+        // the running.
+        if !candidates.contains(&estimate) {
+            candidates.push(estimate);
+        }
 
         let mut best: Option<(f64, Idx, [NarrowbandSubFrameIndices; SUBFRAMES], Self)> = None;
-        let mut scratch = FrameScratch::default();
         for cand in candidates {
             let g = f64::from(reconstruct_frame_ol_exc_gain(cand));
             let mut trial = self.clone();
@@ -1138,6 +1204,8 @@ impl NarrowbandEncoder {
             scaled: fg,
             energy,
             centre,
+            probe,
+            ideal,
         } = scratch;
         let tabs =
             tables[sf].get_or_insert_with(|| SubframeTables::build(a, weights.as_ref(), codebook));
@@ -1371,6 +1439,7 @@ impl NarrowbandEncoder {
         let w2 = f64::from(crate::innovation::NB_MODE7_STAGE2_WEIGHT);
         let survivors = usize::from(effort.innovation_paths.max(1));
         let mut chosen: Option<(f64, u16, u8, (u8, u128), [f64; N], [f64; N])> = None;
+        let mut chosen_probe = (0.0f64, 0.0f64);
         for (_, period, pg_idx, pitch) in cands {
             let yp = filt(&pitch);
             let mut t2 = [0.0f64; N];
@@ -1380,6 +1449,7 @@ impl NarrowbandEncoder {
             let mut fields = (0u8, 0u128);
             let mut innov = [0.0f64; N];
             let mut resid = dot(&t2, &t2);
+            let mut probed = (0.0f64, 0.0f64);
             if let Some(cb) = codebook {
                 let sv_len = cb.sub_vector_len();
                 let bits = u32::from(cb.index_bits());
@@ -1483,15 +1553,56 @@ impl NarrowbandEncoder {
                         .map(|(t, v)| (t - g * v).powi(2))
                         .sum::<f64>()
                 };
-                // Pass 1 at the frame gain, pass 2 at the quantised gain
-                // the first shape asked for; keep the better of the two.
-                // (A second pass at an unchanged gain repeats the first.)
-                let (p1, s1) = run(g_frame.max(1e-6));
-                let c1 = quantise(&s1);
-                let g1 = g_frame * f64::from(reconstruct_subframe_gain_correction(c1));
-                let e1 = score(&s1, g1);
-                let (packed, shape, corr, g, e) =
-                    if effort.gain_passes < 2 || g1.max(1e-6) == g_frame.max(1e-6) {
+                // The least-squares gain of a shape and the energy of
+                // its synthesis response.
+                let fit = |shape: &[f64; N]| -> (f64, f64) {
+                    let y = filt(shape);
+                    let yy = dot(&y, &y);
+                    ((dot(&t2, &y) / yy.max(1e-9)).max(0.0), yy)
+                };
+                let (packed, shape, corr, g, e) = if *probe {
+                    // Probe: the shape for the frame gain, then the
+                    // shape for the gain that one asked for; both at
+                    // their unquantised least-squares gains.
+                    let (p1, s1) = run(g_frame.max(1e-6));
+                    let (a1, yy1) = fit(&s1);
+                    let e1 = score(&s1, a1);
+                    let (p2, s2) = run(a1.max(1e-6));
+                    let (a2, yy2) = fit(&s2);
+                    let e2 = score(&s2, a2);
+                    let absent =
+                        crate::fixed_codebook_gain::SubFrameInnovationGainCorrection::Absent;
+                    if e2 <= e1 {
+                        probed = (a2, yy2);
+                        (p2, s2, absent, a2, e2)
+                    } else {
+                        probed = (a1, yy1);
+                        (p1, s1, absent, a1, e1)
+                    }
+                } else {
+                    // Pass 1 at the frame gain times the correction the
+                    // probe's gain maps to (the bare frame gain without
+                    // a probe), pass 2 at the quantised gain the first
+                    // shape asked for; keep the better of the two. (A
+                    // second pass at an unchanged gain repeats the first.)
+                    let g0 = match ideal.as_ref() {
+                        Some(hint) if g_frame > 0.0 => {
+                            let c = quantise_subframe_gain_correction(
+                                (hint[sf].0 / g_frame) as f32,
+                                submode.innovation_gain_bits,
+                            )
+                            .unwrap_or(
+                                crate::fixed_codebook_gain::SubFrameInnovationGainCorrection::Absent,
+                            );
+                            g_frame * f64::from(reconstruct_subframe_gain_correction(c))
+                        }
+                        _ => g_frame,
+                    };
+                    let (p1, s1) = run(g0.max(1e-6));
+                    let c1 = quantise(&s1);
+                    let g1 = g_frame * f64::from(reconstruct_subframe_gain_correction(c1));
+                    let e1 = score(&s1, g1);
+                    if effort.gain_passes < 2 || g1.max(1e-6) == g0.max(1e-6) {
                         (p1, s1, c1, g1, e1)
                     } else {
                         let (p2, s2) = run(g1.max(1e-6));
@@ -1503,7 +1614,8 @@ impl NarrowbandEncoder {
                         } else {
                             (p1, s1, c1, g1, e1)
                         }
-                    };
+                    }
+                };
                 fields = (correction_field(corr), packed);
                 for n in 0..N {
                     innov[n] = g * shape[n];
@@ -1512,7 +1624,11 @@ impl NarrowbandEncoder {
             }
             if chosen.as_ref().is_none_or(|c| resid < c.0) {
                 chosen = Some((resid, period, pg_idx, fields, pitch, innov));
+                chosen_probe = probed;
             }
+        }
+        if let (true, Some(ideal)) = (*probe, ideal.as_mut()) {
+            ideal[sf] = chosen_probe;
         }
         let (_, period, pg_idx, fields, pitch, innov) =
             chosen.expect("at least one adaptive candidate");
@@ -1787,6 +1903,19 @@ fn frame_gain_field(idx: crate::fixed_codebook_gain::FrameInnovationGainIndex) -
     match idx {
         crate::fixed_codebook_gain::FrameInnovationGainIndex::Silence => 0,
         crate::fixed_codebook_gain::FrameInnovationGainIndex::Indexed(i) => i,
+    }
+}
+
+/// The reconstruction levels of the sub-frame innovation-gain correction
+/// for a field of `bits` bits (a single unit level when the mode
+/// carries no field).
+fn correction_levels(bits: u8) -> Vec<f64> {
+    use crate::fixed_codebook_gain::SubFrameInnovationGainCorrection as C;
+    let level = |c: C| f64::from(reconstruct_subframe_gain_correction(c));
+    match bits {
+        1 => (0..2).map(|i| level(C::OneBit(i))).collect(),
+        3 => (0..8).map(|i| level(C::ThreeBit(i))).collect(),
+        _ => vec![level(C::Absent)],
     }
 }
 

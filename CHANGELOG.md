@@ -31,6 +31,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   SNR 16.15 → 17.04 dB, segmental SNR 18.34 → 20.36 dB, noise-weighted
   segmental SNR 13.02 → 16.54 dB. `set_noise_weighting(None)` restores
   the plain search.
+- **The frame gain is centred by a probe pass.** The open-loop
+  estimate reads the 5-bit frame gain off the residual level, but its
+  job is to put every sub-frame's innovation gain within reach of the
+  sub-frame correction grid; one step off and a 1- or 0-bit correction
+  cannot recover. A probe now codes the frame with unquantised
+  innovation gains, the frame level whose grid quantises those gains
+  with the least shape-energy-weighted error becomes the centre of the
+  closed-loop candidates, and the open-loop estimate stays in the
+  running. Each coded pass starts its shape search at the correction
+  the probe's gain maps to. 8 kHz speech-like material, mean over
+  qualities 1..=10, at the same search depth: SNR 14.25 → 14.79 dB,
+  segmental 16.20 → 17.27 dB, noise-weighted 12.87 → 13.76 dB.
+- **Default search depth**: complexity 3 now keeps 8 pitch lags, 3
+  innovation paths and 3 LSP candidates (the former complexity-5
+  depths); the ladder stays monotonic from 1 to 10. With it the default
+  matches or beats a black-box encoder at its own default on every
+  measure at 8 kHz and on segmental / weighted SNR at 16 and 32 kHz
+  (README, "Encoder quality").
 - **High-band gain and shape are searched together**: the 4-bit gain
   field of high-band modes 2 / 3 / 4 is chosen by analysis-by-synthesis
   among the energy rule's value and its neighbours (each with its own

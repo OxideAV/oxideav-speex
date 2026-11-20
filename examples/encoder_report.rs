@@ -120,8 +120,11 @@ fn run_reference(x: &[i16], rate: u32, quality: u8, dir: &std::path::Path) -> Op
         16_000 => "-w",
         _ => "-u",
     };
+    // (The black-box encoder's input high-pass is switched off: this
+    // crate's encoder has none, and a second high-pass in front of the
+    // decoder's own costs several dB on every waveform measure.)
     let ok = Command::new("speexenc")
-        .args([band, "--quality", &quality.to_string()])
+        .args([band, "--no-highpass", "--quality", &quality.to_string()])
         .arg(&wav)
         .arg(&spx)
         .output()
