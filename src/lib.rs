@@ -46,6 +46,21 @@
 //! [`SpeexStreamDecoder::decode_packet_stereo_i16`] returns interleaved
 //! L/R — the Speex in-band intensity-stereo extension.
 //!
+//! Beyond constant quality the encoder has the manual's rate modes and
+//! complexity setting:
+//!
+//! ```
+//! use oxideav_speex::SpeexStreamEncoder;
+//!
+//! let mut enc = SpeexStreamEncoder::new(16_000, 8).unwrap();
+//! enc.set_vbr(Some(7.5));      // variable bit-rate around quality 7.5 …
+//! enc.set_abr(Some(18_000));   // … or steered to an 18 kbit/s average
+//! enc.set_dtx(true);           // null frames over a steady background
+//! enc.set_complexity(5);       // deeper searches, same bit-rate (1..=10)
+//! let header = enc.header();   // take it after configuring the rate mode
+//! # let _ = header;
+//! ```
+//!
 //! ## Framework API
 //!
 //! ```
@@ -68,17 +83,24 @@
 //!
 //! The encoder takes interleaved S16 frames of any length and re-blocks
 //! them into 20 ms packets; the decoder emits interleaved S16, one audio
-//! frame per packet. Options: encoder `quality` (0..=10, default 8),
-//! decoder `enhancer` (default on). Runnable versions of both paths are
-//! in `examples/roundtrip.rs` and `examples/registry.rs`.
+//! frame per packet. Encoder options: `quality` (0..=10, default 8),
+//! `complexity` (1..=10, default 3), `bitrate`, `vbr`, `vbr_quality`,
+//! `abr`, `vbr_max_bitrate`, `vad`, `dtx`, `noise_weighting`; decoder
+//! option: `enhancer` (default on). Runnable versions of both paths are
+//! in `examples/roundtrip.rs` and `examples/registry.rs`;
+//! `examples/encoder_report.rs` prints the encoder's quality and speed
+//! tables.
 //!
 //! ## Limits
 //!
 //! * The fixed-point decode build is not reproduced (the float decode is
 //!   within a few LSB of it).
-//! * The encoder's searches are its own analysis-by-synthesis without a
-//!   perceptual weighting filter: conformant, input-tracking streams,
-//!   not the reference encoder's exact bits.
+//! * The encoder's searches are its own analysis-by-synthesis (through
+//!   the manual's noise-weighting filter), and its rate decisions its
+//!   own rules: conformant streams, not the reference encoder's exact
+//!   bits.
+//! * The ultra-wideband second layer is the gain-only mode, as in the
+//!   RFC 5574 rate table.
 //! * Ogg encapsulation lives in the container layer (`oxideav-ogg`);
 //!   this crate handles the header and packets.
 

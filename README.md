@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/OxideAV/oxideav-speex/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-speex/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-speex.svg)](https://crates.io/crates/oxideav-speex) [![docs.rs](https://docs.rs/oxideav-speex/badge.svg)](https://docs.rs/oxideav-speex) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A pure-Rust Speex (CELP speech codec) decoder — plus functional
-narrowband, wideband and ultra-wideband encoders — for the
+A pure-Rust Speex (CELP speech codec) decoder and encoder — narrowband,
+wideband and ultra-wideband, constant / variable / average bit-rate,
+VAD and DTX, intensity stereo — for the
 [oxideav](https://github.com/OxideAV/oxideav) framework. Implemented
 from *The Speex Codec Manual*, RFC 5574, and the clean-room codebook
 material staged at
@@ -46,16 +47,19 @@ in the reference, and switchable (`set_enhancer`, the framework option
 `enhancer`, in-band code 0). All 152 enhancer blocks of the staged trace
 reproduce; the enhanced decode is within ±1 LSB everywhere.
 
-Both bands' encoders search by **analysis-by-synthesis** through a
-mirror of the decoder's own synthesis (r483). Encode → decode vs the
-input (`tests/encoder_fidelity_e2e.rs`, the registry factories end to
-end; the decode is the reference decoder's, so `speexdec --no-enh`
-gives the same figures): narrowband pitch-glide speech 15.5 / 21.1 /
-25.5 dB at q4 / q8 / q10 against the high-passed input (the reference
-encoder: 8.5 / 9.7 / 9.8 dB on the same metric), every quality 1..=10
-above the reference's; wideband 14.1 / 16.1 dB at q8 / q10 with the
-4–8 kHz band level within 0.1 dB; ultra-wideband quality 10
-(44 kbit/s) 13.8 dB below 7 kHz.
+The **encoder** covers the bit-stream the decoder accepts: every
+narrowband sub-mode with every high-band sub-mode, qualities 0..=10 in
+all three rate classes, variable and average bit-rate, voice-activity
+detection with comfort noise, discontinuous transmission, intensity
+stereo, in-band messages and a 1..=10 complexity setting. Its searches
+are analysis-by-synthesis through a mirror of the decoder, in the
+manual's noise-weighted domain; a black-box reference decoder turns
+its streams into the same PCM as this crate's own decoder to a few LSB.
+At the default complexity, in the mean over qualities 1..=10 on
+speech-like material, it leads a black-box encoder at the same quality
+on SNR, segmental SNR and noise-weighted SNR at 8 kHz and is level with
+it at 16 kHz; at 32 kHz segmental and weighted SNR are level and
+whole-signal SNR trails — see [Encoder](#encoder) for the measurements.
 
 What is implemented and tested:
 
@@ -515,22 +519,236 @@ mode-1 fixture.
   rejection is the conformant surface — that gap is closed as a
   negative result.
 
-* **Encoders — narrowband, wideband and ultra-wideband, all
-  qualities 0..=10** (rounds r372–r480). The full encode chains ship
-  as composable modules: LPC analysis → LPC→LSP → multi-stage LSP-VQ
-  (`lsp_quant` / `hb_lsp`), open-loop and analysis-by-synthesis pitch
-  search, innovation VQ search (single- and two-stage, both bands),
-  exact scalar gain quantisers, and the Table 9.1 / §10.4 frame
-  writers (`parse(write(body)) == body`). r480 fixed the LPC analysis
-  sign convention (the envelope never reached the LSP domain before,
-  so every encoder transmitted a flat envelope), the mode-7 frame-gain
-  estimate and the mode-1 vocoder gain, and moved every high-band gain
-  decision onto the Tracer round's exact rules. Functional, not
-  bit-exact: the searches are residual-domain and greedy (no
-  perceptual weighting), so the streams are conformant and
-  input-tracking (see Status) but not bit-stream twins of the
-  reference encoder; `encode_packet_dtx` (§2.1 DTX) runs behind an RMS
-  VAD.
+* **Encoders — narrowband, wideband and ultra-wideband** (rounds
+  r372–r491). The encode chains ship as composable modules: LPC
+  analysis → LPC→LSP → multi-stage LSP-VQ (`lsp_quant` / `hb_lsp`),
+  open-loop and analysis-by-synthesis pitch search, innovation VQ
+  search (single- and two-stage, both bands), exact scalar gain
+  quantisers, and the Table 9.1 / §10.4 frame writers
+  (`parse(write(body)) == body`). r480 fixed the LPC analysis sign
+  convention, the mode-7 frame-gain estimate and the mode-1 vocoder
+  gain, and moved the high-band gain decisions onto the Tracer round's
+  rules; r491 added the noise-weighted search, the probe-centred frame
+  gain, the rate modes and the complexity ladder described under
+  [Encoder](#encoder).
+
+## Encoder
+
+`SpeexStreamEncoder` (and the framework encoder built on it) takes
+20 ms frames at 8, 16 or 32 kHz and writes one packet per frame.
+
+| feature | API | what goes on the wire |
+| --- | --- | --- |
+| constant quality 0..=10 | `new(rate, q)`, `set_quality`, `set_bitrate` | the Table 9.2 / 10.2 / RFC 5574 Table 2 sub-mode ladder |
+| explicit sub-modes | `set_submodes(Some((nb, hb)))` | any narrowband mode 1..=8 with any high-band mode 0..=4 (1..=4 at 32 kHz; the 8–16 kHz layer is always the gain-only mode 1) |
+| variable bit-rate | `set_vbr(Some(q))`, `set_vbr_max_bitrate` | each frame picks its sub-modes around the float quality `q`: vowels keep it, onsets go above, unvoiced and quiet frames below, background becomes comfort noise |
+| average bit-rate | `set_abr(Some(bps))` | VBR with its quality steered by the accumulated bit surplus |
+| voice-activity detection | `set_vad(true)` | non-speech frames as comfort noise (narrowband mode 1) |
+| discontinuous transmission | `set_dtx(true)` | null frames (5 / 9 / 13 bits) while the background holds still |
+| intensity stereo | `new_stereo(rate, q)` | the `(L+R)/2` fold plus a code-9 message per frame |
+| in-band messages | `queue_inband`, `queue_user_data` | Table 5.1 requests (mode 14) and application payloads (mode 13) at the head of the next packet |
+| complexity 1..=10 | `set_complexity` | nothing — the same bit-rate, deeper searches |
+| search domain | `set_noise_weighting` | nothing — noise-weighted (default) or plain waveform error |
+
+The manual defines what VBR, ABR, VAD and DTX are and leaves every
+decision rule to the encoder; the rules used here are written out in
+`src/rate_control.rs`. Packets end with the RFC 5574 §3.3 padding, so
+a frame takes exactly `ceil(bits / 8)` octets.
+
+### How it searches
+
+Per frame: LPC analysis → LSP quantisation (error weighted by formant
+proximity) → per sub-frame, against the decoder's own synthesis filter
+and state, through the noise-weighting filter `W(z) = A(z/0.9)/A(z/0.6)`
+(manual §8.5): the adaptive codebook (every lag pre-scored by its
+centre tap, the best few searched over the whole 3-tap gain codebook),
+then the innovation sub-vectors (a few partial paths kept per
+sub-vector), then the sub-frame gain correction. The 5-bit frame gain
+is centred by a **probe pass** that codes the frame with unquantised
+innovation gains and picks the level whose correction grid quantises
+them best; its neighbours and the open-loop estimate are then coded
+for real and the lowest noise-weighted error wins. The high band picks
+each sub-frame's gain field and shape together the same way. Vocoder
+and null frames — whose excitation the decoder generates — are decoded
+on the spot and the encoder continues from the decoder's state, so the
+sub-mode may change on any frame.
+
+### Encoder quality
+
+`cargo run --release --example encoder_report -- --ref` reproduces
+these tables. Each figure is encode → decode against the input, with
+the enhancer off; the 8 kHz input is taken through the decoder's own
+output high-pass first, the one thing no conforming decode can undo.
+*Before* is the encoder of release 0.0.12, *after* this one at its
+default complexity, and the last column a black-box encoder at the
+same quality and its own default complexity, decoded by its black-box
+decoder (its input high-pass switched off, as this encoder has none —
+left on, it costs that encoder up to 12 dB on these waveform measures
+at 8 kHz, which is what earlier figures in this README compared
+against).
+Quality 0 is the noise-excited vocoder mode; waveform measures say
+little about it.
+
+**8 kHz, speech-like source** (SNR / segmental SNR / noise-weighted segmental SNR, dB)
+
+| q | kbit/s | before | after | black-box encoder |
+| --: | --: | --: | --: | --: |
+| 0 | 2.40 | -1.0 / -1.2 / -1.6 | -1.0 / -1.1 / -1.4 | -1.6 / -1.2 / -1.8 |
+| 1 | 4.00 | 6.1 / 6.4 / 3.5 | 7.0 / 7.5 / 5.2 | 7.0 / 7.3 / 5.0 |
+| 2 | 6.00 | 8.9 / 9.8 / 5.9 | 10.0 / 11.8 / 8.2 | 9.7 / 11.0 / 7.8 |
+| 3 | 8.00 | 11.9 / 13.5 / 8.7 | 13.1 / 15.9 / 12.3 | 12.4 / 14.2 / 11.1 |
+| 4 | 8.00 | 11.9 / 13.5 / 8.7 | 13.1 / 15.9 / 12.3 | 12.4 / 14.2 / 11.1 |
+| 5 | 11.20 | 14.2 / 15.9 / 10.7 | 15.5 / 18.7 / 14.7 | 15.3 / 18.2 / 14.4 |
+| 6 | 11.20 | 14.2 / 15.9 / 10.7 | 15.5 / 18.7 / 14.7 | 15.3 / 18.2 / 14.4 |
+| 7 | 15.20 | 16.1 / 18.3 / 13.0 | 17.5 / 21.7 / 17.8 | 17.6 / 21.6 / 17.5 |
+| 8 | 15.20 | 16.1 / 18.3 / 13.0 | 17.5 / 21.7 / 17.8 | 17.6 / 21.6 / 17.5 |
+| 9 | 18.40 | 17.5 / 19.7 / 14.3 | 19.4 / 23.3 / 19.2 | 19.7 / 24.3 / 19.9 |
+| 10 | 24.80 | 19.9 / 21.9 / 15.8 | 22.1 / 25.6 / 21.3 | 22.7 / 27.1 / 22.5 |
+
+**16 kHz, speech-like source** (SNR / segmental SNR / noise-weighted segmental SNR, dB)
+
+| q | kbit/s | before | after | black-box encoder |
+| --: | --: | --: | --: | --: |
+| 0 | 4.00 | -0.5 / -0.4 / -0.8 | -1.0 / -0.9 / -1.2 | -1.1 / -1.0 / -1.5 |
+| 1 | 6.00 | 5.0 / 6.3 / 4.1 | 5.5 / 7.2 / 5.5 | 5.8 / 7.7 / 5.5 |
+| 2 | 8.00 | 6.5 / 9.6 / 6.5 | 6.7 / 10.9 / 8.8 | 6.8 / 10.3 / 8.3 |
+| 3 | 10.00 | 7.0 / 11.1 / 8.2 | 7.0 / 11.9 / 10.2 | 7.1 / 11.1 / 9.2 |
+| 4 | 12.80 | 7.0 / 12.1 / 9.2 | 7.1 / 12.7 / 11.4 | 7.5 / 12.6 / 11.1 |
+| 5 | 16.80 | 7.1 / 12.7 / 10.3 | 7.3 / 13.1 / 12.2 | 7.7 / 13.2 / 12.1 |
+| 6 | 20.80 | 11.0 / 13.5 / 11.2 | 11.2 / 13.9 / 13.0 | 11.2 / 13.9 / 13.0 |
+| 7 | 24.00 | 11.2 / 13.7 / 11.6 | 11.3 / 14.1 / 13.3 | 11.4 / 14.2 / 13.6 |
+| 8 | 28.00 | 12.7 / 14.0 / 11.9 | 12.9 / 14.5 / 13.7 | 13.0 / 14.6 / 14.0 |
+| 9 | 34.40 | 12.8 / 14.4 / 12.2 | 13.1 / 14.7 / 14.1 | 13.1 / 14.8 / 14.3 |
+| 10 | 42.40 | 14.4 / 14.8 / 12.6 | 14.8 / 15.1 / 14.5 | 14.8 / 15.2 / 14.7 |
+
+**32 kHz, speech-like source** (SNR / segmental SNR / noise-weighted segmental SNR, dB)
+
+| q | kbit/s | before | after | black-box encoder |
+| --: | --: | --: | --: | --: |
+| 0 | 6.00 | -0.5 / -0.6 / -0.8 | -0.9 / -1.2 / -1.4 | -0.6 / -0.6 / -1.1 |
+| 1 | 7.60 | 4.8 / 6.3 / 4.3 | 4.9 / 6.8 / 5.2 | 6.0 / 7.5 / 5.1 |
+| 2 | 9.60 | 5.9 / 9.6 / 6.6 | 6.2 / 10.9 / 8.5 | 7.4 / 10.2 / 7.8 |
+| 3 | 11.60 | 6.2 / 11.0 / 7.6 | 6.3 / 12.0 / 9.5 | 7.7 / 11.1 / 8.7 |
+| 4 | 14.80 | 6.3 / 12.1 / 8.5 | 6.5 / 12.6 / 10.3 | 8.0 / 12.8 / 10.6 |
+| 5 | 18.80 | 6.4 / 12.4 / 9.2 | 6.4 / 13.0 / 11.0 | 8.1 / 13.3 / 11.7 |
+| 6 | 22.40 | 6.8 / 12.6 / 9.8 | 6.8 / 13.1 / 12.1 | 7.8 / 13.4 / 12.0 |
+| 7 | 25.60 | 6.8 / 12.8 / 10.2 | 6.8 / 13.3 / 12.4 | 7.9 / 13.6 / 12.8 |
+| 8 | 29.60 | 6.9 / 12.9 / 10.2 | 7.0 / 13.3 / 12.4 | 8.1 / 13.7 / 12.8 |
+| 9 | 36.00 | 7.0 / 13.1 / 10.3 | 7.0 / 13.5 / 12.7 | 8.1 / 13.7 / 13.1 |
+| 10 | 44.00 | 7.1 / 13.2 / 10.4 | 7.0 / 13.5 / 12.7 | 8.2 / 13.8 / 13.2 |
+
+**Mean over qualities 1..=10, every source**
+
+| source | before | after | black-box encoder |
+| --- | --: | --: | --: |
+| 8 kHz speech-like (6 s) | 13.70 / 15.32 / 10.43 | 15.07 / 18.08 / 14.38 | 14.96 / 17.78 / 14.12 |
+| 8 kHz pitch-glide fixture | 17.34 / 18.72 / 12.21 | 19.68 / 22.16 / 17.77 | 16.51 / 20.12 / 17.28 |
+| 16 kHz speech-like (6 s) | 9.47 / 12.22 / 9.79 | 9.69 / 12.80 / 11.68 | 9.84 / 12.77 / 11.57 |
+| 16 kHz pitch-glide fixture | 11.68 / 13.53 / 10.91 | 12.80 / 14.54 / 12.51 | 10.88 / 13.28 / 11.65 |
+| 16 kHz staged `hb-mode4-wb-q10` source | 1.61 / 5.70 / 3.93 | 1.84 / 5.95 / 4.86 | 2.13 / 6.09 / 4.93 |
+| 32 kHz speech-like (6 s) | 6.40 / 11.60 / 8.71 | 6.50 / 12.20 / 10.67 | 7.72 / 12.30 / 10.77 |
+| 32 kHz pitch-glide fixture | 6.95 / 7.38 / 5.76 | 7.48 / 7.89 / 6.32 | 6.63 / 7.30 / 6.01 |
+| 32 kHz staged `hb-mode4-uwb-q10` source | -1.45 / 4.63 / 3.46 | -1.42 / 4.78 / 3.97 | -0.15 / 5.28 / 4.72 |
+
+**Encode speed, × real time** (one core, median of three runs, speech-like source; before → after)
+
+| q | 8 kHz | 16 kHz | 32 kHz |
+| --: | --: | --: | --: |
+| 0 | 272 → 510 | 180 → 320 | 118 → 220 |
+| 1 | 36 → 134 | 35 → 118 | 31 → 97 |
+| 2 | 62 → 139 | 57 → 119 | 48 → 96 |
+| 3 | 20 → 75 | 20 → 71 | 19 → 62 |
+| 4 | 20 → 74 | 10 → 40 | 9 → 37 |
+| 5 | 9 → 41 | 14 → 41 | 14 → 38 |
+| 6 | 10 → 41 | 14 → 36 | 13 → 35 |
+| 7 | 14 → 40 | 5 → 17 | 5 → 17 |
+| 8 | 14 → 41 | 5 → 16 | 5 → 15 |
+| 9 | 6 → 18 | 8 → 22 | 8 → 21 |
+| 10 | 9 → 27 | 8 → 20 | 7 → 19 |
+
+Decode speed, × real time (median over qualities; the decoder is unchanged, the spread is the shared machine): 8 kHz 11412 → 13632, 16 kHz 2698 → 3126, 32 kHz 1073 → 1249.
+
+**Complexity** (speech-like source, mean over qualities 1..=10: SNR / segmental / weighted, and median encode speed)
+
+| complexity | 8 kHz | × | 16 kHz | × | 32 kHz | × |
+| --: | --: | --: | --: | --: | --: | --: |
+| 1 | 13.04 / 14.48 / 11.46 | 172 | 9.46 / 12.14 / 10.77 | 105 | 6.44 / 11.60 / 9.89 | 92 |
+| 2 | 14.58 / 17.19 / 13.62 | 92 | 9.59 / 12.66 / 11.43 | 71 | 6.50 / 12.05 / 10.42 | 63 |
+| 3 (default) | 15.07 / 18.08 / 14.38 | 41 | 9.69 / 12.80 / 11.68 | 38 | 6.50 / 12.20 / 10.67 | 36 |
+| 5 | 15.32 / 18.55 / 14.87 | 23 | 9.73 / 12.88 / 11.83 | 21 | 6.50 / 12.28 / 10.89 | 19 |
+| 8 | 15.54 / 18.96 / 15.26 | 9 | 9.77 / 12.94 / 11.95 | 8 | 6.53 / 12.34 / 10.96 | 8 |
+| 10 | 15.62 / 19.14 / 15.42 | 5 | 9.76 / 12.96 / 12.01 | 4 | 6.52 / 12.35 / 11.00 | 4 |
+
+At 8 kHz the default leads the black-box encoder on all three measures
+in the mean and through quality 6, is level with it at 7 and 8, and
+trails at 9 and 10 (0.3–0.6 dB SNR, 1.0–1.5 dB segmental) — complexity
+8 closes most of that. At 16 kHz the two are level. At 32 kHz
+segmental and weighted SNR are level within 0.1 dB while whole-signal
+SNR trails by 1.2 dB on the speech-like source: the 8–16 kHz layer is gain-only, this encoder sets its gain to
+match the band's level, and a level-matched but uncorrelated band
+costs more waveform SNR than a quieter one would. On the two staged
+`hb-mode4` sources (wide-band test material with a strong high band)
+the same effect leaves the black-box encoder ahead in the mean.
+
+Interoperability, measured by `tests/encoder_blackbox.rs` and the
+report's cross-decode: a black-box reference decoder decodes every
+quality in every rate class, every 16 kHz sub-mode pair, VBR, ABR, VAD,
+DTX, stereo and in-band-message streams without a diagnostic, and its
+PCM equals this crate's own decode within ±33 LSB on everything
+measured (±8 on the speech-like source) — so the encoder's decoder
+mirror is the decoder. A second black-box decoder decodes all of them
+without a diagnostic.
+
+**Rate modes** (8 s of speech-like material with pauses, quality 8
+where one is set; coded bits only)
+
+| mode | 8 kHz kbit/s | 16 kHz kbit/s | 32 kHz kbit/s |
+| --- | --: | --: | --: |
+| constant quality 8 | 15.00 | 27.80 | 29.60 |
+| + VAD | 13.88 | 25.89 | 27.51 |
+| + VAD + DTX | 13.75 | 25.69 | 27.18 |
+| VBR 4 | 6.85 | 10.76 | 12.63 |
+| VBR 6 | 9.38 | 16.91 | 18.74 |
+| VBR 8 | 12.78 | 23.53 | 25.42 |
+| VBR 10, 12 kbit/s frame ceiling | 10.23 | 9.33 | 11.09 |
+| ABR 8 kbit/s | 7.89 | 8.07 | 8.09 |
+| ABR 12 kbit/s | 12.31 | 11.86 | 12.12 |
+| ABR 20 kbit/s | 19.61 | 19.99 | 20.30 |
+
+VBR 8 codes this material's speech at a segmental SNR within 0.5 dB of
+constant quality 8 for 15 % fewer bits.
+
+### Open questions
+
+Measured on this crate's streams; each is a point where the staged
+material stops.
+
+* **Application payloads (mode 13).** `queue_user_data` writes the
+  layout manual §5.5 states (a 5-bit size in bytes, then the bytes),
+  and this crate's decoder reads it. A black-box reference decoder
+  does not skip such a message correctly — the frames behind it are
+  lost — so the layout it expects differs from the manual's sentence.
+  Table 5.1 in-band messages are unaffected.
+* **A silent first high band under a coded second layer** (32 kHz,
+  high-band mode 0 with a narrowband frame): a black-box reference
+  decoder outputs silence for such frames, this crate's decoder does
+  not. `set_submodes` refuses the combination; DTX's all-null frames
+  are fine.
+* **Excitation memory after null frames.** After a run of null frames
+  the two decoders' following frames differ by up to a few hundred LSB
+  for about a second, then converge: the adaptive-codebook
+  memory a null frame leaves behind is not pinned sample-exactly.
+* **Overload.** Where the decoded signal exceeds 16 bits the two
+  decoders saturate at different points of the chain and diverge
+  around the clipped peaks.
+* **Analysis look-ahead.** The staged 200-sample analysis window peaks
+  at its sample 120; laid over the coded frame plus the 40 samples
+  after it, that is the manual's window "centered on the fourth
+  sub-frame" and its 30 ms delay. This encoder lays it over the 40
+  samples before the frame and the frame, i.e. without look-ahead.
+  Moving it measured +0.15…0.3 dB SNR on the speech-like source and
+  −0.2 dB segmental on the pitch-glide fixture, for 5 ms more delay;
+  it is not adopted.
 
 ## Not yet supported
 
@@ -543,9 +761,14 @@ mode-1 fixture.
   reproduced (the float decode is within a few LSB of them).
 * **Short pitch lags T ∈ {17, 18, 19}**: the sub-frame tail past `2T`
   carries unpinned reference content (`nb-pitch-short-lag.md` §2.4).
-* **Encoder reference-equivalence.** The high-band gain decisions are
-  the reference's; the searches are this crate's own waveform
-  analysis-by-synthesis, with no perceptual weighting filter.
+* **Encoder reference-equivalence.** The searches and the rate
+  decisions are this crate's own (see [Encoder](#encoder)); streams
+  are conformant, not bit-stream twins of the reference encoder's.
+* **Second-layer excitation VQ at 32 kHz.** The 8–16 kHz layer is the
+  gain-only mode 1 of the RFC 5574 rate table; the excitation-VQ
+  columns there are rejected by the reference decoder itself.
+* **Several frames per packet** from `SpeexStreamEncoder` (the
+  per-band encoders' `encode_packet` / `encode_frame_into` do it).
 
 ## Usage
 
@@ -589,6 +812,21 @@ frames (`2 × frame_samples()` samples) and
 `SpeexStreamDecoder::set_enhancer(false)` turns the perceptual enhancer
 off (on by default).
 
+Rate modes and complexity are setters on the same encoder; take the
+header after configuring them (it records the nominal bit-rate and the
+VBR flag):
+
+```rust
+let mut enc = SpeexStreamEncoder::new(16_000, 8)?;
+enc.set_vbr(Some(7.5));            // variable bit-rate around quality 7.5
+// enc.set_abr(Some(18_000));      // …or an 18 kbit/s average
+enc.set_dtx(true);                 // null frames over a steady background
+enc.set_complexity(5);             // 1..=10, default 3
+let header = enc.header().write_bytes();
+let packet = enc.encode_frame(&frame)?;
+let spent = enc.last_frame_bits(); // and enc.last_submodes()
+```
+
 ### Framework API
 
 ```rust
@@ -611,8 +849,11 @@ into 20 ms packets and publishes the 80-byte stream header as
 `output_params().extradata`. The decoder takes that header as
 `extradata`, a bare `sample_rate`, or in-band (the Ogg header + comment
 packets are consumed), and emits interleaved S16, one audio frame per
-packet. Options: encoder `quality` (0..=10, default 8), decoder
-`enhancer` (default on). The codec claims the Ogg payload magic
+packet. Encoder options: `quality` (0..=10, default 8), `complexity`
+(1..=10, default 3), `bitrate` (highest quality at or below it), `vbr`,
+`vbr_quality`, `abr`, `vbr_max_bitrate`, `vad`, `dtx`,
+`noise_weighting` (default on). Decoder option: `enhancer` (default
+on). The codec claims the Ogg payload magic
 `Speex   `, so an `oxideav-ogg` demuxer routes `.spx` streams to it.
 
 ### Examples
@@ -620,6 +861,7 @@ packet. Options: encoder `quality` (0..=10, default 8), decoder
 ```sh
 cargo run --example roundtrip -- 32000 10 1   # RATE QUALITY CHANNELS, direct API
 cargo run --example registry                  # Encoder/Decoder traits via the registry
+cargo run --release --example encoder_report -- --ref   # quality / speed tables
 ```
 
 ## License

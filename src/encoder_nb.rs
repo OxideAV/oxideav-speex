@@ -75,7 +75,6 @@ use crate::narrowband_body::{
     NarrowbandFrameBody, NarrowbandSubFrameIndices, PITCH_PERIOD_MAX, PITCH_PERIOD_MIN,
 };
 use crate::nb_encode::encode_narrowband_frame;
-use crate::ol_pitch::estimate_open_loop_pitch;
 use crate::pitch_gain;
 use crate::submode::{LspQuant, NarrowbandSubmode, PitchGainQuant};
 
@@ -86,6 +85,12 @@ pub const NB_FRAME_SAMPLES: usize = SUBFRAMES * SUBFRAME_SAMPLES;
 /// Analysis look-back: the 200-sample window is the previous 40 input
 /// samples followed by the current 160.
 const ANALYSIS_LOOKBACK: usize = 40;
+/// The shortest pitch lag the encoder transmits. Lags 17..=19 are
+/// legal on the wire, but a sub-frame's tail beyond two periods of
+/// such a lag is content decoders are not known to agree on
+/// (`nb-pitch-short-lag.md` §2.4), so the searches leave them out —
+/// every stream then means the same thing to every decoder.
+const SHORTEST_SEARCHED_LAG: u16 = 20;
 /// Length of the retained excitation history (>= PITCH_PERIOD_MAX).
 const EXC_HIST_LEN: usize = PITCH_PERIOD_MAX as usize + SUBFRAME_SAMPLES;
 
@@ -664,7 +669,12 @@ impl NarrowbandEncoder {
         } else {
             &self.exc_hist
         };
-        let ol = estimate_open_loop_pitch(hist, residual);
+        let ol = crate::ol_pitch::estimate_open_loop_pitch_range(
+            hist,
+            residual,
+            SHORTEST_SEARCHED_LAG,
+            PITCH_PERIOD_MAX,
+        );
         let (gain_quant, forced_taps) = if submode.ol_pitch_gain_bits > 0 {
             let q = forced_gain_quant(hist, residual, ol.period);
             (q, Some(crate::forced_pitch_gain::forced_pitch_gain_taps(q)))
@@ -1339,7 +1349,8 @@ impl NarrowbandEncoder {
                         // Pre-select by the centre tap's normalised
                         // synthesis-domain correlation, then search the
                         // gain VQ exhaustively on the best few.
-                        let mut scored: Vec<(f64, u16)> = (PITCH_PERIOD_MIN..=PITCH_PERIOD_MAX)
+                        let mut scored: Vec<(f64, u16)> = (SHORTEST_SEARCHED_LAG
+                            ..=PITCH_PERIOD_MAX)
                             .map(|t| {
                                 let ti = usize::from(t);
                                 let y = if ti >= FIRST {

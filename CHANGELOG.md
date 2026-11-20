@@ -22,6 +22,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The encoder searches no pitch lag below 20: the tail of a sub-frame
+  beyond two periods of a lag of 17..=19 is content decoders are not
+  known to agree on (`nb-pitch-short-lag.md` §2.4), and leaving those
+  lags out costs nothing measurable.
+- README: an "Encoder" section with the feature table, before → after
+  quality and speed tables against a black-box encoder, the complexity
+  ladder, the rate modes and the open interoperability questions. The
+  earlier README figures for the reference encoder were taken with its
+  input high-pass on, which costs it up to 12 dB on waveform measures;
+  the new tables switch it off.
 - **The narrowband search runs in the manual's noise-weighted domain by
   default** (`W(z) = A(z/0.9)/A(z/0.6)`, manual §8.5 Eq. 8.1, on the
   decoder's quantised LPC, with the weighting memory carried over the
@@ -45,10 +55,12 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   segmental 16.20 → 17.27 dB, noise-weighted 12.87 → 13.76 dB.
 - **Default search depth**: complexity 3 now keeps 8 pitch lags, 3
   innovation paths and 3 LSP candidates (the former complexity-5
-  depths); the ladder stays monotonic from 1 to 10. With it the default
-  matches or beats a black-box encoder at its own default on every
-  measure at 8 kHz and on segmental / weighted SNR at 16 and 32 kHz
-  (README, "Encoder quality").
+  depths); the ladder stays monotonic from 1 to 10. With it, in the
+  mean over qualities 1..=10 on speech-like material, the default
+  leads a black-box encoder at its own default on SNR, segmental SNR
+  and noise-weighted SNR at 8 kHz, is level with it at 16 kHz, and is
+  level on segmental / weighted SNR at 32 kHz (README, "Encoder
+  quality").
 - **High-band gain and shape are searched together**: the 4-bit gain
   field of high-band modes 2 / 3 / 4 is chosen by analysis-by-synthesis
   among the energy rule's value and its neighbours (each with its own
